@@ -32,11 +32,31 @@ GOOD_COLOR = "#0ca30c"
 CRITICAL_COLOR = "#d03b3b"
 MUTED_COLOR = "#898781"
 
-# How many extra calendar days of price history to show before/after
-# the trade itself, so the chart has real context instead of just the
-# trade's own window (this matters a lot for same-day trades, which
-# would otherwise be a single candle).
-PADDING_DAYS = 15
+# Each moving average always gets the same color, regardless of which
+# combination is picked - so "the 50-period line" means the same color
+# every time you look at this page, not just relative to whatever else
+# happens to be selected.
+MA_COLORS = {20: "#2a78d6", 50: "#1baf7a", 200: "#eda100"}
+
+# Timeframes offered, and how much extra calendar-day "padding" to
+# fetch before/after the trade at each one - a coarser timeframe needs
+# much more padding to show a meaningful number of bars around the
+# trade (15 days of padding is plenty zoomed into daily candles, but
+# would barely show 2 extra candles on a monthly chart).
+TIMEFRAMES = {
+    "Hourly": ("1h", 5),
+    "Daily": ("1d", 15),
+    "Weekly": ("1wk", 60),
+    "Monthly": ("1mo", 365),
+}
+
+# How many extra calendar days of history to fetch BEFORE the visible
+# window, per moving-average period, so the longest selected average
+# already has a full window of real data by the time the chart starts
+# (otherwise its line would only "warm up" partway through the chart).
+# Rough calendar-days-per-bar for each timeframe, with some buffer for
+# weekends/holidays/off-hours.
+LOOKBACK_DAYS_PER_PERIOD = {"1h": 0.25, "1d": 1.6, "1wk": 8, "1mo": 32}
 
 st.set_page_config(page_title="Trade Analyzer", layout="wide")
 
@@ -98,11 +118,39 @@ fact_tile(cols[4], "% Change", f"{pct_change:,.2f}%", outcome_color)
 
 st.divider()
 
-start = trade["entry_date"] - timedelta(days=PADDING_DAYS)
-end = trade["date"] + timedelta(days=PADDING_DAYS)
+control_cols = st.columns([1, 2])
+timeframe_label = control_cols[0].radio("Timeframe", options=list(TIMEFRAMES.keys()), index=1, horizontal=True)
+ma_periods = control_cols[1].multiselect(
+    "Moving Averages", options=[20, 50, 200], format_func=lambda p: f"{p}-period MA",
+)
+interval, padding_days = TIMEFRAMES[timeframe_label]
 
-with st.spinner(f"Fetching price history for {trade['symbol']}..."):
-    history = yf.Ticker(trade["symbol"]).history(start=start, end=end, interval="1d")
+display_start = trade["entry_date"] - timedelta(days=padding_days)
+display_end = trade["date"] + timedelta(days=padding_days)
+
+# Fetch extra history before display_start so the longest selected
+# moving average already has a real window of data at the left edge
+# of the chart, instead of only "warming up" partway through it.
+max_ma_period = max(ma_periods, default=0)
+lookback_days = max_ma_period * LOOKBACK_DAYS_PER_PERIOD[interval]
+fetch_start = display_start - timedelta(days=lookback_days)
+
+with st.spinner(f"Fetching {timeframe_label.lower()} price history for {trade['symbol']}..."):
+    history = yf.Ticker(trade["symbol"]).history(start=fetch_start, end=display_end, interval=interval)
+
+if not history.empty:
+    # yfinance returns timezone-aware dates; the trade dates from the
+    # database are plain (timezone-less), so this lines them up on the
+    # same chart.
+    history.index = history.index.tz_localize(None)
+
+    for period in ma_periods:
+        history[f"MA{period}"] = history["Close"].rolling(period).mean()
+
+    # Now that the moving averages are computed (using the extra
+    # lookback), trim back down to just the window we actually want to
+    # show on the chart.
+    history = history[history.index >= display_start]
 
 if history.empty:
     st.warning(
@@ -111,18 +159,23 @@ if history.empty:
     )
     st.stop()
 
-# yfinance returns timezone-aware dates; the trade dates from the
-# database are plain (timezone-less), so this lines them up on the
-# same chart.
-history.index = history.index.tz_localize(None)
-
 fig = go.Figure()
 fig.add_trace(go.Candlestick(
     x=history.index,
     open=history["Open"], high=history["High"],
     low=history["Low"], close=history["Close"],
     name=trade["symbol"],
+    showlegend=False,
 ))
+for period in ma_periods:
+    fig.add_trace(go.Scatter(
+        x=history.index,
+        y=history[f"MA{period}"],
+        mode="lines",
+        line=dict(color=MA_COLORS[period], width=1.5),
+        name=f"{period}-period MA",
+        hovertemplate="%{x|%b %d, %Y}: $%{y:,.2f}<extra></extra>",
+    ))
 fig.add_trace(go.Scatter(
     x=[trade["entry_date"], trade["date"]],
     y=[trade["buy_price"], trade["sell_price"]],
@@ -130,6 +183,7 @@ fig.add_trace(go.Scatter(
     line=dict(color=outcome_color, width=2, dash="dot"),
     marker=dict(size=14, symbol=["triangle-up", "triangle-down"], color=outcome_color),
     name="Entry / Exit",
+    showlegend=False,
     hovertemplate="%{x|%b %d, %Y}: $%{y:,.2f}<extra></extra>",
 ))
 fig.update_layout(
@@ -139,6 +193,6 @@ fig.update_layout(
     yaxis_title="Price ($)",
     plot_bgcolor="#fcfcfb",
     paper_bgcolor="#fcfcfb",
-    showlegend=False,
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
 )
 st.plotly_chart(fig, use_container_width=True)
