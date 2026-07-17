@@ -1,0 +1,9 @@
+# Real trade data and secrets - never committed
+trading.db
+*.xlsx
+*.csv
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.pyc
