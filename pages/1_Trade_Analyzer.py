@@ -38,16 +38,17 @@ MUTED_COLOR = "#898781"
 # happens to be selected.
 MA_COLORS = {20: "#2a78d6", 50: "#1baf7a", 200: "#eda100"}
 
-# Timeframes offered, and how much extra calendar-day "padding" to
-# fetch before/after the trade at each one - a coarser timeframe needs
-# much more padding to show a meaningful number of bars around the
-# trade (15 days of padding is plenty zoomed into daily candles, but
-# would barely show 2 extra candles on a monthly chart).
+# Timeframes offered, and the default/min/max calendar-day "padding"
+# to fetch before/after the trade at each one (shown as an adjustable
+# slider below, not fixed) - a coarser timeframe needs much more
+# padding to show a meaningful number of bars around the trade (15
+# days of padding is plenty zoomed into daily candles, but would
+# barely show 2 extra candles on a monthly chart).
 TIMEFRAMES = {
-    "Hourly": ("1h", 5),
-    "Daily": ("1d", 15),
-    "Weekly": ("1wk", 60),
-    "Monthly": ("1mo", 365),
+    "Hourly": ("1h", 5, 1, 30),
+    "Daily": ("1d", 15, 5, 120),
+    "Weekly": ("1wk", 60, 15, 365),
+    "Monthly": ("1mo", 365, 90, 1825),
 }
 
 # How many extra calendar days of history to fetch BEFORE the visible
@@ -118,12 +119,17 @@ fact_tile(cols[4], "% Change", f"{pct_change:,.2f}%", outcome_color)
 
 st.divider()
 
-control_cols = st.columns([1, 2])
-timeframe_label = control_cols[0].radio("Timeframe", options=list(TIMEFRAMES.keys()), index=1, horizontal=True)
-ma_periods = control_cols[1].multiselect(
+timeframe_label = st.radio("Timeframe", options=list(TIMEFRAMES.keys()), index=1, horizontal=True)
+interval, default_padding, min_padding, max_padding = TIMEFRAMES[timeframe_label]
+
+control_cols = st.columns(2)
+ma_periods = control_cols[0].multiselect(
     "Moving Averages", options=[20, 50, 200], format_func=lambda p: f"{p}-period MA",
 )
-interval, padding_days = TIMEFRAMES[timeframe_label]
+padding_days = control_cols[1].slider(
+    "Days of context before/after the trade",
+    min_value=min_padding, max_value=max_padding, value=default_padding,
+)
 
 display_start = trade["entry_date"] - timedelta(days=padding_days)
 display_end = trade["date"] + timedelta(days=padding_days)
