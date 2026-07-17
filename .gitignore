@@ -2,7 +2,8 @@
 trading.db
 *.xlsx
 *.csv
-.streamlit/secrets.toml
+.streamlit/*
+!.streamlit/secrets.toml.example
 
 # Python
 __pycache__/

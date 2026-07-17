@@ -19,17 +19,19 @@ browser - that's why nothing here is wrapped in a function that only
 runs once; it's meant to be re-run constantly.
 
 PASSWORD PROTECTION: since this page can be reached over the internet
-once deployed, check_password() below gates everything else behind a
-single shared password stored in st.secrets["DASHBOARD_PASSWORD"] -
-never written directly in this file. st.session_state remembers a
-correct password for the rest of your browser session, so it only
-asks once, not on every filter change.
+once deployed, auth.check_password() (shared with every other page in
+pages/, so they're all gated the same way) blocks everything else
+behind a single shared password stored in
+st.secrets["DASHBOARD_PASSWORD"] - never written directly in any file.
+st.session_state remembers a correct password for the rest of your
+browser session, so it only asks once, not on every filter change.
 """
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+import auth
 import database
 
 # These colors come from this project's data-visualization guidelines,
@@ -43,31 +45,7 @@ BASELINE_COLOR = "#c3c2b7"  # the zero-line on charts
 
 st.set_page_config(page_title="Trading Journal", layout="wide")
 
-
-def check_password():
-    """
-    Shows a password box and returns True only once the right password
-    has been entered. The correct password lives in st.secrets (see
-    the module docstring) - it's never written in this file, so it's
-    never something Git/GitHub would ever see.
-    """
-    if st.session_state.get("authenticated"):
-        return True
-
-    st.title("Trading Journal Dashboard")
-    entered = st.text_input("Password", type="password")
-
-    if entered:
-        if entered == st.secrets.get("DASHBOARD_PASSWORD"):
-            st.session_state["authenticated"] = True
-            st.rerun()
-        else:
-            st.error("Incorrect password.")
-
-    return False
-
-
-if not check_password():
+if not auth.check_password():
     st.stop()
 
 st.title("Trading Journal Dashboard")
