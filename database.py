@@ -39,6 +39,12 @@ through quickly):
     journal + archived chart image behind the Shortlist and Logbook
     pages. See `upsert_logbook_entry()` below for how the "still being
     written today" and "archived overnight" cases share one row.
+
+  - `watchlist`: tickers you've manually added to track on the
+    Shortlist page, independent of whether you actually hold a
+    position in them. A ticker stays here (and keeps getting archived
+    every night) until you remove it - see `add_to_watchlist()` /
+    `remove_from_watchlist()` below.
 """
 
 import os
@@ -119,6 +125,13 @@ def init_db(conn):
             chart_image BYTEA,
             archived_at TIMESTAMP,
             UNIQUE (symbol, entry_date)
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS watchlist (
+            id SERIAL PRIMARY KEY,
+            symbol TEXT NOT NULL UNIQUE,
+            added_at TIMESTAMP NOT NULL DEFAULT NOW()
         )
     """)
     conn.commit()
@@ -356,3 +369,32 @@ def get_logbook_symbols(conn):
     cur = conn.cursor()
     cur.execute("SELECT DISTINCT symbol FROM logbook_entries ORDER BY symbol")
     return [row[0] for row in cur.fetchall()]
+
+
+def get_watchlist(conn):
+    """Returns every manually-tracked ticker, oldest added first."""
+    cur = conn.cursor()
+    cur.execute("SELECT symbol, added_at FROM watchlist ORDER BY added_at")
+    return [{"symbol": row[0], "added_at": row[1]} for row in cur.fetchall()]
+
+
+def add_to_watchlist(conn, symbol):
+    """Adds a ticker to the watchlist. Re-adding one already being tracked
+    is a harmless no-op - it doesn't reset its added_at date."""
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO watchlist (symbol) VALUES (%s) ON CONFLICT (symbol) DO NOTHING",
+        (symbol,),
+    )
+    conn.commit()
+
+
+def remove_from_watchlist(conn, symbol):
+    """
+    Removes a ticker from the watchlist - it stops being archived going
+    forward, but its existing logbook_entries history is untouched, same
+    as a closed trade's logbook staying permanently archived.
+    """
+    cur = conn.cursor()
+    cur.execute("DELETE FROM watchlist WHERE symbol = %s", (symbol,))
+    conn.commit()

@@ -101,6 +101,20 @@ def fetch_history(symbol, fetch_start, display_start, display_end, interval, ma_
     return history[history.index >= display_start]
 
 
+def price_near_date(history, target_date):
+    """
+    Returns the closing price on the first available trading day on or
+    after `target_date` (falling back to the last available close if
+    `target_date` is after every row in `history`). Used to place a
+    marker for a watchlist ticker, which has no real trade price of its
+    own to plot - just the date it was added to the list.
+    """
+    on_or_after = history[history.index >= target_date]
+    if not on_or_after.empty:
+        return on_or_after["Close"].iloc[0]
+    return history["Close"].iloc[-1]
+
+
 def render_settings_toolbar(container):
     """
     Renders the "Chart Settings" popover (chart type, colors, price scale,
@@ -162,12 +176,16 @@ def render_settings_toolbar(container):
     }
 
 
-def build_figure(symbol, history, entry_point, settings, overlay_history=None):
+def build_figure(symbol, history, entry_point, settings, overlay_history=None, entry_label="Entry"):
     """
     Builds the go.Figure for a price chart: candlestick or line, moving
     averages, an entry marker (plus an exit marker and connecting line if
     the trade is already closed), and an optional overlay ticker shown as
     % change. Returns the figure - callers render it with st.plotly_chart.
+
+    `entry_label` names that marker - "Entry" for a real trade (the
+    default), or something like "Added" for a watchlist ticker with no
+    actual trade behind it.
     """
     entry_date = entry_point["entry_date"]
     buy_price = entry_point["buy_price"]
@@ -233,7 +251,7 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None):
             fig.add_trace(go.Scatter(
                 x=[entry_date], y=[entry_pct], mode="markers",
                 marker=dict(size=14, symbol="triangle-up", color=outcome_color),
-                name="Entry", showlegend=False,
+                name=entry_label, showlegend=False,
                 hovertemplate="%{x|%b %d, %Y}: %{y:.2f}%<extra></extra>",
             ))
         yaxis_title = "% Change from start of chart"
@@ -278,7 +296,7 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None):
             fig.add_trace(go.Scatter(
                 x=[entry_date], y=[buy_price], mode="markers",
                 marker=dict(size=14, symbol="triangle-up", color=outcome_color),
-                name="Entry", showlegend=False,
+                name=entry_label, showlegend=False,
                 hovertemplate="%{x|%b %d, %Y}: $%{y:,.2f}<extra></extra>",
             ))
         yaxis_title = "Price ($)"
