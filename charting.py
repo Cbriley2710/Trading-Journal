@@ -606,6 +606,11 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
         paper_bgcolor=CHART_BACKGROUND,
         font=dict(color=CHART_TEXT_COLOR),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        # Without this, a click-drag (and on many browsers, a two-finger
+        # trackpad swipe) defaults to drawing a rectangular zoom-select
+        # box instead of panning - "pan" is what actually lets you slide
+        # back and forth through time.
+        dragmode="pan",
     )
     fig.update_xaxes(
         gridcolor=GRIDLINE_COLOR, showgrid=True, zeroline=False, rangeslider_visible=False,
@@ -678,12 +683,23 @@ _INTERACTIVE_CHART_HTML = """
     }
 
     Plotly.newPlot("__DIV_ID__", figure.data, figure.layout, config).then(function(gd) {
+        // Debounced: calling Plotly.relayout() synchronously on every
+        // single scroll-wheel tick fights with Plotly's own in-progress
+        // zoom/pan handling (a rapid sequence of scroll events each
+        // triggering another relayout mid-gesture), which is what made
+        // scrolling/panning feel stuck instead of smooth. Waiting for a
+        // brief pause in the events avoids interrupting the gesture.
+        var pending = null;
         gd.on("plotly_relayout", function(eventData) {
             if (eventData["xaxis.range[0]"] !== undefined && eventData["xaxis.range[1]"] !== undefined) {
                 var xmin = new Date(eventData["xaxis.range[0]"]).getTime();
                 var xmax = new Date(eventData["xaxis.range[1]"]).getTime();
-                fitYAxes(gd, xmin, xmax);
+                if (pending) clearTimeout(pending);
+                pending = setTimeout(function() {
+                    fitYAxes(gd, xmin, xmax);
+                }, 120);
             } else if (eventData["xaxis.autorange"]) {
+                if (pending) clearTimeout(pending);
                 var update = {"yaxis.autorange": true};
                 if (gd.layout.yaxis2) { update["yaxis2.autorange"] = true; }
                 Plotly.relayout(gd, update);
