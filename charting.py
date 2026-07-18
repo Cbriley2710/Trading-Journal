@@ -230,7 +230,7 @@ def build_ohlc_summary(history, symbol, interval_label):
     )
 
 
-def render_png(fig):
+def render_png(fig, width=1400, scale=2):
     """
     Renders a Plotly figure to PNG bytes via kaleido. Tries the plain,
     ordinary render first - on a machine that already has a working
@@ -249,9 +249,15 @@ def render_png(fig):
     even launch, on both Windows (a missing runtime dependency) and a
     Linux server (missing shared libraries a minimal container doesn't
     have) - two different failures with the same root cause.
+
+    `width` and `scale` are passed straight to kaleido: without them,
+    Plotly falls back to a bare 700px-wide render, which looks blurry
+    once Streamlit stretches it to fill a much wider page. `scale=2`
+    renders at double that pixel density (like a "retina" image) on
+    top of the wider width, so it stays sharp at typical page widths.
     """
     try:
-        return fig.to_image(format="png")
+        return fig.to_image(format="png", width=width, scale=scale)
     except Exception:
         import shutil
         import kaleido
@@ -262,35 +268,49 @@ def render_png(fig):
 
         fig_dict = fig.to_dict()
         return kaleido.calc_fig_sync(
-            fig_dict, opts={"format": "png"}, kopts={"path": chromium_path})
+            fig_dict, opts={"format": "png", "width": width, "scale": scale},
+            kopts={"path": chromium_path})
 
 
 def build_archive_snapshot(symbol, entry_date, buy_price, entry_label, as_of):
     """
     Builds the fixed-format chart image archived into a ticker's Logbook:
     always ARCHIVE_PADDING_TRADING_DAYS of history before `entry_date`
-    through `as_of`, with DEFAULT_SETTINGS - the same window/style no
-    matter when it's generated (a Save-button click during the day, or
-    the nightly fallback job), so entries are visually comparable day to
-    day rather than reflecting whatever the interactive chart happened
-    to be showing. Returns PNG bytes, or None if no price data was found.
+    through `as_of`, in the same dark DeepVue style no matter when it's
+    generated (a Save-button click during the day, or the nightly
+    fallback job), so entries are visually comparable day to day rather
+    than reflecting whatever the interactive chart happened to be
+    showing. The one thing NOT frozen to a default is moving averages -
+    those come from your saved Chart Settings (database.get_chart_
+    preferences()), the same ones the interactive chart shows, so an
+    archived snapshot never falls out of sync with what you've actually
+    configured. Returns PNG bytes, or None if no price data was found.
     """
+    conn = database.get_connection()
+    saved_prefs = database.get_chart_preferences(conn)
+    ma_periods = parse_ma_periods(saved_prefs["ma_text"])
+    ma_colors = {
+        period: saved_prefs["ma_colors"].get(str(period), CATEGORICAL_PALETTE[i % len(CATEGORICAL_PALETTE)])
+        for i, period in enumerate(ma_periods)
+    }
+    settings = {**DEFAULT_SETTINGS, "ma_periods": ma_periods, "ma_colors": ma_colors}
+
     padding_days = ARCHIVE_PADDING_TRADING_DAYS * LOOKBACK_DAYS_PER_PERIOD["1d"]
     display_start = entry_date - timedelta(days=padding_days)
     display_end = as_of + timedelta(days=1)
 
-    max_ma_period = max(DEFAULT_SETTINGS["ma_periods"], default=0)
+    max_ma_period = max(settings["ma_periods"], default=0)
     lookback_days = max_ma_period * LOOKBACK_DAYS_PER_PERIOD["1d"]
     fetch_start = display_start - timedelta(days=lookback_days)
 
-    history = fetch_history(symbol, fetch_start, display_start, display_end, "1d", DEFAULT_SETTINGS["ma_periods"])
+    history = fetch_history(symbol, fetch_start, display_start, display_end, "1d", settings["ma_periods"])
     if history.empty:
         return None
 
     entry_point = {"entry_date": entry_date, "buy_price": buy_price} if buy_price is not None \
         else {"entry_date": entry_date, "buy_price": price_near_date(history, entry_date)}
 
-    fig, _fit_payload = build_figure(symbol, history, entry_point, DEFAULT_SETTINGS, entry_label=entry_label)
+    fig, _fit_payload = build_figure(symbol, history, entry_point, settings, entry_label=entry_label)
     return render_png(fig)
 
 
