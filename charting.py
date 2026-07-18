@@ -109,14 +109,21 @@ DEFAULT_SETTINGS = {
     "overlay_color": None,
 }
 
-# The archived Logbook snapshot always shows this many TRADING days of
-# history before the entry/added date, regardless of when it's
-# generated (a Save-button click, or the nightly fallback job) - a
-# fixed window so entries are visually comparable day to day, not
-# whatever timeframe/padding the interactive chart happened to be set
-# to at that moment. Converted to calendar days using the same
-# trading-day ratio as LOOKBACK_DAYS_PER_PERIOD.
-ARCHIVE_PADDING_TRADING_DAYS = 180
+# The archived Logbook snapshot always shows this many of the most
+# recent TRADING days ending today, regardless of when it's generated
+# (a Save-button click, or the nightly fallback job) - a fixed window
+# so entries are visually comparable day to day, not whatever
+# timeframe/padding the interactive chart happened to be set to at that
+# moment. Converted to calendar days using the same trading-day ratio
+# as LOOKBACK_DAYS_PER_PERIOD.
+ARCHIVE_VISIBLE_TRADING_DAYS = 110
+
+# Extra blank space added after today's candle, as a fraction of
+# ARCHIVE_VISIBLE_TRADING_DAYS, so today sits at roughly 3/4 of the way
+# across the chart instead of jammed against the right edge. 1/3 of the
+# real candles gives about 25% extra blank width - e.g. 110 real candles
+# plus ~37 blank ones puts today at 110/147, about 75%.
+ARCHIVE_RIGHT_MARGIN_FRACTION = 1 / 3
 
 
 def parse_ma_periods(text):
@@ -275,16 +282,19 @@ def render_png(fig, width=1400, scale=2):
 def build_archive_snapshot(symbol, entry_date, buy_price, entry_label, as_of):
     """
     Builds the fixed-format chart image archived into a ticker's Logbook:
-    always ARCHIVE_PADDING_TRADING_DAYS of history before `entry_date`
-    through `as_of`, in the same dark DeepVue style no matter when it's
-    generated (a Save-button click during the day, or the nightly
-    fallback job), so entries are visually comparable day to day rather
-    than reflecting whatever the interactive chart happened to be
-    showing. The one thing NOT frozen to a default is moving averages -
-    those come from your saved Chart Settings (database.get_chart_
-    preferences()), the same ones the interactive chart shows, so an
-    archived snapshot never falls out of sync with what you've actually
-    configured. Returns PNG bytes, or None if no price data was found.
+    always the most recent ARCHIVE_VISIBLE_TRADING_DAYS ending at `as_of`,
+    in the same dark DeepVue style no matter when it's generated (a
+    Save-button click during the day, or the nightly fallback job), so
+    entries are visually comparable day to day rather than reflecting
+    whatever the interactive chart happened to be showing. A bit of
+    blank space is added after today's candle (ARCHIVE_RIGHT_MARGIN_
+    FRACTION) so it sits around 3/4 of the way across instead of jammed
+    against the right edge. The one thing NOT frozen to a default is
+    moving averages - those come from your saved Chart Settings
+    (database.get_chart_preferences()), the same ones the interactive
+    chart shows, so an archived snapshot never falls out of sync with
+    what you've actually configured. Returns PNG bytes, or None if no
+    price data was found.
     """
     conn = database.get_connection()
     saved_prefs = database.get_chart_preferences(conn)
@@ -295,8 +305,8 @@ def build_archive_snapshot(symbol, entry_date, buy_price, entry_label, as_of):
     }
     settings = {**DEFAULT_SETTINGS, "ma_periods": ma_periods, "ma_colors": ma_colors}
 
-    padding_days = ARCHIVE_PADDING_TRADING_DAYS * LOOKBACK_DAYS_PER_PERIOD["1d"]
-    display_start = entry_date - timedelta(days=padding_days)
+    visible_days = ARCHIVE_VISIBLE_TRADING_DAYS * LOOKBACK_DAYS_PER_PERIOD["1d"]
+    display_start = as_of - timedelta(days=visible_days)
     display_end = as_of + timedelta(days=1)
 
     max_ma_period = max(settings["ma_periods"], default=0)
@@ -310,7 +320,11 @@ def build_archive_snapshot(symbol, entry_date, buy_price, entry_label, as_of):
     entry_point = {"entry_date": entry_date, "buy_price": buy_price} if buy_price is not None \
         else {"entry_date": entry_date, "buy_price": price_near_date(history, entry_date)}
 
-    fig, _fit_payload = build_figure(symbol, history, entry_point, settings, entry_label=entry_label)
+    margin_days = visible_days * ARCHIVE_RIGHT_MARGIN_FRACTION
+    visible_range = (display_start, display_end + timedelta(days=margin_days))
+
+    fig, _fit_payload = build_figure(
+        symbol, history, entry_point, settings, entry_label=entry_label, visible_range=visible_range)
     return render_png(fig)
 
 
