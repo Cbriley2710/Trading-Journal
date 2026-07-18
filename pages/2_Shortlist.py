@@ -3,9 +3,12 @@ Shortlist
 =====================
 Two independent lists live on this page, both feeding the same daily
 routine: pick a ticker, review its chart, and write down your thoughts
-for today. Every night, an automated job (see nightly_archive.py)
-snapshots the chart and archives it together with whatever you wrote
-here into that ticker's permanent Logbook.
+for today. Clicking Save archives a chart snapshot (via
+charting.build_archive_snapshot() - a fixed 180-trading-day window, not
+whatever the interactive chart happens to be showing) together with
+your notes into that ticker's permanent Logbook, right away - no need
+to wait for anything. nightly_archive.py still runs as a fallback for
+any ticker you don't get around to saving on a given day.
 
   - Open Positions: derived automatically from your actual trades -
     see database.get_open_positions(). A position shows up here as
@@ -16,8 +19,8 @@ here into that ticker's permanent Logbook.
 
   - Watchlist: tickers you add by hand below, independent of whether
     you actually hold a position - see database.get_watchlist(). A
-    ticker stays here (and keeps getting archived every night) until
-    you remove it; removing it doesn't erase its Logbook history.
+    ticker stays here (and keeps getting archived) until you remove
+    it; removing it doesn't erase its Logbook history.
 """
 
 from datetime import date, datetime, timedelta
@@ -116,11 +119,18 @@ def render_chart_and_journal(symbol, entry_point, entry_label, key_prefix):
         height=150, key=f"{key_prefix}_notes")
 
     if st.button("Save", key=f"{key_prefix}_save"):
-        database.upsert_logbook_entry(conn, symbol, today, notes=notes)
-        st.success(
-            "Saved. Tonight's automated archive will attach a chart snapshot "
-            "to this entry in the Logbook."
-        )
+        with st.spinner("Saving and archiving today's chart..."):
+            png_bytes = charting.build_archive_snapshot(
+                symbol, entry_point["entry_date"], entry_point["buy_price"], entry_label,
+                datetime.combine(today, datetime.min.time()))
+        database.upsert_logbook_entry(conn, symbol, today, notes=notes, chart_image=png_bytes)
+        if png_bytes is not None:
+            st.success("Saved - today's chart has been archived to the Logbook.")
+        else:
+            st.warning(
+                "Notes saved, but no price data was found to archive a chart "
+                "image right now (tonight's fallback archive will try again)."
+            )
 
 
 def render_open_positions_section():

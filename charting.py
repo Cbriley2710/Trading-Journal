@@ -15,6 +15,8 @@ nightly archive script pass entry-only dicts (exit_date/sell_price = None),
 since those positions haven't been sold yet.
 """
 
+from datetime import timedelta
+
 import streamlit as st
 import yfinance as yf
 import plotly.graph_objects as go
@@ -66,6 +68,15 @@ DEFAULT_SETTINGS = {
     "overlay_color": None,
 }
 
+# The archived Logbook snapshot always shows this many TRADING days of
+# history before the entry/added date, regardless of when it's
+# generated (a Save-button click, or the nightly fallback job) - a
+# fixed window so entries are visually comparable day to day, not
+# whatever timeframe/padding the interactive chart happened to be set
+# to at that moment. Converted to calendar days using the same
+# trading-day ratio as LOOKBACK_DAYS_PER_PERIOD.
+ARCHIVE_PADDING_TRADING_DAYS = 180
+
 
 def parse_ma_periods(text):
     """Turns something like "20, 50, 200" into [20, 50, 200], ignoring
@@ -113,6 +124,61 @@ def price_near_date(history, target_date):
     if not on_or_after.empty:
         return on_or_after["Close"].iloc[0]
     return history["Close"].iloc[-1]
+
+
+def render_png(fig):
+    """
+    Renders a Plotly figure to PNG bytes via kaleido. Tries the plain,
+    ordinary render first - on a machine that already has a working
+    Chrome install (kaleido finds it automatically), that's all this
+    ever does. Only if that fails does it download its own Chrome (via
+    `choreographer`, the browser-automation library kaleido uses under
+    the hood) and retry once - needed on machines with no browser at
+    all (like Streamlit Community Cloud's servers).
+
+    This order matters: eagerly downloading a browser turned out to be
+    actively harmful during development - once downloaded, kaleido
+    preferred that copy over an already-working system Chrome, and the
+    downloaded build failed to run at all on this Windows machine
+    (likely a missing runtime dependency in that particular build).
+    Trying the working option first avoids ever touching the fallback
+    on a machine where it isn't needed.
+    """
+    try:
+        return fig.to_image(format="png")
+    except Exception:
+        from choreographer.cli._cli_utils import get_chrome_sync
+        get_chrome_sync()
+        return fig.to_image(format="png")
+
+
+def build_archive_snapshot(symbol, entry_date, buy_price, entry_label, as_of):
+    """
+    Builds the fixed-format chart image archived into a ticker's Logbook:
+    always ARCHIVE_PADDING_TRADING_DAYS of history before `entry_date`
+    through `as_of`, with DEFAULT_SETTINGS - the same window/style no
+    matter when it's generated (a Save-button click during the day, or
+    the nightly fallback job), so entries are visually comparable day to
+    day rather than reflecting whatever the interactive chart happened
+    to be showing. Returns PNG bytes, or None if no price data was found.
+    """
+    padding_days = ARCHIVE_PADDING_TRADING_DAYS * LOOKBACK_DAYS_PER_PERIOD["1d"]
+    display_start = entry_date - timedelta(days=padding_days)
+    display_end = as_of + timedelta(days=1)
+
+    max_ma_period = max(DEFAULT_SETTINGS["ma_periods"], default=0)
+    lookback_days = max_ma_period * LOOKBACK_DAYS_PER_PERIOD["1d"]
+    fetch_start = display_start - timedelta(days=lookback_days)
+
+    history = fetch_history(symbol, fetch_start, display_start, display_end, "1d", DEFAULT_SETTINGS["ma_periods"])
+    if history.empty:
+        return None
+
+    entry_point = {"entry_date": entry_date, "buy_price": buy_price} if buy_price is not None \
+        else {"entry_date": entry_date, "buy_price": price_near_date(history, entry_date)}
+
+    fig = build_figure(symbol, history, entry_point, DEFAULT_SETTINGS, entry_label=entry_label)
+    return render_png(fig)
 
 
 def render_settings_toolbar(container):
