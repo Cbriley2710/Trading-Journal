@@ -633,7 +633,7 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
 
     fig.update_layout(
         height=560 if show_volume else 500,
-        margin=dict(t=30, b=10, r=55),
+        margin=dict(t=30, b=35, r=55),
         yaxis_title=yaxis_title,
         yaxis_type="log" if (settings["price_scale"] == "Log" and not has_overlay) else "linear",
         plot_bgcolor=CHART_BACKGROUND,
@@ -664,6 +664,20 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
 
 
 _INTERACTIVE_CHART_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+    /* Without this reset, the browser's default body margin makes the
+       page a few pixels taller/wider than the iframe box around it,
+       which triggers unwanted scrollbars - and the horizontal one then
+       overlaps the bottom of the chart, right where the x-axis date
+       labels are. */
+    html, body { margin: 0; padding: 0; overflow: hidden; background: __CHART_BACKGROUND__; }
+</style>
+</head>
+<body>
 <div id="__DIV_ID__" style="width:100%;"></div>
 <script src="https://cdn.plot.ly/plotly-2.35.3.min.js"></script>
 <script>
@@ -742,6 +756,8 @@ _INTERACTIVE_CHART_HTML = """
     });
 })();
 </script>
+</body>
+</html>
 """
 
 
@@ -768,6 +784,7 @@ def render_interactive_chart(fig, fit_payload):
 
     html = (
         _INTERACTIVE_CHART_HTML
+        .replace("__CHART_BACKGROUND__", CHART_BACKGROUND)
         .replace("__DIV_ID__", div_id)
         .replace("__FIG_JSON__", fig.to_json())
         .replace("__FIT_JSON__", json.dumps(fit_payload))
