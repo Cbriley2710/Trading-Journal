@@ -203,6 +203,20 @@ def price_near_date(history, target_date):
     return history["Close"].iloc[-1]
 
 
+def fetch_latest_price(symbol):
+    """
+    Returns the most recent closing price for a symbol (a plain, current
+    "what's it worth right now" lookup - not a full history fetch), or
+    None if Yahoo Finance has no recent data for it. Used anywhere that
+    just needs today's price: the Shortlist page's unrealized P/L, and
+    the Open Positions page's equity/heat calculations.
+    """
+    recent = yf.Ticker(symbol).history(period="5d")
+    if recent.empty:
+        return None
+    return recent["Close"].iloc[-1]
+
+
 def build_ohlc_summary(history, symbol, interval_label):
     """
     A one-line OHLC summary shown above the chart, DeepVue-style, e.g.
@@ -328,12 +342,18 @@ def build_archive_snapshot(symbol, entry_date, buy_price, entry_label, as_of):
     return render_png(fig)
 
 
-def render_settings_toolbar(container):
+def render_settings_toolbar(container, key_prefix):
     """
     Renders the "Chart Settings" popover (chart type, colors, price scale,
     moving averages, overlay ticker) and returns a settings dict shaped
     like DEFAULT_SETTINGS above. Used by any page that wants the same
     interactive Chart Settings experience Trade Analyzer introduced.
+
+    `key_prefix` must be unique to the caller (e.g. "position", "watchlist",
+    "trade_analyzer") - Shortlist's Open Positions and Watchlist sections
+    each render their own copy of this toolbar on the same page, and
+    every widget needs a distinct key or Streamlit raises a
+    StreamlitDuplicateElementId error.
 
     Moving averages are the one setting that's saved permanently (see
     database.get_chart_preferences()/save_chart_preferences()) - typing
@@ -346,21 +366,26 @@ def render_settings_toolbar(container):
     saved_prefs = database.get_chart_preferences(conn)
 
     with container.popover("Chart Settings", use_container_width=True):
-        chart_type = st.radio("Chart Type", ["Candlestick", "Line"], horizontal=True)
-        price_scale = st.radio("Price Scale", ["Linear", "Log"], horizontal=True)
+        chart_type = st.radio(
+            "Chart Type", ["Candlestick", "Line"], horizontal=True, key=f"{key_prefix}_chart_type")
+        price_scale = st.radio(
+            "Price Scale", ["Linear", "Log"], horizontal=True, key=f"{key_prefix}_price_scale")
 
         if chart_type == "Candlestick":
             candle_cols = st.columns(2)
-            up_color = candle_cols[0].color_picker("Bullish candle", value=UP_CANDLE_COLOR)
-            down_color = candle_cols[1].color_picker("Bearish candle", value=DOWN_CANDLE_COLOR)
+            up_color = candle_cols[0].color_picker(
+                "Bullish candle", value=UP_CANDLE_COLOR, key=f"{key_prefix}_up_color")
+            down_color = candle_cols[1].color_picker(
+                "Bearish candle", value=DOWN_CANDLE_COLOR, key=f"{key_prefix}_down_color")
             line_color = None
         else:
             up_color = down_color = None
-            line_color = st.color_picker("Line color", value=CATEGORICAL_PALETTE[0])
+            line_color = st.color_picker(
+                "Line color", value=CATEGORICAL_PALETTE[0], key=f"{key_prefix}_line_color")
 
         ma_text = st.text_input(
             "Moving Averages (comma-separated periods)", value=saved_prefs["ma_text"],
-            placeholder="e.g. 9, 21, 50", key="ma_text_input",
+            placeholder="e.g. 9, 21, 50", key=f"{key_prefix}_ma_text_input",
         )
         ma_periods = parse_ma_periods(ma_text)
 
@@ -371,7 +396,7 @@ def render_settings_toolbar(container):
                 default_color = saved_prefs["ma_colors"].get(
                     str(period), CATEGORICAL_PALETTE[i % len(CATEGORICAL_PALETTE)])
                 ma_colors[period] = ma_color_cols[i].color_picker(
-                    f"{period}-period", value=default_color, key=f"ma_color_{period}",
+                    f"{period}-period", value=default_color, key=f"{key_prefix}_ma_color_{period}",
                 )
 
         current_colors = {str(period): color for period, color in ma_colors.items()}
@@ -380,10 +405,12 @@ def render_settings_toolbar(container):
 
         overlay_symbol = st.text_input(
             "Overlay Ticker (optional)", value="", placeholder="e.g. SPY, QQQ",
+            key=f"{key_prefix}_overlay_symbol",
         ).strip().upper()
         overlay_color = None
         if overlay_symbol:
-            overlay_color = st.color_picker("Overlay color", value=CATEGORICAL_PALETTE[4])
+            overlay_color = st.color_picker(
+                "Overlay color", value=CATEGORICAL_PALETTE[4], key=f"{key_prefix}_overlay_color")
             st.caption(
                 "With an overlay, both tickers are shown as % change from the "
                 "start of the chart, not raw price - comparing two different "

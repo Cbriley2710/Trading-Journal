@@ -99,7 +99,7 @@ timeframe_label = st.radio("Timeframe", options=list(charting.TIMEFRAMES.keys())
 interval, padding_days = charting.TIMEFRAMES[timeframe_label]
 
 control_cols = st.columns([4, 1])
-settings = charting.render_settings_toolbar(control_cols[1])
+settings = charting.render_settings_toolbar(control_cols[1], "trade_analyzer")
 control_cols[0].caption("Scroll on the chart to zoom in/out through time; drag or swipe to pan.")
 
 # The chart opens showing just this default window (visible_start to

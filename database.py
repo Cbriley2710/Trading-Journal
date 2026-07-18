@@ -148,6 +148,13 @@ def init_db(conn):
             CONSTRAINT single_row CHECK (id = 1)
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS position_stops (
+            symbol TEXT PRIMARY KEY,
+            stop_loss DOUBLE PRECISION NOT NULL,
+            updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+    """)
     conn.commit()
 
 
@@ -446,5 +453,41 @@ def save_chart_preferences(conn, ma_text, ma_colors):
             ma_colors = EXCLUDED.ma_colors
         """,
         (ma_text, Json({str(k): v for k, v in ma_colors.items()})),
+    )
+    conn.commit()
+
+
+def get_stop_loss(conn, symbol):
+    """Returns the saved stop-loss price for a symbol, or None if one
+    hasn't been set yet."""
+    cur = conn.cursor()
+    cur.execute("SELECT stop_loss FROM position_stops WHERE symbol = %s", (symbol,))
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def get_all_stop_losses(conn):
+    """Returns every saved stop-loss as {symbol: stop_loss} - used by the
+    Open Positions page to look them all up in one query instead of one
+    per position."""
+    cur = conn.cursor()
+    cur.execute("SELECT symbol, stop_loss FROM position_stops")
+    return {row[0]: row[1] for row in cur.fetchall()}
+
+
+def set_stop_loss(conn, symbol, stop_loss):
+    """Saves (or updates) the stop-loss price for a symbol - overwriting
+    whatever was saved before, since a stop is something you move over
+    the life of a trade (e.g. trailing it up as the position works)."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO position_stops (symbol, stop_loss, updated_at)
+        VALUES (%s, %s, NOW())
+        ON CONFLICT (symbol) DO UPDATE SET
+            stop_loss = EXCLUDED.stop_loss,
+            updated_at = NOW()
+        """,
+        (symbol, stop_loss),
     )
     conn.commit()

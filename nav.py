@@ -19,6 +19,7 @@ PAGES = [
     ("Import Trades", "pages/0_Import_Trades.py"),
     ("Trade Analyzer", "pages/1_Trade_Analyzer.py"),
     ("Shortlist", "pages/2_Shortlist.py"),
+    ("Open Positions", "pages/4_Open_Positions.py"),
     ("Logbook", "pages/3_Logbook.py"),
 ]
 

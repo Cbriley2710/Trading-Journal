@@ -26,7 +26,6 @@ any ticker you don't get around to saving on a given day.
 from datetime import date, datetime, timedelta
 
 import streamlit as st
-import yfinance as yf
 
 import auth
 import charting
@@ -70,7 +69,7 @@ def render_chart_and_journal(symbol, entry_point, entry_label, key_prefix):
     interval, padding_days = charting.TIMEFRAMES[timeframe_label]
 
     control_cols = st.columns([4, 1])
-    settings = charting.render_settings_toolbar(control_cols[1])
+    settings = charting.render_settings_toolbar(control_cols[1], key_prefix)
     control_cols[0].caption("Scroll on the chart to zoom in/out through time; drag or swipe to pan.")
 
     # The chart opens showing just this default window (visible_start
@@ -172,9 +171,8 @@ def render_open_positions_section():
     symbol = position["symbol"]
 
     with st.spinner(f"Fetching current price for {symbol}..."):
-        recent = yf.Ticker(symbol).history(period="5d")
+        current_price = charting.fetch_latest_price(symbol)
 
-    current_price = recent["Close"].iloc[-1] if not recent.empty else None
     unrealized_pl = None
     unrealized_color = None
     if current_price is not None:
@@ -188,6 +186,19 @@ def render_open_positions_section():
     fact_tile(cols[3], "Current Price", f"${current_price:,.2f}" if current_price is not None else "N/A")
     fact_tile(cols[4], "Unrealized P/L",
               f"${unrealized_pl:,.2f}" if unrealized_pl is not None else "N/A", unrealized_color)
+
+    # A stop-loss price isn't tracked anywhere else in the app - saving it
+    # here is what lets the Open Positions page compute "heat" (dollar
+    # risk from the current price down to this stop). You can come back
+    # and move it any time (e.g. trailing it up as the trade works).
+    saved_stop = database.get_stop_loss(conn, symbol)
+    new_stop = st.number_input(
+        "Stop Loss", min_value=0.0, value=saved_stop or 0.0, step=0.01, format="%.2f",
+        key="stop_loss_input",
+    )
+    if st.button("Save Stop Loss", key="stop_loss_save"):
+        database.set_stop_loss(conn, symbol, new_stop)
+        st.success(f"Stop loss for {symbol} saved at ${new_stop:,.2f}.")
 
     st.divider()
 
