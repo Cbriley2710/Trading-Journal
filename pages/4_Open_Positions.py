@@ -55,7 +55,7 @@ def style_bar_chart(fig, yaxis_title):
     charts rather than price charts)."""
     fig.update_layout(
         height=350,
-        margin=dict(t=10, b=10),
+        margin=dict(t=10, b=45),
         yaxis_title=yaxis_title,
         plot_bgcolor=charting.CHART_BACKGROUND,
         paper_bgcolor=charting.CHART_BACKGROUND,

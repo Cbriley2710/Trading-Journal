@@ -153,7 +153,7 @@ cum_chart.add_trace(go.Scatter(
 ))
 cum_chart.update_layout(
     height=350,
-    margin=dict(t=10, b=10),
+    margin=dict(t=10, b=45),
     xaxis_title=None,
     yaxis_title="Cumulative P/L ($)",
     plot_bgcolor=charting.CHART_BACKGROUND,
@@ -182,7 +182,7 @@ bar_chart.add_trace(go.Bar(
 ))
 bar_chart.update_layout(
     height=350,
-    margin=dict(t=10, b=10),
+    margin=dict(t=10, b=45),
     yaxis_title="Total P/L ($)",
     plot_bgcolor=charting.CHART_BACKGROUND,
     paper_bgcolor=charting.CHART_BACKGROUND,
