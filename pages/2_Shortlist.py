@@ -64,14 +64,11 @@ def render_chart_and_journal(symbol, entry_point, entry_label, key_prefix):
     timeframe_label = st.radio(
         "Timeframe", options=list(charting.TIMEFRAMES.keys()), index=1,
         horizontal=True, key=f"{key_prefix}_timeframe")
-    interval, default_padding, min_padding, max_padding = charting.TIMEFRAMES[timeframe_label]
+    interval, padding_days = charting.TIMEFRAMES[timeframe_label]
 
-    control_cols = st.columns([3, 1])
-    padding_days = control_cols[0].slider(
-        "Days of context before the entry",
-        min_value=min_padding, max_value=max_padding, value=default_padding,
-        key=f"{key_prefix}_padding")
+    control_cols = st.columns([4, 1])
     settings = charting.render_settings_toolbar(control_cols[1])
+    control_cols[0].caption("Scroll on the chart to zoom in/out through time; drag or swipe to pan.")
 
     display_start = entry_point["entry_date"] - timedelta(days=padding_days)
     display_end = datetime.combine(date.today(), datetime.min.time()) + timedelta(days=1)
@@ -109,7 +106,7 @@ def render_chart_and_journal(symbol, entry_point, entry_label, key_prefix):
 
     fig = charting.build_figure(
         symbol, history, entry_point, settings, overlay_history, entry_label=entry_label, interval=interval)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, config={"scrollZoom": True})
 
     st.subheader("Today's Journal")
     conn = database.get_connection()

@@ -30,6 +30,8 @@ import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+import database
+
 # These stay separate from the chart's own candle colors below - they're
 # used for *trade outcome* meaning elsewhere (win/loss stat tiles,
 # entry/exit markers), which is a different thing from which way one
@@ -66,14 +68,17 @@ CATEGORICAL_PALETTE = [
     "#9085e9", "#e66767", "#d55181", "#d95926",
 ]
 
-# Timeframes offered, and the default/min/max calendar-day "padding" to
-# fetch before/after the trade at each one - a coarser timeframe needs much
+# Timeframes offered, and a fixed calendar-day "padding" to fetch
+# before/after the trade at each one - a coarser timeframe needs much
 # more padding to show a meaningful number of bars around the trade.
+# There's no user-adjustable slider for this anymore - scroll-to-zoom on
+# the chart itself (see build_figure()'s fixedrange/rangebreaks setup)
+# replaces it, so this is just how much history gets fetched up front.
 TIMEFRAMES = {
-    "Hourly": ("1h", 5, 1, 30),
-    "Daily": ("1d", 120, 5, 120),
-    "Weekly": ("1wk", 60, 15, 365),
-    "Monthly": ("1mo", 365, 90, 1825),
+    "Hourly": ("1h", 5),
+    "Daily": ("1d", 120),
+    "Weekly": ("1wk", 60),
+    "Monthly": ("1mo", 365),
 }
 
 # How many extra calendar days of history to fetch BEFORE the visible
@@ -289,7 +294,17 @@ def render_settings_toolbar(container):
     moving averages, overlay ticker) and returns a settings dict shaped
     like DEFAULT_SETTINGS above. Used by any page that wants the same
     interactive Chart Settings experience Trade Analyzer introduced.
+
+    Moving averages are the one setting that's saved permanently (see
+    database.get_chart_preferences()/save_chart_preferences()) - typing
+    in a new set of periods, or changing a color, saves it right away,
+    so it's still there next time the app is opened, on any device,
+    until it's changed again. Everything else here (chart type, candle
+    colors, price scale, overlay ticker) stays session-only, as before.
     """
+    conn = database.get_connection()
+    saved_prefs = database.get_chart_preferences(conn)
+
     with container.popover("Chart Settings", use_container_width=True):
         chart_type = st.radio("Chart Type", ["Candlestick", "Line"], horizontal=True)
         price_scale = st.radio("Price Scale", ["Linear", "Log"], horizontal=True)
@@ -304,8 +319,8 @@ def render_settings_toolbar(container):
             line_color = st.color_picker("Line color", value=CATEGORICAL_PALETTE[0])
 
         ma_text = st.text_input(
-            "Moving Averages (comma-separated periods)", value="",
-            placeholder="e.g. 9, 21, 50",
+            "Moving Averages (comma-separated periods)", value=saved_prefs["ma_text"],
+            placeholder="e.g. 9, 21, 50", key="ma_text_input",
         )
         ma_periods = parse_ma_periods(ma_text)
 
@@ -313,10 +328,15 @@ def render_settings_toolbar(container):
         if ma_periods:
             ma_color_cols = st.columns(len(ma_periods))
             for i, period in enumerate(ma_periods):
-                default_color = CATEGORICAL_PALETTE[i % len(CATEGORICAL_PALETTE)]
+                default_color = saved_prefs["ma_colors"].get(
+                    str(period), CATEGORICAL_PALETTE[i % len(CATEGORICAL_PALETTE)])
                 ma_colors[period] = ma_color_cols[i].color_picker(
                     f"{period}-period", value=default_color, key=f"ma_color_{period}",
                 )
+
+        current_colors = {str(period): color for period, color in ma_colors.items()}
+        if ma_text != saved_prefs["ma_text"] or current_colors != saved_prefs["ma_colors"]:
+            database.save_chart_preferences(conn, ma_text, ma_colors)
 
         overlay_symbol = st.text_input(
             "Overlay Ticker (optional)", value="", placeholder="e.g. SPY, QQQ",
@@ -550,7 +570,11 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
         gridcolor=GRIDLINE_COLOR, showgrid=True, zeroline=False, rangeslider_visible=False,
         rangebreaks=_compute_rangebreaks(history, interval),
     )
-    fig.update_yaxes(gridcolor=GRIDLINE_COLOR, showgrid=True, zeroline=False)
+    # Locking the y-axis (price/volume scale) means scrolling or dragging
+    # on the chart only ever moves through time - it can never distort
+    # the price scale, which is what makes trackpad scroll-to-zoom feel
+    # like "see more/fewer days" instead of "zoom in/out on everything."
+    fig.update_yaxes(gridcolor=GRIDLINE_COLOR, showgrid=True, zeroline=False, fixedrange=True)
     if show_volume:
         fig.update_yaxes(title_text="Volume", row=2, col=1)
 

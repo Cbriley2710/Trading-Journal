@@ -93,14 +93,11 @@ fact_tile(cols[4], "% Change", f"{pct_change:,.2f}%", outcome_color)
 st.divider()
 
 timeframe_label = st.radio("Timeframe", options=list(charting.TIMEFRAMES.keys()), index=1, horizontal=True)
-interval, default_padding, min_padding, max_padding = charting.TIMEFRAMES[timeframe_label]
+interval, padding_days = charting.TIMEFRAMES[timeframe_label]
 
-control_cols = st.columns([3, 1])
-padding_days = control_cols[0].slider(
-    "Days of context before/after the trade",
-    min_value=min_padding, max_value=max_padding, value=default_padding,
-)
+control_cols = st.columns([4, 1])
 settings = charting.render_settings_toolbar(control_cols[1])
+control_cols[0].caption("Scroll on the chart to zoom in/out through time; drag or swipe to pan.")
 
 display_start = trade["entry_date"] - timedelta(days=padding_days)
 display_end = trade["date"] + timedelta(days=padding_days)
@@ -139,4 +136,4 @@ entry_point = {
     "exit_date": trade["date"], "sell_price": trade["sell_price"],
 }
 fig = charting.build_figure(trade["symbol"], history, entry_point, settings, overlay_history, interval=interval)
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, use_container_width=True, config={"scrollZoom": True})

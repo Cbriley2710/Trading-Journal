@@ -45,12 +45,18 @@ through quickly):
     position in them. A ticker stays here (and keeps getting archived
     every night) until you remove it - see `add_to_watchlist()` /
     `remove_from_watchlist()` below.
+
+  - `chart_preferences`: a single saved row remembering which moving
+    averages you've added to the chart (periods + their colors), so
+    they're still there the next time you open the app, on any device -
+    see `get_chart_preferences()` / `save_chart_preferences()` below.
 """
 
 import os
 from datetime import datetime
 
 import psycopg2
+from psycopg2.extras import Json
 import streamlit as st
 
 from analyze_trades import load_transactions, match_trades_fifo
@@ -132,6 +138,14 @@ def init_db(conn):
             id SERIAL PRIMARY KEY,
             symbol TEXT NOT NULL UNIQUE,
             added_at TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS chart_preferences (
+            id INTEGER PRIMARY KEY DEFAULT 1,
+            ma_periods TEXT NOT NULL DEFAULT '',
+            ma_colors JSONB NOT NULL DEFAULT '{}',
+            CONSTRAINT single_row CHECK (id = 1)
         )
     """)
     conn.commit()
@@ -397,4 +411,40 @@ def remove_from_watchlist(conn, symbol):
     """
     cur = conn.cursor()
     cur.execute("DELETE FROM watchlist WHERE symbol = %s", (symbol,))
+    conn.commit()
+
+
+def get_chart_preferences(conn):
+    """
+    Returns the saved moving-average preference (there's only ever one,
+    since this app has a single user): {"ma_text": "20,50", "ma_colors":
+    {"20": "#2375f4"}}. Defaults to no moving averages if nothing has
+    been saved yet.
+    """
+    cur = conn.cursor()
+    cur.execute("SELECT ma_periods, ma_colors FROM chart_preferences WHERE id = 1")
+    row = cur.fetchone()
+    if row is None:
+        return {"ma_text": "", "ma_colors": {}}
+    return {"ma_text": row[0], "ma_colors": row[1]}
+
+
+def save_chart_preferences(conn, ma_text, ma_colors):
+    """
+    Saves the moving-average text (e.g. "20,50") and each period's color
+    as the one persistent chart preference - overwriting whatever was
+    saved before, so the chart looks the same next time you open the
+    app, on any device, until you change it again.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO chart_preferences (id, ma_periods, ma_colors)
+        VALUES (1, %s, %s)
+        ON CONFLICT (id) DO UPDATE SET
+            ma_periods = EXCLUDED.ma_periods,
+            ma_colors = EXCLUDED.ma_colors
+        """,
+        (ma_text, Json({str(k): v for k, v in ma_colors.items()})),
+    )
     conn.commit()
