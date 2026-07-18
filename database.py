@@ -155,6 +155,14 @@ def init_db(conn):
             updated_at TIMESTAMP NOT NULL DEFAULT NOW()
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS account_settings (
+            id INTEGER PRIMARY KEY DEFAULT 1,
+            account_value DOUBLE PRECISION,
+            updated_at TIMESTAMP,
+            CONSTRAINT single_row CHECK (id = 1)
+        )
+    """)
     conn.commit()
 
 
@@ -489,5 +497,33 @@ def set_stop_loss(conn, symbol, stop_loss):
             updated_at = NOW()
         """,
         (symbol, stop_loss),
+    )
+    conn.commit()
+
+
+def get_account_value(conn):
+    """Returns the saved current account value, or None if it hasn't
+    been set yet - used to turn dollar figures on the Dashboard into a
+    percentage of your actual account size."""
+    cur = conn.cursor()
+    cur.execute("SELECT account_value FROM account_settings WHERE id = 1")
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def set_account_value(conn, account_value):
+    """Saves (or updates) the current account value - overwriting
+    whatever was saved before, since this is meant to always reflect
+    where your account stands today, not a history of past values."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO account_settings (id, account_value, updated_at)
+        VALUES (1, %s, NOW())
+        ON CONFLICT (id) DO UPDATE SET
+            account_value = EXCLUDED.account_value,
+            updated_at = NOW()
+        """,
+        (account_value,),
     )
     conn.commit()

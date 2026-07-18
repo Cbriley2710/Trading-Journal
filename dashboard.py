@@ -54,6 +54,26 @@ nav.render_top_nav("Dashboard")
 
 st.title("Trading Journal Dashboard")
 
+conn = database.get_connection()
+account_value = database.get_account_value(conn)
+
+# The one number the rest of this page doesn't otherwise know - your
+# actual account size. Once it's saved, dollar figures elsewhere on
+# this page can also be shown as a % of your real account.
+new_account_value = st.number_input(
+    "Current Account Value ($)", min_value=0.0, value=account_value or 0.0,
+    step=100.0, format="%.2f", key="account_value_input",
+)
+if st.button("Save Account Value"):
+    database.set_account_value(conn, new_account_value)
+    account_value = new_account_value
+    st.success(f"Account value saved at ${new_account_value:,.2f}.")
+st.caption(
+    "Used below for equity contribution per position and account % gain by time period."
+)
+
+st.divider()
+
 
 def load_trades():
     """Pulls every completed trade out of trading.db as a pandas
@@ -132,6 +152,34 @@ stat_tile(cols[6], "Worst Trade", f"{worst['symbol']} ${worst['profit_loss']:,.2
 
 st.divider()
 
+# --- Account performance by time period ----------------------------------
+# Uses trades_df (every closed trade), not `filtered` - this is meant to
+# answer "how has my whole account actually done," not whatever narrower
+# slice the sidebar filters happen to be set to. Realized P/L only (no
+# unrealized P/L from open positions), and every period's % is against
+# TODAY's account value, since there's no history of past account sizes.
+st.subheader("Account Performance")
+if account_value:
+    today = pd.Timestamp.now().normalize()
+    periods = [
+        ("7 Days", today - pd.Timedelta(days=7)),
+        ("30 Days", today - pd.Timedelta(days=30)),
+        ("90 Days", today - pd.Timedelta(days=90)),
+        ("YTD", pd.Timestamp(year=today.year, month=1, day=1)),
+        ("All-Time", None),
+    ]
+    period_cols = st.columns(len(periods))
+    for col, (label, cutoff) in zip(period_cols, periods):
+        period_trades = trades_df if cutoff is None else trades_df[trades_df["date"] >= cutoff]
+        period_pl = period_trades["profit_loss"].sum()
+        period_pct = period_pl / account_value * 100
+        stat_tile(col, label, f"${period_pl:,.2f} ({period_pct:+.1f}%)",
+                  GOOD_COLOR if period_pl >= 0 else CRITICAL_COLOR)
+else:
+    st.info("Set your account value above to see account performance by time period.")
+
+st.divider()
+
 # --- Cumulative P/L chart ------------------------------------------------
 # Labeled "Cumulative P/L," not "Equity," since we don't have a real
 # starting account balance to build a true equity curve from yet.
@@ -170,15 +218,27 @@ st.subheader("Profit/Loss by Symbol")
 by_symbol = filtered.groupby("symbol")["profit_loss"].sum().sort_values(ascending=False)
 bar_colors = [GOOD_COLOR if v >= 0 else CRITICAL_COLOR for v in by_symbol.values]
 
+# With an account value saved, each symbol's contribution is shown as a
+# % of that account too, not just its raw dollar P/L.
+if account_value:
+    bar_text = [f"${v:,.0f} ({v / account_value * 100:+.1f}%)" for v in by_symbol.values]
+    bar_customdata = by_symbol.values / account_value * 100
+    bar_hovertemplate = "%{x}: $%{y:,.2f} (%{customdata:+.1f}% of account)<extra></extra>"
+else:
+    bar_text = [f"${v:,.0f}" for v in by_symbol.values]
+    bar_customdata = None
+    bar_hovertemplate = "%{x}: $%{y:,.2f}<extra></extra>"
+
 bar_chart = go.Figure()
 bar_chart.add_hline(y=0, line_color=BASELINE_COLOR, line_width=1)
 bar_chart.add_trace(go.Bar(
     x=by_symbol.index,
     y=by_symbol.values,
     marker_color=bar_colors,
-    text=[f"${v:,.0f}" for v in by_symbol.values],
+    text=bar_text,
     textposition="outside",
-    hovertemplate="%{x}: $%{y:,.2f}<extra></extra>",
+    customdata=bar_customdata,
+    hovertemplate=bar_hovertemplate,
 ))
 bar_chart.update_layout(
     height=350,
@@ -191,6 +251,58 @@ bar_chart.update_layout(
 bar_chart.update_xaxes(gridcolor=charting.GRIDLINE_COLOR, showgrid=True, zeroline=False)
 bar_chart.update_yaxes(gridcolor=charting.GRIDLINE_COLOR, showgrid=True, zeroline=False)
 st.plotly_chart(bar_chart, theme=None)
+
+# --- Equity allocation (open positions as % of account) -------------------
+st.subheader("Equity Allocation")
+if not account_value:
+    st.info("Set your account value above to see equity allocation across open positions.")
+else:
+    open_positions = database.get_open_positions(conn)
+    if not open_positions:
+        st.info(
+            "No open positions right now. A ticker shows up here as soon as "
+            "an imported buy hasn't been matched to a sell yet."
+        )
+    else:
+        alloc_rows = []
+        with st.spinner("Fetching current prices..."):
+            for position in open_positions:
+                current_price = charting.fetch_latest_price(position["symbol"])
+                if current_price is None:
+                    continue
+                current_value = current_price * position["quantity"]
+                alloc_rows.append({
+                    "symbol": position["symbol"],
+                    "current_value": current_value,
+                    "pct": current_value / account_value * 100,
+                })
+
+        if not alloc_rows:
+            st.warning("No current price data available for open positions.")
+        else:
+            alloc_rows.sort(key=lambda r: r["pct"], reverse=True)
+            alloc_chart = go.Figure()
+            alloc_chart.add_trace(go.Bar(
+                x=[r["symbol"] for r in alloc_rows],
+                y=[r["pct"] for r in alloc_rows],
+                marker_color=charting.CATEGORICAL_PALETTE[0],
+                text=[f"{r['pct']:.1f}% (${r['current_value']:,.0f})" for r in alloc_rows],
+                textposition="outside",
+                hovertemplate="%{x}: %{y:.1f}% of account<extra></extra>",
+            ))
+            alloc_chart.update_layout(
+                height=350,
+                margin=dict(t=10, b=45),
+                yaxis_title="% of Account",
+                plot_bgcolor=charting.CHART_BACKGROUND,
+                paper_bgcolor=charting.CHART_BACKGROUND,
+                font=dict(color=charting.CHART_TEXT_COLOR),
+            )
+            alloc_chart.update_xaxes(gridcolor=charting.GRIDLINE_COLOR, showgrid=True, zeroline=False)
+            alloc_chart.update_yaxes(gridcolor=charting.GRIDLINE_COLOR, showgrid=True, zeroline=False)
+            st.plotly_chart(alloc_chart, theme=None)
+
+st.divider()
 
 # --- Trade table ----------------------------------------------------------
 st.subheader("Trades")
