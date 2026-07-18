@@ -32,17 +32,18 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import auth
+import charting
 import database
 import nav
 
-# These colors come from this project's data-visualization guidelines,
-# not picked by eye - a fixed "good" (profit) and "critical" (loss)
-# color, used the same way everywhere on this page.
-GOOD_COLOR = "#0ca30c"
-CRITICAL_COLOR = "#d03b3b"
-LINE_COLOR = "#2a78d6"  # the single line in the cumulative P/L chart
-MUTED_COLOR = "#898781"  # axis lines, neutral labels
-BASELINE_COLOR = "#c3c2b7"  # the zero-line on charts
+# Reusing charting.py's colors (rather than picking new ones here) keeps
+# this page's charts looking like the same dark, DeepVue-styled charts
+# used everywhere else in the app - Trade Analyzer, Shortlist, Logbook.
+GOOD_COLOR = charting.GOOD_COLOR
+CRITICAL_COLOR = charting.CRITICAL_COLOR
+LINE_COLOR = charting.CATEGORICAL_PALETTE[0]  # the single line in the cumulative P/L chart
+MUTED_COLOR = charting.MUTED_COLOR  # neutral labels (stat tile captions) and the zero-line on charts
+BASELINE_COLOR = charting.MUTED_COLOR
 
 st.set_page_config(page_title="Trading Journal", layout="wide", initial_sidebar_state="collapsed")
 
@@ -155,10 +156,13 @@ cum_chart.update_layout(
     margin=dict(t=10, b=10),
     xaxis_title=None,
     yaxis_title="Cumulative P/L ($)",
-    plot_bgcolor="#fcfcfb",
-    paper_bgcolor="#fcfcfb",
+    plot_bgcolor=charting.CHART_BACKGROUND,
+    paper_bgcolor=charting.CHART_BACKGROUND,
+    font=dict(color=charting.CHART_TEXT_COLOR),
 )
-st.plotly_chart(cum_chart, use_container_width=True)
+cum_chart.update_xaxes(gridcolor=charting.GRIDLINE_COLOR, showgrid=True, zeroline=False)
+cum_chart.update_yaxes(gridcolor=charting.GRIDLINE_COLOR, showgrid=True, zeroline=False)
+st.plotly_chart(cum_chart, theme=None)
 
 # --- P/L by symbol chart -------------------------------------------------
 st.subheader("Profit/Loss by Symbol")
@@ -180,10 +184,13 @@ bar_chart.update_layout(
     height=350,
     margin=dict(t=10, b=10),
     yaxis_title="Total P/L ($)",
-    plot_bgcolor="#fcfcfb",
-    paper_bgcolor="#fcfcfb",
+    plot_bgcolor=charting.CHART_BACKGROUND,
+    paper_bgcolor=charting.CHART_BACKGROUND,
+    font=dict(color=charting.CHART_TEXT_COLOR),
 )
-st.plotly_chart(bar_chart, use_container_width=True)
+bar_chart.update_xaxes(gridcolor=charting.GRIDLINE_COLOR, showgrid=True, zeroline=False)
+bar_chart.update_yaxes(gridcolor=charting.GRIDLINE_COLOR, showgrid=True, zeroline=False)
+st.plotly_chart(bar_chart, theme=None)
 
 # --- Trade table ----------------------------------------------------------
 st.subheader("Trades")
