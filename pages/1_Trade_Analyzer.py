@@ -132,6 +132,8 @@ if settings["overlay_symbol"]:
         st.warning(f"No price data found for overlay ticker {settings['overlay_symbol']}. Showing chart without it.")
         overlay_history = None
 
+st.caption(charting.build_ohlc_summary(history, trade["symbol"], timeframe_label))
+
 entry_point = {
     "entry_date": trade["entry_date"], "buy_price": trade["buy_price"],
     "exit_date": trade["date"], "sell_price": trade["sell_price"],

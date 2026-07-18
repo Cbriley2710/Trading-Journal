@@ -6,6 +6,13 @@ Trade Analyzer, the Shortlist page, and the nightly archive script all call
 into this module, so a chart looks and behaves the same everywhere and a
 fix/improvement only has to happen in one place.
 
+VISUAL STYLE: modeled on a DeepVue chart screenshot the user shared - a
+dark theme, muted blue/pink candles, a volume panel, a watermark, and
+colored right-edge price badges. The exact colors below were sampled
+directly from that screenshot (not run through this project's usual
+color-accessibility validator, since matching a specific reference image
+was the point here, not picking new colors from scratch).
+
 An "entry point" in this file means a dict describing where a position was
 opened (and, if the trade is already closed, where it was exited):
     {"entry_date": datetime, "buy_price": float,
@@ -17,21 +24,46 @@ since those positions haven't been sold yet.
 
 from datetime import timedelta
 
+import pandas as pd
 import streamlit as st
 import yfinance as yf
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
+# These stay separate from the chart's own candle colors below - they're
+# used for *trade outcome* meaning elsewhere (win/loss stat tiles,
+# entry/exit markers), which is a different thing from which way one
+# day's candle moved. Don't repaint these to match the candle colors.
 GOOD_COLOR = "#0ca30c"
 CRITICAL_COLOR = "#d03b3b"
 MUTED_COLOR = "#898781"
 
+# The chart's own dark theme, sampled from the DeepVue screenshot.
+CHART_BACKGROUND = "#111214"
+GRIDLINE_COLOR = "#23262b"
+CHART_TEXT_COLOR = "#d1d4dc"
+WATERMARK_COLOR = "rgba(255, 255, 255, 0.05)"
+BADGE_TEXT_COLOR = "#ffffff"
+
+# Candlestick colors - a muted sky-blue for an up day, muted salmon-pink
+# for a down day, instead of the more common green/red.
+UP_CANDLE_COLOR = "#8ccbf7"
+DOWN_CANDLE_COLOR = "#f19a9b"
+
+# Volume bars use a more conventional dark green/red, matching the
+# screenshot - DeepVue draws volume differently from its own candles.
+VOLUME_UP_COLOR = "#1e6b28"
+VOLUME_DOWN_COLOR = "#ba1b21"
+
 # Default colors offered for each moving average you type in, assigned in
-# this fixed order (1st MA gets blue, 2nd gets aqua, etc.) - just a
+# this fixed order (1st MA gets blue, 2nd gets green, etc.) - just a
 # starting point, since the interactive toolbar also lets you override any
-# of them with your own color picker.
+# of them with your own color picker. The first four are sampled directly
+# from the screenshot's own moving-average lines; the rest continue with
+# this project's existing dark-mode categorical colors.
 CATEGORICAL_PALETTE = [
-    "#2a78d6", "#1baf7a", "#eda100", "#008300",
-    "#4a3aa7", "#e34948", "#e87ba4", "#eb6834",
+    "#2375f4", "#009246", "#f89f1b", "#afebf2",
+    "#9085e9", "#e66767", "#d55181", "#d95926",
 ]
 
 # Timeframes offered, and the default/min/max calendar-day "padding" to
@@ -59,8 +91,8 @@ LOOKBACK_DAYS_PER_PERIOD = {"1h": 0.25, "1d": 1.6, "1wk": 8, "1mo": 32}
 DEFAULT_SETTINGS = {
     "chart_type": "Candlestick",
     "price_scale": "Linear",
-    "up_color": GOOD_COLOR,
-    "down_color": CRITICAL_COLOR,
+    "up_color": UP_CANDLE_COLOR,
+    "down_color": DOWN_CANDLE_COLOR,
     "line_color": None,
     "ma_periods": [20, 50],
     "ma_colors": {20: CATEGORICAL_PALETTE[0], 50: CATEGORICAL_PALETTE[1]},
@@ -124,6 +156,40 @@ def price_near_date(history, target_date):
     if not on_or_after.empty:
         return on_or_after["Close"].iloc[0]
     return history["Close"].iloc[-1]
+
+
+def build_ohlc_summary(history, symbol, interval_label):
+    """
+    A one-line OHLC summary shown above the chart, DeepVue-style, e.g.
+    "MU - 1D   O 822.52   H 903.96   L 804.00   C 848.95   V 63.4M
+    Chg -4.25   Chg% -0.50%". Uses the last two rows of `history` (for
+    the day-over-day change) - no separate fetch needed. Returns an
+    empty string if there's no data.
+    """
+    if history.empty:
+        return ""
+
+    last = history.iloc[-1]
+    prev_close = history["Close"].iloc[-2] if len(history) > 1 else last["Close"]
+    change = last["Close"] - prev_close
+    change_pct = (change / prev_close * 100) if prev_close else 0
+
+    volume = last["Volume"]
+    if volume >= 1e9:
+        volume_str = f"{volume / 1e9:.1f}B"
+    elif volume >= 1e6:
+        volume_str = f"{volume / 1e6:.1f}M"
+    elif volume >= 1e3:
+        volume_str = f"{volume / 1e3:.1f}K"
+    else:
+        volume_str = f"{volume:,.0f}"
+
+    sign = "+" if change >= 0 else ""
+    return (
+        f"{symbol} · {interval_label}   "
+        f"O {last['Open']:,.2f}   H {last['High']:,.2f}   L {last['Low']:,.2f}   C {last['Close']:,.2f}   "
+        f"V {volume_str}   Chg {sign}{change:,.2f}   Chg% {sign}{change_pct:,.2f}%"
+    )
 
 
 def render_png(fig):
@@ -203,8 +269,8 @@ def render_settings_toolbar(container):
 
         if chart_type == "Candlestick":
             candle_cols = st.columns(2)
-            up_color = candle_cols[0].color_picker("Bullish candle", value=GOOD_COLOR)
-            down_color = candle_cols[1].color_picker("Bearish candle", value=CRITICAL_COLOR)
+            up_color = candle_cols[0].color_picker("Bullish candle", value=UP_CANDLE_COLOR)
+            down_color = candle_cols[1].color_picker("Bearish candle", value=DOWN_CANDLE_COLOR)
             line_color = None
         else:
             up_color = down_color = None
@@ -255,8 +321,9 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
     """
     Builds the go.Figure for a price chart: candlestick or line, moving
     averages, an entry marker (plus an exit marker and connecting line if
-    the trade is already closed), and an optional overlay ticker shown as
-    % change. Returns the figure - callers render it with st.plotly_chart.
+    the trade is already closed), a volume panel, and an optional overlay
+    ticker shown as % change. Returns the figure - callers render it with
+    st.plotly_chart.
 
     `entry_label` names that marker - "Entry" for a real trade (the
     default), or something like "Added" for a watchlist ticker with no
@@ -276,9 +343,21 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
     else:
         outcome_color = CATEGORICAL_PALETTE[0]
 
-    fig = go.Figure()
+    has_overlay = overlay_history is not None and not overlay_history.empty
+    # The overlay (% change) view and volume don't mix meaningfully on the
+    # same chart - volume is specific to the primary symbol's own shares
+    # traded, so the volume panel only appears when there's no overlay.
+    show_volume = not has_overlay
 
-    if overlay_history is not None and not overlay_history.empty:
+    if show_volume:
+        fig = make_subplots(
+            rows=2, cols=1, shared_xaxes=True,
+            row_heights=[0.75, 0.25], vertical_spacing=0.03,
+        )
+    else:
+        fig = make_subplots(rows=1, cols=1)
+
+    if has_overlay:
         # Two different stocks' raw dollar prices aren't on the same scale,
         # so comparing them only makes sense as % change from a shared
         # starting point - this replaces the candlestick/absolute-price
@@ -294,13 +373,13 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
             line=dict(color=settings["line_color"] or CATEGORICAL_PALETTE[0], width=2),
             name=symbol,
             hovertemplate="%{x|%b %d, %Y}: %{y:.2f}%<extra></extra>",
-        ))
+        ), row=1, col=1)
         fig.add_trace(go.Scatter(
             x=overlay_history.index, y=overlay_pct, mode="lines",
             line=dict(color=settings["overlay_color"], width=2, dash="dash"),
             name=settings["overlay_symbol"],
             hovertemplate="%{x|%b %d, %Y}: %{y:.2f}%<extra></extra>",
-        ))
+        ), row=1, col=1)
         for period in ma_periods:
             if f"MA{period}" not in history.columns:
                 continue  # fetch_history was called with a different set of periods
@@ -310,7 +389,7 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
                 line=dict(color=ma_colors[period], width=1.5),
                 name=f"{period}-period MA",
                 hovertemplate="%{x|%b %d, %Y}: %{y:.2f}%<extra></extra>",
-            ))
+            ), row=1, col=1)
 
         if is_closed:
             exit_pct = (sell_price / baseline - 1) * 100
@@ -321,14 +400,14 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
                 marker=dict(size=14, symbol=["triangle-up", "triangle-down"], color=outcome_color),
                 name="Entry / Exit", showlegend=False,
                 hovertemplate="%{x|%b %d, %Y}: %{y:.2f}%<extra></extra>",
-            ))
+            ), row=1, col=1)
         else:
             fig.add_trace(go.Scatter(
                 x=[entry_date], y=[entry_pct], mode="markers",
                 marker=dict(size=14, symbol="triangle-up", color=outcome_color),
                 name=entry_label, showlegend=False,
                 hovertemplate="%{x|%b %d, %Y}: %{y:.2f}%<extra></extra>",
-            ))
+            ), row=1, col=1)
         yaxis_title = "% Change from start of chart"
 
     else:
@@ -341,13 +420,13 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
                 increasing_line_color=settings["up_color"], increasing_fillcolor=settings["up_color"],
                 decreasing_line_color=settings["down_color"], decreasing_fillcolor=settings["down_color"],
                 showlegend=False,
-            ))
+            ), row=1, col=1)
         else:
             fig.add_trace(go.Scatter(
                 x=history.index, y=history["Close"], mode="lines",
                 line=dict(color=settings["line_color"], width=2),
                 name=symbol, showlegend=False,
-            ))
+            ), row=1, col=1)
         for period in ma_periods:
             if f"MA{period}" not in history.columns:
                 continue  # fetch_history was called with a different set of periods
@@ -356,7 +435,7 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
                 line=dict(color=ma_colors[period], width=1.5),
                 name=f"{period}-period MA",
                 hovertemplate="%{x|%b %d, %Y}: $%{y:,.2f}<extra></extra>",
-            ))
+            ), row=1, col=1)
 
         if is_closed:
             fig.add_trace(go.Scatter(
@@ -366,24 +445,81 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
                 marker=dict(size=14, symbol=["triangle-up", "triangle-down"], color=outcome_color),
                 name="Entry / Exit", showlegend=False,
                 hovertemplate="%{x|%b %d, %Y}: $%{y:,.2f}<extra></extra>",
-            ))
+            ), row=1, col=1)
         else:
             fig.add_trace(go.Scatter(
                 x=[entry_date], y=[buy_price], mode="markers",
                 marker=dict(size=14, symbol="triangle-up", color=outcome_color),
                 name=entry_label, showlegend=False,
                 hovertemplate="%{x|%b %d, %Y}: $%{y:,.2f}<extra></extra>",
-            ))
+            ), row=1, col=1)
         yaxis_title = "Price ($)"
 
+        # Volume panel - bars colored the same up/down as the candles
+        # would be conventionally (green/red), which is deliberately
+        # different from this chart's own blue/pink candle colors,
+        # matching the DeepVue reference.
+        volume_colors = [
+            VOLUME_UP_COLOR if close >= open_ else VOLUME_DOWN_COLOR
+            for open_, close in zip(history["Open"], history["Close"])
+        ]
+        fig.add_trace(go.Bar(
+            x=history.index, y=history["Volume"],
+            marker_color=volume_colors,
+            name="Volume", showlegend=False,
+            hovertemplate="%{x|%b %d, %Y}: %{y:,.0f}<extra></extra>",
+        ), row=2, col=1)
+        volume_ma = history["Volume"].rolling(50, min_periods=1).mean()
+        fig.add_trace(go.Scatter(
+            x=history.index, y=volume_ma, mode="lines",
+            line=dict(color=CHART_TEXT_COLOR, width=1.5),
+            name="Avg Volume", showlegend=False,
+            hovertemplate="%{x|%b %d, %Y}: %{y:,.0f}<extra></extra>",
+        ), row=2, col=1)
+
+    # A large, faint watermark of the symbol behind the price panel.
+    fig.add_annotation(
+        text=symbol, xref="x domain", yref="y domain", x=0.5, y=0.5,
+        showarrow=False, font=dict(size=72, color=WATERMARK_COLOR),
+    )
+
+    # Right-edge colored badges: current price + each moving average's
+    # latest value, in that line's own color - a distinctive DeepVue touch.
+    if not has_overlay:
+        last_price = history["Close"].iloc[-1]
+        fig.add_annotation(
+            x=1, xref="x domain", y=last_price, yref="y",
+            text=f"{last_price:,.2f}", showarrow=False, xanchor="left",
+            font=dict(color=BADGE_TEXT_COLOR, size=11),
+            bgcolor=outcome_color, borderpad=3,
+        )
+        for period in ma_periods:
+            col_name = f"MA{period}"
+            if col_name not in history.columns:
+                continue
+            last_ma = history[col_name].iloc[-1]
+            if pd.isna(last_ma):
+                continue
+            fig.add_annotation(
+                x=1, xref="x domain", y=last_ma, yref="y",
+                text=f"{last_ma:,.2f}", showarrow=False, xanchor="left",
+                font=dict(color=BADGE_TEXT_COLOR, size=11),
+                bgcolor=ma_colors[period], borderpad=3,
+            )
+
     fig.update_layout(
-        height=500,
-        margin=dict(t=30, b=10),
-        xaxis_rangeslider_visible=False,
+        height=560 if show_volume else 500,
+        margin=dict(t=30, b=10, r=55),
         yaxis_title=yaxis_title,
-        yaxis_type="log" if (settings["price_scale"] == "Log" and overlay_history is None) else "linear",
-        plot_bgcolor="#fcfcfb",
-        paper_bgcolor="#fcfcfb",
+        yaxis_type="log" if (settings["price_scale"] == "Log" and not has_overlay) else "linear",
+        plot_bgcolor=CHART_BACKGROUND,
+        paper_bgcolor=CHART_BACKGROUND,
+        font=dict(color=CHART_TEXT_COLOR),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
     )
+    fig.update_xaxes(gridcolor=GRIDLINE_COLOR, showgrid=True, zeroline=False, rangeslider_visible=False)
+    fig.update_yaxes(gridcolor=GRIDLINE_COLOR, showgrid=True, zeroline=False)
+    if show_volume:
+        fig.update_yaxes(title_text="Volume", row=2, col=1)
+
     return fig

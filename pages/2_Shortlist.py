@@ -105,6 +105,8 @@ def render_chart_and_journal(symbol, entry_point, entry_label, key_prefix):
             st.warning(f"No price data found for overlay ticker {settings['overlay_symbol']}. Showing chart without it.")
             overlay_history = None
 
+    st.caption(charting.build_ohlc_summary(history, symbol, timeframe_label))
+
     fig = charting.build_figure(symbol, history, entry_point, settings, overlay_history, entry_label=entry_label)
     st.plotly_chart(fig, use_container_width=True)
 
