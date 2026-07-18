@@ -107,7 +107,8 @@ def render_chart_and_journal(symbol, entry_point, entry_label, key_prefix):
 
     st.caption(charting.build_ohlc_summary(history, symbol, timeframe_label))
 
-    fig = charting.build_figure(symbol, history, entry_point, settings, overlay_history, entry_label=entry_label)
+    fig = charting.build_figure(
+        symbol, history, entry_point, settings, overlay_history, entry_label=entry_label, interval=interval)
     st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("Today's Journal")

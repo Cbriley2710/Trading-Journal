@@ -138,5 +138,5 @@ entry_point = {
     "entry_date": trade["entry_date"], "buy_price": trade["buy_price"],
     "exit_date": trade["date"], "sell_price": trade["sell_price"],
 }
-fig = charting.build_figure(trade["symbol"], history, entry_point, settings, overlay_history)
+fig = charting.build_figure(trade["symbol"], history, entry_point, settings, overlay_history, interval=interval)
 st.plotly_chart(fig, use_container_width=True)

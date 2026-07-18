@@ -68,12 +68,10 @@ CATEGORICAL_PALETTE = [
 
 # Timeframes offered, and the default/min/max calendar-day "padding" to
 # fetch before/after the trade at each one - a coarser timeframe needs much
-# more padding to show a meaningful number of bars around the trade (15
-# days of padding is plenty zoomed into daily candles, but would barely
-# show 2 extra candles on a monthly chart).
+# more padding to show a meaningful number of bars around the trade.
 TIMEFRAMES = {
     "Hourly": ("1h", 5, 1, 30),
-    "Daily": ("1d", 15, 5, 120),
+    "Daily": ("1d", 120, 5, 120),
     "Weekly": ("1wk", 60, 15, 365),
     "Monthly": ("1mo", 365, 90, 1825),
 }
@@ -142,6 +140,35 @@ def fetch_history(symbol, fetch_start, display_start, display_end, interval, ma_
         history[f"MA{period}"] = history["Close"].rolling(period).mean()
 
     return history[history.index >= display_start]
+
+
+def _compute_rangebreaks(history, interval):
+    """
+    Returns Plotly x-axis "rangebreaks" that hide non-trading gaps -
+    weekends, holidays, and (for hourly data) overnight hours - so
+    candles/bars sit next to each other instead of leaving a visible
+    blank stretch on the chart for every day the market was closed.
+
+    Weekends are hidden for every interval. For daily bars, any other
+    missing weekday (a holiday) is found by comparing the full business-day
+    range against the dates actually present in `history` - computed fresh
+    from the real data each time, rather than maintaining a holiday
+    calendar by hand. For hourly bars, the hours outside roughly 9:30am-4pm
+    are hidden too, since a trading day is only open part of each day.
+    """
+    breaks = [dict(bounds=["sat", "mon"])]
+
+    if interval == "1d" and len(history) > 1:
+        all_weekdays = pd.bdate_range(history.index.min(), history.index.max())
+        missing = all_weekdays.difference(history.index)
+        if len(missing) > 0:
+            # Plotly/kaleido's JSON serialization can't handle pandas
+            # Timestamp objects directly - plain datetimes only.
+            breaks.append(dict(values=list(missing.to_pydatetime())))
+    elif interval == "1h":
+        breaks.append(dict(bounds=[16, 9.5], pattern="hour"))
+
+    return breaks
 
 
 def price_near_date(history, target_date):
@@ -317,7 +344,7 @@ def render_settings_toolbar(container):
     }
 
 
-def build_figure(symbol, history, entry_point, settings, overlay_history=None, entry_label="Entry"):
+def build_figure(symbol, history, entry_point, settings, overlay_history=None, entry_label="Entry", interval="1d"):
     """
     Builds the go.Figure for a price chart: candlestick or line, moving
     averages, an entry marker (plus an exit marker and connecting line if
@@ -327,7 +354,9 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
 
     `entry_label` names that marker - "Entry" for a real trade (the
     default), or something like "Added" for a watchlist ticker with no
-    actual trade behind it.
+    actual trade behind it. `interval` (the same string passed to
+    fetch_history) decides which non-trading-day gaps get hidden - see
+    _compute_rangebreaks().
     """
     entry_date = entry_point["entry_date"]
     buy_price = entry_point["buy_price"]
@@ -517,7 +546,10 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
         font=dict(color=CHART_TEXT_COLOR),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
     )
-    fig.update_xaxes(gridcolor=GRIDLINE_COLOR, showgrid=True, zeroline=False, rangeslider_visible=False)
+    fig.update_xaxes(
+        gridcolor=GRIDLINE_COLOR, showgrid=True, zeroline=False, rangeslider_visible=False,
+        rangebreaks=_compute_rangebreaks(history, interval),
+    )
     fig.update_yaxes(gridcolor=GRIDLINE_COLOR, showgrid=True, zeroline=False)
     if show_volume:
         fig.update_yaxes(title_text="Volume", row=2, col=1)
