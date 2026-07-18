@@ -31,11 +31,14 @@ import yfinance as yf
 import auth
 import charting
 import database
+import nav
 
-st.set_page_config(page_title="Shortlist", layout="wide")
+st.set_page_config(page_title="Shortlist", layout="wide", initial_sidebar_state="collapsed")
 
 if not auth.check_password():
     st.stop()
+
+nav.render_top_nav("Shortlist")
 
 st.title("Shortlist")
 

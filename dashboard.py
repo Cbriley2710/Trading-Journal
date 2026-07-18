@@ -33,6 +33,7 @@ import streamlit as st
 
 import auth
 import database
+import nav
 
 # These colors come from this project's data-visualization guidelines,
 # not picked by eye - a fixed "good" (profit) and "critical" (loss)
@@ -43,10 +44,12 @@ LINE_COLOR = "#2a78d6"  # the single line in the cumulative P/L chart
 MUTED_COLOR = "#898781"  # axis lines, neutral labels
 BASELINE_COLOR = "#c3c2b7"  # the zero-line on charts
 
-st.set_page_config(page_title="Trading Journal", layout="wide")
+st.set_page_config(page_title="Trading Journal", layout="wide", initial_sidebar_state="collapsed")
 
 if not auth.check_password():
     st.stop()
+
+nav.render_top_nav("Dashboard")
 
 st.title("Trading Journal Dashboard")
 

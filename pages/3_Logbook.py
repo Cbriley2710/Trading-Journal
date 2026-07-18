@@ -17,11 +17,14 @@ import streamlit as st
 
 import auth
 import database
+import nav
 
-st.set_page_config(page_title="Logbook", layout="wide")
+st.set_page_config(page_title="Logbook", layout="wide", initial_sidebar_state="collapsed")
 
 if not auth.check_password():
     st.stop()
+
+nav.render_top_nav("Logbook")
 
 st.title("Logbook")
 
