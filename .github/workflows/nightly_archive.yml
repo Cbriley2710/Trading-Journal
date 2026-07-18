@@ -1,0 +1,39 @@
+name: Nightly Archive
+
+# Runs nightly_archive.py on a schedule so it works even when your PC
+# and browser are off - GitHub's own servers run this, not yours.
+#
+# "0 5 * * *" is ~midnight Eastern Standard Time (5:00 UTC). Cron
+# doesn't adjust for daylight saving, so during Eastern Daylight Time
+# this actually fires around 1am instead of midnight - a known,
+# accepted limitation rather than something worth over-engineering for
+# a personal tool.
+#
+# workflow_dispatch lets you trigger this manually (from the Actions
+# tab on GitHub) any time, instead of waiting for the schedule - useful
+# for testing.
+on:
+  schedule:
+    - cron: "0 5 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Ensure a Chrome binary is available for kaleido
+        run: kaleido_get_chrome
+
+      - name: Run nightly archive
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python nightly_archive.py

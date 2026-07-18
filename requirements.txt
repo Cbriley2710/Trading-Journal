@@ -4,3 +4,4 @@ plotly
 pandas
 psycopg2-binary
 yfinance
+kaleido

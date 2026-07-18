@@ -19,7 +19,7 @@ value into. This works even in scripts like import_trades.py that
 aren't run with `streamlit run` - `st.secrets` just reads the file, no
 running app required.
 
-WHAT'S STORED, IN TWO TABLES (a "table" is just a grid of rows and
+WHAT'S STORED, IN THREE TABLES (a "table" is just a grid of rows and
 columns, like a spreadsheet sheet, but one a database can search
 through quickly):
 
@@ -34,8 +34,14 @@ through quickly):
     just wiped and recalculated fresh every time (see
     `rebuild_trades()`), since matching is quick and this way there's
     never a risk of it getting out of sync with `transactions`.
+
+  - `logbook_entries`: one row per (symbol, calendar day) - the daily
+    journal + archived chart image behind the Shortlist and Logbook
+    pages. See `upsert_logbook_entry()` below for how the "still being
+    written today" and "archived overnight" cases share one row.
 """
 
+import os
 from datetime import datetime
 
 import psycopg2
@@ -48,10 +54,22 @@ def _get_database_url():
     try:
         return st.secrets["DATABASE_URL"]
     except Exception:
-        raise RuntimeError(
-            "No DATABASE_URL found. Copy .streamlit/secrets.toml.example to "
-            ".streamlit/secrets.toml and fill in your Neon connection string."
-        )
+        pass
+
+    # Falls back to a plain environment variable when st.secrets has
+    # nothing to read from (e.g. .streamlit/secrets.toml doesn't exist) -
+    # this is how nightly_archive.py gets its connection string when
+    # GitHub Actions runs it, since there's no Streamlit secrets file
+    # in that environment, just a repository secret set as an env var.
+    database_url = os.environ.get("DATABASE_URL")
+    if database_url:
+        return database_url
+
+    raise RuntimeError(
+        "No DATABASE_URL found. Copy .streamlit/secrets.toml.example to "
+        ".streamlit/secrets.toml and fill in your Neon connection string "
+        "(or set a DATABASE_URL environment variable)."
+    )
 
 
 def get_connection():
@@ -90,6 +108,17 @@ def init_db(conn):
             exit_date DATE NOT NULL,
             sell_price DOUBLE PRECISION NOT NULL,
             profit_loss DOUBLE PRECISION NOT NULL
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS logbook_entries (
+            id SERIAL PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            entry_date DATE NOT NULL,
+            notes TEXT,
+            chart_image BYTEA,
+            archived_at TIMESTAMP,
+            UNIQUE (symbol, entry_date)
         )
     """)
     conn.commit()
@@ -214,3 +243,116 @@ def get_trades(conn):
         }
         for row in cur.fetchall()
     ]
+
+
+def get_open_positions(conn):
+    """
+    Returns currently-open positions (bought but not yet sold), computed
+    fresh from match_trades_fifo()'s open_lots - the other side of the
+    same FIFO matching that produces `trades`. This is derived data, not
+    something separately tracked, so it's always consistent with whatever
+    is currently in `transactions` - no separate "position opened" event
+    needs to be recorded anywhere.
+
+    One row per symbol, aggregating multiple still-open buy lots together
+    (total shares, a quantity-weighted average entry price, and the
+    earliest entry date among them). Sorted oldest entry first.
+    """
+    cur = conn.cursor()
+    cur.execute("SELECT date, symbol, action, price, quantity FROM transactions")
+    transactions = [
+        {
+            "date": datetime.combine(row[0], datetime.min.time()),
+            "symbol": row[1],
+            "action": row[2],
+            "price": row[3],
+            "quantity": row[4],
+        }
+        for row in cur.fetchall()
+    ]
+
+    _closed_trades, open_lots = match_trades_fifo(transactions)
+
+    positions = []
+    for symbol, lots in open_lots.items():
+        if not lots or symbol.strip().startswith("-"):
+            continue  # no open shares, or an options contract (not tracked here)
+        total_quantity = sum(lot["quantity"] for lot in lots)
+        total_cost = sum(lot["quantity"] * lot["price"] for lot in lots)
+        positions.append({
+            "symbol": symbol,
+            "quantity": total_quantity,
+            "avg_price": total_cost / total_quantity,
+            "entry_date": min(lot["date"] for lot in lots),
+        })
+
+    return sorted(positions, key=lambda p: p["entry_date"])
+
+
+def upsert_logbook_entry(conn, symbol, entry_date, notes=None, chart_image=None, archived_at=None):
+    """
+    Adds or updates one day's logbook row for a symbol. Only the fields
+    actually passed in get overwritten - COALESCE keeps whatever was
+    already stored for anything left as None - so the daytime "save my
+    journal notes" action (from the Shortlist page) and the nightly
+    "save the chart image" action (from nightly_archive.py) can both call
+    this without erasing each other's field.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO logbook_entries (symbol, entry_date, notes, chart_image, archived_at)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (symbol, entry_date) DO UPDATE SET
+            notes = COALESCE(EXCLUDED.notes, logbook_entries.notes),
+            chart_image = COALESCE(EXCLUDED.chart_image, logbook_entries.chart_image),
+            archived_at = COALESCE(EXCLUDED.archived_at, logbook_entries.archived_at)
+        """,
+        (symbol, entry_date, notes, chart_image, archived_at),
+    )
+    conn.commit()
+
+
+def get_logbook_entry(conn, symbol, entry_date):
+    """Returns one day's logbook row for a symbol, or None if it doesn't exist yet."""
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT notes, chart_image, archived_at FROM logbook_entries WHERE symbol = %s AND entry_date = %s",
+        (symbol, entry_date),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return None
+    return {
+        "notes": row[0],
+        "chart_image": bytes(row[1]) if row[1] is not None else None,
+        "archived_at": row[2],
+    }
+
+
+def get_logbook_entries(conn, symbol):
+    """Returns every logbook row for a symbol, oldest day first."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT entry_date, notes, chart_image, archived_at
+        FROM logbook_entries WHERE symbol = %s ORDER BY entry_date
+        """,
+        (symbol,),
+    )
+    return [
+        {
+            "entry_date": row[0],
+            "notes": row[1],
+            "chart_image": bytes(row[2]) if row[2] is not None else None,
+            "archived_at": row[3],
+        }
+        for row in cur.fetchall()
+    ]
+
+
+def get_logbook_symbols(conn):
+    """Returns every symbol that has at least one logbook entry, alphabetically."""
+    cur = conn.cursor()
+    cur.execute("SELECT DISTINCT symbol FROM logbook_entries ORDER BY symbol")
+    return [row[0] for row in cur.fetchall()]
