@@ -30,8 +30,14 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Ensure a Chrome binary is available for kaleido
-        run: kaleido_get_chrome
+      # Installing a real system Chromium (with apt handling its
+      # shared-library dependencies correctly) instead of using
+      # kaleido's own standalone-download mechanism - that download
+      # turned out to produce a build that fails to even launch, on
+      # both Windows and Linux, during development. charting.render_png()
+      # looks for this exact "chromium" binary as its fallback.
+      - name: Install Chromium for kaleido
+        run: sudo apt-get update && sudo apt-get install -y chromium-browser || sudo apt-get install -y chromium
 
       - name: Run nightly archive
         env:

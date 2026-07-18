@@ -131,25 +131,34 @@ def render_png(fig):
     Renders a Plotly figure to PNG bytes via kaleido. Tries the plain,
     ordinary render first - on a machine that already has a working
     Chrome install (kaleido finds it automatically), that's all this
-    ever does. Only if that fails does it download its own Chrome (via
-    `choreographer`, the browser-automation library kaleido uses under
-    the hood) and retry once - needed on machines with no browser at
-    all (like Streamlit Community Cloud's servers).
+    ever does.
 
-    This order matters: eagerly downloading a browser turned out to be
-    actively harmful during development - once downloaded, kaleido
-    preferred that copy over an already-working system Chrome, and the
-    downloaded build failed to run at all on this Windows machine
-    (likely a missing runtime dependency in that particular build).
-    Trying the working option first avoids ever touching the fallback
-    on a machine where it isn't needed.
+    Only if that fails does this fall back to explicitly pointing
+    kaleido at a system-installed Chromium - installed via apt, either
+    from packages.txt (Streamlit Community Cloud) or a dedicated step
+    in the GitHub Actions workflow (nightly_archive.py's run), both of
+    which let apt handle Chromium's own system-library dependencies
+    correctly. This deliberately avoids letting kaleido download its
+    own standalone copy, which turned out to be actively harmful during
+    development: once downloaded, kaleido preferred that copy over an
+    already-working system browser, and the downloaded build failed to
+    even launch, on both Windows (a missing runtime dependency) and a
+    Linux server (missing shared libraries a minimal container doesn't
+    have) - two different failures with the same root cause.
     """
     try:
         return fig.to_image(format="png")
     except Exception:
-        from choreographer.cli._cli_utils import get_chrome_sync
-        get_chrome_sync()
-        return fig.to_image(format="png")
+        import shutil
+        import kaleido
+
+        chromium_path = shutil.which("chromium") or shutil.which("chromium-browser")
+        if not chromium_path:
+            raise
+
+        fig_dict = fig.to_dict()
+        return kaleido.calc_fig_sync(
+            fig_dict, opts={"format": "png"}, kopts={"path": chromium_path})
 
 
 def build_archive_snapshot(symbol, entry_date, buy_price, entry_label, as_of):
