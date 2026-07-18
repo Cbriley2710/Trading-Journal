@@ -68,18 +68,24 @@ CATEGORICAL_PALETTE = [
     "#9085e9", "#e66767", "#d55181", "#d95926",
 ]
 
-# Timeframes offered, and a fixed calendar-day "padding" to fetch
-# before/after the trade at each one - a coarser timeframe needs much
-# more padding to show a meaningful number of bars around the trade.
-# There's no user-adjustable slider for this anymore - scroll-to-zoom on
-# the chart itself (see build_figure()'s fixedrange/rangebreaks setup)
-# replaces it, so this is just how much history gets fetched up front.
+# Timeframes offered, and the default VISIBLE calendar-day window when
+# the chart first opens (Hourly 5 days, Daily 120, Weekly ~2 years,
+# Monthly a year) - a coarser timeframe needs much more of a window to
+# show a meaningful number of bars. There's no user-adjustable slider for
+# this anymore - scroll-to-zoom on the chart itself replaces it. This is
+# NOT how much data gets fetched - see FETCH_BUFFER_MULTIPLIER below -
+# just what's shown by default before you zoom/pan.
 TIMEFRAMES = {
     "Hourly": ("1h", 5),
     "Daily": ("1d", 120),
-    "Weekly": ("1wk", 60),
+    "Weekly": ("1wk", 720),
     "Monthly": ("1mo", 365),
 }
+
+# Actual fetched history is this many times wider than the default
+# visible window above, so there's real data to scroll/zoom into on
+# either side rather than hitting a hard, empty edge immediately.
+FETCH_BUFFER_MULTIPLIER = 3
 
 # How many extra calendar days of history to fetch BEFORE the visible
 # window, per moving-average period, so the longest selected average
@@ -284,7 +290,7 @@ def build_archive_snapshot(symbol, entry_date, buy_price, entry_label, as_of):
     entry_point = {"entry_date": entry_date, "buy_price": buy_price} if buy_price is not None \
         else {"entry_date": entry_date, "buy_price": price_near_date(history, entry_date)}
 
-    fig = build_figure(symbol, history, entry_point, DEFAULT_SETTINGS, entry_label=entry_label)
+    fig, _fit_payload = build_figure(symbol, history, entry_point, DEFAULT_SETTINGS, entry_label=entry_label)
     return render_png(fig)
 
 
@@ -364,19 +370,28 @@ def render_settings_toolbar(container):
     }
 
 
-def build_figure(symbol, history, entry_point, settings, overlay_history=None, entry_label="Entry", interval="1d"):
+def build_figure(symbol, history, entry_point, settings, overlay_history=None, entry_label="Entry", interval="1d",
+                  visible_range=None):
     """
     Builds the go.Figure for a price chart: candlestick or line, moving
     averages, an entry marker (plus an exit marker and connecting line if
     the trade is already closed), a volume panel, and an optional overlay
-    ticker shown as % change. Returns the figure - callers render it with
-    st.plotly_chart.
+    ticker shown as % change. Returns `(fig, fit_payload)` - `fig` gets
+    rendered via render_interactive_chart() (or, for a static image,
+    render_png()); `fit_payload` is a plain-JSON record of the real
+    price/volume data render_interactive_chart()'s zoom handler needs to
+    refit the y-axis as you scroll/pan (callers that don't need
+    interactivity, like build_archive_snapshot(), can ignore it).
 
     `entry_label` names that marker - "Entry" for a real trade (the
     default), or something like "Added" for a watchlist ticker with no
     actual trade behind it. `interval` (the same string passed to
     fetch_history) decides which non-trading-day gaps get hidden - see
-    _compute_rangebreaks().
+    _compute_rangebreaks(). `visible_range`, if given, is an
+    (start, end) tuple setting the chart's initial zoomed-in view - useful
+    when `history` itself covers a much wider window than should be shown
+    by default (see FETCH_BUFFER_MULTIPLIER), so there's real data to
+    scroll/zoom into on either side without an immediate empty edge.
     """
     entry_date = entry_point["entry_date"]
     buy_price = entry_point["buy_price"]
@@ -398,6 +413,14 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
     # traded, so the volume panel only appears when there's no overlay.
     show_volume = not has_overlay
 
+    # A plain-JSON (not Plotly's own, sometimes binary-encoded, figure
+    # JSON) record of what the price/volume axes should fit at any given
+    # visible time window - built directly from this data, not by trying
+    # to parse Plotly's serialized traces back apart in JavaScript.
+    # render_interactive_chart()'s zoom handler uses this to recompute
+    # the y-axis range as you scroll/pan through time.
+    fit_payload = {"price": [], "volume": []}
+
     if show_volume:
         fig = make_subplots(
             rows=2, cols=1, shared_xaxes=True,
@@ -416,6 +439,15 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
         overlay_baseline = overlay_history["Close"].iloc[0]
         overlay_pct = (overlay_history["Close"] / overlay_baseline - 1) * 100
         entry_pct = (buy_price / baseline - 1) * 100
+
+        fit_payload["price"].append({
+            "x": [ts.isoformat() for ts in history.index],
+            "lo": primary_pct.tolist(), "hi": primary_pct.tolist(),
+        })
+        fit_payload["price"].append({
+            "x": [ts.isoformat() for ts in overlay_history.index],
+            "lo": overlay_pct.tolist(), "hi": overlay_pct.tolist(),
+        })
 
         fig.add_trace(go.Scatter(
             x=history.index, y=primary_pct, mode="lines",
@@ -460,6 +492,15 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
         yaxis_title = "% Change from start of chart"
 
     else:
+        fit_payload["price"].append({
+            "x": [ts.isoformat() for ts in history.index],
+            "lo": history["Low"].tolist(), "hi": history["High"].tolist(),
+        })
+        fit_payload["volume"].append({
+            "x": [ts.isoformat() for ts in history.index],
+            "lo": history["Volume"].tolist(), "hi": history["Volume"].tolist(),
+        })
+
         if settings["chart_type"] == "Candlestick":
             fig.add_trace(go.Candlestick(
                 x=history.index,
@@ -570,6 +611,8 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
         gridcolor=GRIDLINE_COLOR, showgrid=True, zeroline=False, rangeslider_visible=False,
         rangebreaks=_compute_rangebreaks(history, interval),
     )
+    if visible_range is not None:
+        fig.update_xaxes(range=list(visible_range))
     # Locking the y-axis (price/volume scale) means scrolling or dragging
     # on the chart only ever moves through time - it can never distort
     # the price scale, which is what makes trackpad scroll-to-zoom feel
@@ -578,4 +621,105 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
     if show_volume:
         fig.update_yaxes(title_text="Volume", row=2, col=1)
 
-    return fig
+    return fig, fit_payload
+
+
+_INTERACTIVE_CHART_HTML = """
+<div id="__DIV_ID__" style="width:100%;"></div>
+<script src="https://cdn.plot.ly/plotly-2.35.3.min.js"></script>
+<script>
+(function() {
+    var figure = __FIG_JSON__;
+    // A separate, plain-JSON record of the real price/volume data (not
+    // parsed back out of Plotly's own figure JSON, which uses a compact
+    // binary array encoding that isn't reliably indexable from here) -
+    // see build_figure()'s fit_payload for how this is built.
+    var fitPayload = __FIT_JSON__;
+    var config = {scrollZoom: true, displayModeBar: false, responsive: true};
+
+    // The min/max of one series actually within [xmin, xmax], or null if
+    // nothing in it falls in that window.
+    function seriesExtent(series, xmin, xmax) {
+        var lo = Infinity, hi = -Infinity;
+        for (var i = 0; i < series.x.length; i++) {
+            var t = new Date(series.x[i]).getTime();
+            if (t < xmin || t > xmax) continue;
+            var a = series.lo[i], b = series.hi[i];
+            if (a !== null && a !== undefined && !isNaN(a) && a < lo) lo = a;
+            if (b !== null && b !== undefined && !isNaN(b) && b > hi) hi = b;
+        }
+        if (lo === Infinity) return null;
+        return [lo, hi];
+    }
+
+    // Recomputes the price axis (and the volume axis, separately) to
+    // fit exactly what's visible in [xmin, xmax] - this is the part
+    // Plotly's own scroll-zoom doesn't do on its own.
+    function fitYAxes(gd, xmin, xmax) {
+        var relayout = {};
+        [["price", "yaxis"], ["volume", "yaxis2"]].forEach(function(pair) {
+            var seriesList = fitPayload[pair[0]];
+            if (!seriesList || !seriesList.length) return;
+            var lo = Infinity, hi = -Infinity;
+            seriesList.forEach(function(series) {
+                var ext = seriesExtent(series, xmin, xmax);
+                if (!ext) return;
+                if (ext[0] < lo) lo = ext[0];
+                if (ext[1] > hi) hi = ext[1];
+            });
+            if (lo === Infinity) return;
+            var pad = (hi - lo) * 0.08 || Math.abs(hi) * 0.08 || 1;
+            relayout[pair[1] + ".range"] = [lo - pad, hi + pad];
+            relayout[pair[1] + ".autorange"] = false;
+        });
+        if (Object.keys(relayout).length) {
+            Plotly.relayout(gd, relayout);
+        }
+    }
+
+    Plotly.newPlot("__DIV_ID__", figure.data, figure.layout, config).then(function(gd) {
+        gd.on("plotly_relayout", function(eventData) {
+            if (eventData["xaxis.range[0]"] !== undefined && eventData["xaxis.range[1]"] !== undefined) {
+                var xmin = new Date(eventData["xaxis.range[0]"]).getTime();
+                var xmax = new Date(eventData["xaxis.range[1]"]).getTime();
+                fitYAxes(gd, xmin, xmax);
+            } else if (eventData["xaxis.autorange"]) {
+                var update = {"yaxis.autorange": true};
+                if (gd.layout.yaxis2) { update["yaxis2.autorange"] = true; }
+                Plotly.relayout(gd, update);
+            }
+        });
+    });
+})();
+</script>
+"""
+
+
+def render_interactive_chart(fig, fit_payload):
+    """
+    Renders a chart via a small embedded Plotly.js component instead of
+    st.plotly_chart, so a custom zoom/pan handler can refit the price
+    (and volume) axis to whatever's actually visible - something
+    Plotly's built-in scroll-zoom doesn't do on its own (it only
+    rescales the existing range proportionally; it doesn't recompute a
+    fresh min/max from the currently-visible data). The y-axes are
+    already fixedrange (see build_figure()) so direct mouse/scroll
+    interaction can't move them on its own - only this script's own
+    computed relayout calls do, whenever the visible time window changes.
+
+    `fit_payload` is the second value build_figure() returns alongside
+    the figure itself.
+    """
+    import json
+    import uuid
+
+    div_id = f"chart-{uuid.uuid4().hex[:8]}"
+    height = (fig.layout.height or 500) + 10
+
+    html = (
+        _INTERACTIVE_CHART_HTML
+        .replace("__DIV_ID__", div_id)
+        .replace("__FIG_JSON__", fig.to_json())
+        .replace("__FIT_JSON__", json.dumps(fit_payload))
+    )
+    st.iframe(html, height=height)

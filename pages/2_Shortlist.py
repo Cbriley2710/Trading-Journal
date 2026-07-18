@@ -70,16 +70,24 @@ def render_chart_and_journal(symbol, entry_point, entry_label, key_prefix):
     settings = charting.render_settings_toolbar(control_cols[1])
     control_cols[0].caption("Scroll on the chart to zoom in/out through time; drag or swipe to pan.")
 
-    display_start = entry_point["entry_date"] - timedelta(days=padding_days)
+    # The chart opens showing just this default window (visible_start
+    # through today), but fetches further back than that (wide_start -
+    # see FETCH_BUFFER_MULTIPLIER) so scrolling/zooming out reveals real
+    # history instead of hitting an empty edge immediately. There's no
+    # future data to extend into on the right, so that side is unchanged.
+    visible_start = entry_point["entry_date"] - timedelta(days=padding_days)
     display_end = datetime.combine(date.today(), datetime.min.time()) + timedelta(days=1)
+
+    fetch_padding_days = padding_days * charting.FETCH_BUFFER_MULTIPLIER
+    wide_start = entry_point["entry_date"] - timedelta(days=fetch_padding_days)
 
     max_ma_period = max(settings["ma_periods"], default=0)
     lookback_days = max_ma_period * charting.LOOKBACK_DAYS_PER_PERIOD[interval]
-    fetch_start = display_start - timedelta(days=lookback_days)
+    fetch_start = wide_start - timedelta(days=lookback_days)
 
     with st.spinner(f"Fetching {timeframe_label.lower()} price history for {symbol}..."):
         history = charting.fetch_history(
-            symbol, fetch_start, display_start, display_end, interval, settings["ma_periods"])
+            symbol, fetch_start, wide_start, display_end, interval, settings["ma_periods"])
 
     if history.empty:
         st.warning(
@@ -97,16 +105,17 @@ def render_chart_and_journal(symbol, entry_point, entry_label, key_prefix):
     if settings["overlay_symbol"]:
         with st.spinner(f"Fetching overlay data for {settings['overlay_symbol']}..."):
             overlay_history = charting.fetch_history(
-                settings["overlay_symbol"], fetch_start, display_start, display_end, interval, [])
+                settings["overlay_symbol"], fetch_start, wide_start, display_end, interval, [])
         if overlay_history.empty:
             st.warning(f"No price data found for overlay ticker {settings['overlay_symbol']}. Showing chart without it.")
             overlay_history = None
 
     st.caption(charting.build_ohlc_summary(history, symbol, timeframe_label))
 
-    fig = charting.build_figure(
-        symbol, history, entry_point, settings, overlay_history, entry_label=entry_label, interval=interval)
-    st.plotly_chart(fig, use_container_width=True, config={"scrollZoom": True})
+    fig, fit_payload = charting.build_figure(
+        symbol, history, entry_point, settings, overlay_history, entry_label=entry_label, interval=interval,
+        visible_range=(visible_start, display_end))
+    charting.render_interactive_chart(fig, fit_payload)
 
     st.subheader("Today's Journal")
     conn = database.get_connection()

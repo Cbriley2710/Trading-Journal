@@ -99,19 +99,27 @@ control_cols = st.columns([4, 1])
 settings = charting.render_settings_toolbar(control_cols[1])
 control_cols[0].caption("Scroll on the chart to zoom in/out through time; drag or swipe to pan.")
 
-display_start = trade["entry_date"] - timedelta(days=padding_days)
-display_end = trade["date"] + timedelta(days=padding_days)
+# The chart opens showing just this default window (visible_start to
+# visible_end), but fetches a much wider one (wide_start to wide_end -
+# see FETCH_BUFFER_MULTIPLIER) so scrolling/zooming out on the chart
+# reveals real history instead of hitting an empty edge immediately.
+visible_start = trade["entry_date"] - timedelta(days=padding_days)
+visible_end = trade["date"] + timedelta(days=padding_days)
 
-# Fetch extra history before display_start so the longest selected
-# moving average already has a real window of data at the left edge
-# of the chart, instead of only "warming up" partway through it.
+fetch_padding_days = padding_days * charting.FETCH_BUFFER_MULTIPLIER
+wide_start = trade["entry_date"] - timedelta(days=fetch_padding_days)
+wide_end = trade["date"] + timedelta(days=fetch_padding_days)
+
+# Fetch extra history before wide_start so the longest selected moving
+# average already has a real window of data at the left edge of the
+# fetched range, instead of only "warming up" partway through it.
 max_ma_period = max(settings["ma_periods"], default=0)
 lookback_days = max_ma_period * charting.LOOKBACK_DAYS_PER_PERIOD[interval]
-fetch_start = display_start - timedelta(days=lookback_days)
+fetch_start = wide_start - timedelta(days=lookback_days)
 
 with st.spinner(f"Fetching {timeframe_label.lower()} price history for {trade['symbol']}..."):
     history = charting.fetch_history(
-        trade["symbol"], fetch_start, display_start, display_end, interval, settings["ma_periods"])
+        trade["symbol"], fetch_start, wide_start, wide_end, interval, settings["ma_periods"])
 
 if history.empty:
     st.warning(
@@ -124,7 +132,7 @@ overlay_history = None
 if settings["overlay_symbol"]:
     with st.spinner(f"Fetching overlay data for {settings['overlay_symbol']}..."):
         overlay_history = charting.fetch_history(
-            settings["overlay_symbol"], fetch_start, display_start, display_end, interval, [])
+            settings["overlay_symbol"], fetch_start, wide_start, wide_end, interval, [])
     if overlay_history.empty:
         st.warning(f"No price data found for overlay ticker {settings['overlay_symbol']}. Showing chart without it.")
         overlay_history = None
@@ -135,5 +143,7 @@ entry_point = {
     "entry_date": trade["entry_date"], "buy_price": trade["buy_price"],
     "exit_date": trade["date"], "sell_price": trade["sell_price"],
 }
-fig = charting.build_figure(trade["symbol"], history, entry_point, settings, overlay_history, interval=interval)
-st.plotly_chart(fig, use_container_width=True, config={"scrollZoom": True})
+fig, fit_payload = charting.build_figure(
+    trade["symbol"], history, entry_point, settings, overlay_history, interval=interval,
+    visible_range=(visible_start, visible_end))
+charting.render_interactive_chart(fig, fit_payload)
