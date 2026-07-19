@@ -88,10 +88,7 @@ def render_chart_and_journal(symbol, entry_point, entry_label, key_prefix):
             symbol, fetch_start, wide_start, display_end, interval, settings["ma_periods"])
 
     if history.empty:
-        st.warning(
-            f"No price data found for {symbol} in this date range. "
-            "It may be delisted, or Yahoo Finance may not have data for it."
-        )
+        st.warning(charting.history_error_message(history, symbol))
         return
 
     # A watchlist ticker has no real trade price - use the closing price
@@ -105,7 +102,10 @@ def render_chart_and_journal(symbol, entry_point, entry_label, key_prefix):
             overlay_history = charting.fetch_history(
                 settings["overlay_symbol"], fetch_start, wide_start, display_end, interval, [])
         if overlay_history.empty:
-            st.warning(f"No price data found for overlay ticker {settings['overlay_symbol']}. Showing chart without it.")
+            st.warning(
+                charting.history_error_message(overlay_history, settings["overlay_symbol"])
+                + " Showing chart without it."
+            )
             overlay_history = None
 
     # (The OHLC summary line now lives inside the chart component itself,

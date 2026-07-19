@@ -27,6 +27,7 @@ from datetime import timedelta
 import pandas as pd
 import streamlit as st
 import yfinance as yf
+from yfinance.exceptions import YFRateLimitError
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -152,10 +153,22 @@ def fetch_history(symbol, fetch_start, display_start, display_end, interval, ma_
     for moving averages) through `display_end`, computes any requested
     moving averages, then trims back down to `display_start` so the chart
     only shows the intended window. Returns an empty DataFrame if no data
-    was found (symbol invalid/delisted, or Yahoo Finance has no data for
-    the range) - callers are responsible for handling that case.
+    was found (symbol invalid/delisted, Yahoo Finance has no data for the
+    range, or the request failed/got rate-limited) - callers are
+    responsible for handling that case. When the empty DataFrame is due to
+    a rate limit specifically, `.attrs["error"] = "rate_limited"` is set on
+    it, so history_error_message() below can explain that accurately
+    instead of implying the symbol itself is bad.
     """
-    history = yf.Ticker(symbol).history(start=fetch_start, end=display_end, interval=interval)
+    try:
+        history = yf.Ticker(symbol).history(start=fetch_start, end=display_end, interval=interval)
+    except YFRateLimitError:
+        empty = pd.DataFrame()
+        empty.attrs["error"] = "rate_limited"
+        return empty
+    except Exception:
+        return pd.DataFrame()
+
     if history.empty:
         return history
 
@@ -167,6 +180,25 @@ def fetch_history(symbol, fetch_start, display_start, display_end, interval, ma_
         history[f"MA{period}"] = history["Close"].rolling(period).mean()
 
     return history[history.index >= display_start]
+
+
+def history_error_message(history, symbol):
+    """
+    A plain-language explanation for why fetch_history() came back
+    empty for `symbol` - distinguishes Yahoo Finance rate-limiting
+    (transient, worth retrying in a bit) from every other reason
+    (probably a bad or delisted ticker), using the "error" tag
+    fetch_history() attaches to the empty DataFrame via .attrs.
+    """
+    if history.attrs.get("error") == "rate_limited":
+        return (
+            f"Yahoo Finance is rate-limiting requests right now, so {symbol}'s "
+            "price data couldn't be fetched. Wait a minute or two and try again."
+        )
+    return (
+        f"No price data found for {symbol} in this date range. "
+        "It may be delisted, or Yahoo Finance may not have data for it."
+    )
 
 
 def _compute_rangebreaks(history, interval):
