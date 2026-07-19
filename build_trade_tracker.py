@@ -256,6 +256,19 @@ def update_excel_tracker(all_trades):
     list of completed trades (same dict shape database.get_trades()
     returns), appending only the ones that aren't already in the sheet.
     """
+    # The sheet's own formulas (% Change = exit/entry - 1, Value Change
+    # = final - initial, etc.) are all built on the buy-low-sell-high
+    # assumption of a LONG trade - a short trade's numbers would come
+    # out with the wrong sign no matter which way its prices were
+    # written into the columns. So short trades are left out of Excel
+    # entirely (they're still fully tracked in the database and on
+    # every dashboard page).
+    short_count = sum(1 for t in all_trades if t.get("direction") == "SHORT")
+    if short_count:
+        print(f"Note: {short_count} short trade(s) not written to Excel - the "
+              "template's formulas assume long trades.")
+    all_trades = [t for t in all_trades if t.get("direction") != "SHORT"]
+
     wb = openpyxl.load_workbook(TARGET_PATH)
     ws = wb[SHEET_NAME]
     table = ws.tables[TABLE_NAME]

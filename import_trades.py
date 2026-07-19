@@ -23,11 +23,35 @@ WHAT IT DOES, IN ORDER:
 
 import build_trade_tracker
 import database
-from analyze_trades import find_csv_file
+from analyze_trades import find_csv_file, find_csv_file_schwab
+
+
+def find_newest_export():
+    """
+    Looks in Downloads for BOTH brokerages' export files (Fidelity's
+    "History_for_Account_*.csv" and Schwab's "*_Transactions_*.csv")
+    and returns whichever matching file is newest overall - so this
+    script picks up whichever brokerage you exported from most
+    recently, same as the web importer's auto-detection.
+    """
+    candidates = []
+    for finder in (find_csv_file, find_csv_file_schwab):
+        try:
+            candidates.append(finder())
+        except FileNotFoundError:
+            pass  # no exports from this brokerage - fine, try the other
+
+    if not candidates:
+        raise FileNotFoundError(
+            "No Fidelity or Schwab trade-history export found in your "
+            "Downloads folder. Export one from your brokerage and try again."
+        )
+
+    return max(candidates, key=lambda f: f.stat().st_mtime)
 
 
 def main():
-    csv_path = find_csv_file()
+    csv_path = find_newest_export()
     print(f"Reading trades from: {csv_path.name}")
 
     conn = database.get_connection()
