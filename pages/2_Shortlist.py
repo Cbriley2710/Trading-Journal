@@ -1,29 +1,35 @@
 """
 Shortlist
 =====================
-Two independent lists live on this page, both feeding the same daily
-routine: pick a ticker, review its chart, and write down your thoughts
-for today. Clicking Save archives a chart snapshot (via
-charting.build_archive_snapshot() - a fixed 180-trading-day window, not
-whatever the interactive chart happens to be showing) together with
-your notes into that ticker's permanent Logbook, right away - no need
-to wait for anything. nightly_archive.py still runs as a fallback for
-any ticker you don't get around to saving on a given day.
+Five side-by-side lists feed the same daily routine: pick a ticker,
+review its chart, and write down your thoughts for today. Clicking
+Save archives a chart snapshot (via charting.build_archive_snapshot() -
+a fixed 180-trading-day window, not whatever the interactive chart
+happens to be showing) together with your notes into that ticker's
+permanent Logbook, right away - no need to wait for anything.
+nightly_archive.py still runs as a fallback for any ticker you don't
+get around to saving on a given day.
 
-  - Open Positions: derived automatically from your actual trades -
-    see database.get_open_positions(). A position shows up here as
-    soon as the database has more buys than sells for that symbol.
-    Since this app only learns about your trades when you import a
-    CSV (no live broker feed), this list is only as current as your
-    most recent import.
+  - Lists 1-4: tickers you add by hand (one at a time or a pasted
+    comma-separated batch), independent of whether you actually hold a
+    position - see database.get_watchlist(). Each list's name is
+    editable, a ticker lives in one list at a time, and a "Remove All"
+    button clears a whole list at once. A ticker stays listed (and
+    keeps getting archived) until you remove it; removing it doesn't
+    erase its Logbook history.
 
-  - Watchlists: FIVE side-by-side lists of tickers you add by hand
-    (one at a time or a pasted comma-separated batch), independent of
-    whether you actually hold a position - see database.get_watchlist().
-    Each list's name is editable, a ticker lives in one list at a time,
-    and clicking any ticker loads its chart + journal below. A ticker
-    stays listed (and keeps getting archived) until you remove it;
-    removing it doesn't erase its Logbook history.
+  - List 5 ("Open Positions"): auto-updates from your actual trades -
+    see database.get_open_positions() - and isn't manually editable,
+    since it isn't something you manage by hand. A position shows up
+    here as soon as the database has more buys than sells for that
+    symbol. Since this app only learns about your trades when you
+    import a CSV (no live broker feed), this list is only as current
+    as your most recent import.
+
+Clicking any ticker in any list loads its chart + journal below - List
+5's tickers additionally show fact tiles (entry price, current price,
+unrealized P/L) and a stop-loss input, since those need a real trade
+behind them.
 """
 
 from datetime import date, datetime, timedelta
@@ -141,31 +147,20 @@ def render_chart_and_journal(symbol, entry_point, entry_label, key_prefix):
             )
 
 
-def render_open_positions_section():
-    st.header("Open Positions")
+def position_label(position):
+    """A position's symbol, tagged "(Short)" when it's a short position -
+    used both by List 5's ticker buttons and its detail view below."""
+    return f"{position['symbol']} (Short)" if position["direction"] == "SHORT" else position["symbol"]
 
-    conn = database.get_connection()
-    positions = database.get_open_positions(conn)
 
-    if not positions:
-        st.info(
-            "No open positions right now. A ticker shows up here as soon as "
-            "an imported buy hasn't been matched to a sell yet."
-        )
-        return
-
-    def position_label(position):
-        short_tag = " (Short)" if position["direction"] == "SHORT" else ""
-        return (
-            f"{position['symbol']}{short_tag}: {position['quantity']:,.0f} shares @ "
-            f"avg ${position['avg_price']:,.2f} (opened {position['entry_date']:%m/%d/%Y})"
-        )
-
-    selected_index = st.selectbox(
-        "Choose an open position", options=range(len(positions)),
-        format_func=lambda i: position_label(positions[i]),
-    )
-    position = positions[selected_index]
+def render_position_detail(position, conn):
+    """
+    The rich view for an open position: fact tiles (entry, current
+    price, unrealized P/L), the stop-loss input, and the chart +
+    journal - everything the old dropdown-based Open Positions section
+    used to show, now driven directly by a position dict from List 5
+    instead of a dropdown selection.
+    """
     symbol = position["symbol"]
     is_short = position["direction"] == "SHORT"
 
@@ -235,19 +230,21 @@ def parse_ticker_input(text):
     return symbols
 
 
-def render_watchlist_section():
+def render_lists_section():
     st.header("Watchlists")
     st.caption(
-        "Five lists, each with an editable name. Add tickers one at a time "
-        "or paste a comma-separated batch; click any ticker to load its "
-        "chart and journal below. A ticker lives in one list at a time, and "
-        "every listed ticker gets the same nightly chart archive as an open "
-        "position."
+        "Lists 1-4 are yours to manage: add tickers one at a time or paste a "
+        "comma-separated batch, rename a list any time, or clear one with "
+        "Remove All. List 5 auto-updates from your open positions and isn't "
+        "editable by hand. Click any ticker in any list to load its chart "
+        "and journal below."
     )
 
     conn = database.get_connection()
     names = database.get_watchlist_names(conn)
     watchlist = database.get_watchlist(conn)
+    positions = database.get_open_positions(conn)
+    positions_by_symbol = {p["symbol"]: p for p in positions}
 
     # A message from the previous button click (add/remove), stashed in
     # session state so it survives the st.rerun() that refreshes the
@@ -256,7 +253,8 @@ def render_watchlist_section():
         st.info(st.session_state.pop("watchlist_message"))
 
     columns = st.columns(5)
-    for list_id, column in zip(range(1, 6), columns):
+
+    for list_id, column in zip(range(1, 5), columns[:4]):
         with column:
             # The list's name doubles as its editable title - typing a
             # new name saves right away, same silent-save pattern as
@@ -272,7 +270,8 @@ def render_watchlist_section():
                 "Add ticker(s)", key=f"wl_add_{list_id}",
                 placeholder="NVDA or NVDA, AMD", label_visibility="collapsed",
             )
-            if st.button("Add", key=f"wl_add_btn_{list_id}") and add_text.strip():
+            button_cols = st.columns(2)
+            if button_cols[0].button("Add", key=f"wl_add_btn_{list_id}") and add_text.strip():
                 already_elsewhere = []
                 added_count = 0
                 for sym in parse_ticker_input(add_text):
@@ -294,6 +293,18 @@ def render_watchlist_section():
                     st.session_state["watchlist_message"] = " ".join(parts)
                 st.rerun()
 
+            list_symbols = [w["symbol"] for w in watchlist if w["list_id"] == list_id]
+            if button_cols[1].button("Remove All", key=f"wl_clear_{list_id}") and list_symbols:
+                for sym in list_symbols:
+                    database.remove_from_watchlist(conn, sym)
+                selected = st.session_state.get("watchlist_selected")
+                if selected and selected.get("source") == "watchlist" and selected.get("symbol") in list_symbols:
+                    del st.session_state["watchlist_selected"]
+                st.session_state["watchlist_message"] = (
+                    f"Cleared {new_name} ({len(list_symbols)} ticker(s)). Their Logbook history is kept."
+                )
+                st.rerun()
+
             # A fixed-height, scrollable window for the ticker list
             # itself - so a long list scrolls in place instead of
             # pushing the chart/journal section further down the page
@@ -305,28 +316,51 @@ def render_watchlist_section():
                     if ticker_cols[0].button(
                         entry["symbol"], key=f"wl_{list_id}_{entry['symbol']}", width="stretch",
                     ):
-                        st.session_state["watchlist_selected"] = entry["symbol"]
+                        st.session_state["watchlist_selected"] = {"symbol": entry["symbol"], "source": "watchlist"}
                     if ticker_cols[1].button("✕", key=f"wlx_{list_id}_{entry['symbol']}"):
                         database.remove_from_watchlist(conn, entry["symbol"])
-                        if st.session_state.get("watchlist_selected") == entry["symbol"]:
+                        selected = st.session_state.get("watchlist_selected")
+                        if selected and selected.get("source") == "watchlist" and selected.get("symbol") == entry["symbol"]:
                             del st.session_state["watchlist_selected"]
                         st.session_state["watchlist_message"] = (
                             f"Removed {entry['symbol']}. Its Logbook history is kept."
                         )
                         st.rerun()
 
+    # List 5: read-only, auto-populated from your actual open trades -
+    # no name edit, no add/remove, since there's nothing to manage by
+    # hand here (a position only disappears once you actually close it).
+    with columns[4]:
+        st.markdown("**Open Positions**")
+        st.caption("Auto-updates from your trades.")
+        with st.container(height=250):
+            if not positions:
+                st.caption("No open positions right now.")
+            for position in positions:
+                if st.button(position_label(position), key=f"wl_pos_{position['symbol']}", width="stretch"):
+                    st.session_state["watchlist_selected"] = {"symbol": position["symbol"], "source": "position"}
+
     st.divider()
 
     selected = st.session_state.get("watchlist_selected")
-    entries_by_symbol = {w["symbol"]: w for w in watchlist}
-    if selected not in entries_by_symbol:
+    if not selected:
         st.caption("Click a ticker above to load its chart and journal.")
         return
 
-    entry_point = {"entry_date": entries_by_symbol[selected]["added_at"]}
-    render_chart_and_journal(selected, entry_point, "Added", key_prefix="watchlist")
+    if selected.get("source") == "position" and selected.get("symbol") in positions_by_symbol:
+        render_position_detail(positions_by_symbol[selected["symbol"]], conn)
+        return
+
+    watchlist_by_symbol = {w["symbol"]: w for w in watchlist}
+    if selected.get("source") == "watchlist" and selected.get("symbol") in watchlist_by_symbol:
+        entry = watchlist_by_symbol[selected["symbol"]]
+        entry_point = {"entry_date": entry["added_at"]}
+        render_chart_and_journal(entry["symbol"], entry_point, "Added", key_prefix="watchlist")
+        return
+
+    # The selection no longer resolves to anything real (position
+    # closed, ticker removed) - fall back cleanly instead of crashing.
+    st.caption("That ticker is no longer listed. Click one above to load its chart and journal.")
 
 
-render_open_positions_section()
-st.divider()
-render_watchlist_section()
+render_lists_section()
