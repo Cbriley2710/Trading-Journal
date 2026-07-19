@@ -22,6 +22,7 @@ import auth
 import charting
 import database
 import nav
+from ui import stat_tile
 
 st.set_page_config(page_title="Open Positions", layout="wide", initial_sidebar_state="collapsed")
 
@@ -31,21 +32,6 @@ if not auth.check_password():
 nav.render_top_nav("Open Positions")
 
 st.title("Open Positions")
-
-
-def stat_tile(column, label, value, color=None):
-    """Renders one number in a column, with its label above it - same
-    small helper every other page defines locally rather than sharing."""
-    style = f"color:{color};" if color else ""
-    column.markdown(
-        f"""
-        <div style="text-align:center;">
-            <div style="font-size:0.85rem;color:{charting.MUTED_COLOR};">{label}</div>
-            <div style="font-size:1.4rem;font-weight:600;{style}">{value}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
 
 
 def position_label(position):

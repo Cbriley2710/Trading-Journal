@@ -31,6 +31,7 @@ import auth
 import charting
 import database
 import nav
+import ui
 
 st.set_page_config(page_title="Shortlist", layout="wide", initial_sidebar_state="collapsed")
 
@@ -43,16 +44,8 @@ st.title("Shortlist")
 
 
 def fact_tile(column, label, value, color=None):
-    style = f"color:{color};" if color else ""
-    column.markdown(
-        f"""
-        <div style="text-align:center;">
-            <div style="font-size:0.85rem;color:{charting.MUTED_COLOR};">{label}</div>
-            <div style="font-size:1.3rem;font-weight:600;{style}">{value}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    """This page's slightly smaller variant of the shared stat tile."""
+    ui.stat_tile(column, label, value, color, size="1.3rem")
 
 
 def render_chart_and_journal(symbol, entry_point, entry_label, key_prefix):

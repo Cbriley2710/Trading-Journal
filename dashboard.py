@@ -35,6 +35,7 @@ import auth
 import charting
 import database
 import nav
+from ui import stat_tile
 
 # Reusing charting.py's colors (rather than picking new ones here) keeps
 # this page's charts looking like the same dark, DeepVue-styled charts
@@ -82,22 +83,6 @@ def load_trades():
     conn = database.get_connection()
     trades = database.get_trades(conn)
     return pd.DataFrame(trades)
-
-
-def stat_tile(column, label, value, color=None):
-    """Renders one number in a column, with its label above it. If a
-    color is given, the number is colored (green for a gain, red for a
-    loss) - otherwise it's left the normal text color."""
-    style = f"color:{color};" if color else ""
-    column.markdown(
-        f"""
-        <div style="text-align:center;">
-            <div style="font-size:0.85rem;color:{MUTED_COLOR};">{label}</div>
-            <div style="font-size:1.4rem;font-weight:600;{style}">{value}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
 
 
 trades_df = load_trades()
