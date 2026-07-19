@@ -539,6 +539,20 @@ def set_stop_loss(conn, symbol, stop_loss):
     conn.commit()
 
 
+def delete_stop_loss(conn, symbol):
+    """
+    Removes the saved stop-loss for a symbol entirely - used when a stop
+    of $0 is "saved" on the Shortlist page, which means "I don't have a
+    stop for this anymore," not "my stop is literally zero dollars."
+    (Storing an actual $0 stop would make the Open Positions page count
+    nearly the whole position's value as heat.) Deleting a stop that
+    was never saved is a harmless no-op.
+    """
+    cur = conn.cursor()
+    cur.execute("DELETE FROM position_stops WHERE symbol = %s", (symbol,))
+    conn.commit()
+
+
 def get_account_value(conn):
     """Returns the saved current account value, or None if it hasn't
     been set yet - used to turn dollar figures on the Dashboard into a

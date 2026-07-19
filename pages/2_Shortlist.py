@@ -201,12 +201,19 @@ def render_open_positions_section():
     # and move it any time (e.g. trailing it up as the trade works).
     saved_stop = database.get_stop_loss(conn, symbol)
     new_stop = st.number_input(
-        "Stop Loss", min_value=0.0, value=saved_stop or 0.0, step=0.01, format="%.2f",
+        "Stop Loss (0 = no stop)", min_value=0.0, value=saved_stop or 0.0, step=0.01, format="%.2f",
         key="stop_loss_input",
     )
     if st.button("Save Stop Loss", key="stop_loss_save"):
-        database.set_stop_loss(conn, symbol, new_stop)
-        st.success(f"Stop loss for {symbol} saved at ${new_stop:,.2f}.")
+        # 0 means "no stop," not a real $0 stop price - storing an
+        # actual $0 would make the Open Positions page count nearly the
+        # whole position's value as heat.
+        if new_stop > 0:
+            database.set_stop_loss(conn, symbol, new_stop)
+            st.success(f"Stop loss for {symbol} saved at ${new_stop:,.2f}.")
+        else:
+            database.delete_stop_loss(conn, symbol)
+            st.success(f"Stop loss for {symbol} cleared.")
 
     st.divider()
 
