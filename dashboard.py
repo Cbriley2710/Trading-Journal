@@ -184,18 +184,7 @@ cum_chart.add_trace(go.Scatter(
     hovertemplate="%{x|%b %d, %Y}<br>%{customdata[0]}: $%{customdata[1]:,.2f}"
                   "<br>Cumulative: $%{y:,.2f}<extra></extra>",
 ))
-cum_chart.update_layout(
-    height=350,
-    margin=dict(t=10, b=45),
-    xaxis_title=None,
-    yaxis_title="Cumulative P/L ($)",
-    plot_bgcolor=charting.CHART_BACKGROUND,
-    paper_bgcolor=charting.CHART_BACKGROUND,
-    font=dict(color=charting.CHART_TEXT_COLOR),
-)
-cum_chart.update_xaxes(gridcolor=charting.GRIDLINE_COLOR, showgrid=True, zeroline=False)
-cum_chart.update_yaxes(gridcolor=charting.GRIDLINE_COLOR, showgrid=True, zeroline=False)
-st.plotly_chart(cum_chart, theme=None)
+st.plotly_chart(charting.style_simple_chart(cum_chart, "Cumulative P/L ($)"), theme=None)
 
 # --- P/L by symbol chart -------------------------------------------------
 st.subheader("Profit/Loss by Symbol")
@@ -225,17 +214,7 @@ bar_chart.add_trace(go.Bar(
     customdata=bar_customdata,
     hovertemplate=bar_hovertemplate,
 ))
-bar_chart.update_layout(
-    height=350,
-    margin=dict(t=10, b=45),
-    yaxis_title="Total P/L ($)",
-    plot_bgcolor=charting.CHART_BACKGROUND,
-    paper_bgcolor=charting.CHART_BACKGROUND,
-    font=dict(color=charting.CHART_TEXT_COLOR),
-)
-bar_chart.update_xaxes(gridcolor=charting.GRIDLINE_COLOR, showgrid=True, zeroline=False)
-bar_chart.update_yaxes(gridcolor=charting.GRIDLINE_COLOR, showgrid=True, zeroline=False)
-st.plotly_chart(bar_chart, theme=None)
+st.plotly_chart(charting.style_simple_chart(bar_chart, "Total P/L ($)"), theme=None)
 
 # --- Equity allocation (open positions as % of account) -------------------
 st.subheader("Equity Allocation")
@@ -275,17 +254,7 @@ else:
                 textposition="outside",
                 hovertemplate="%{x}: %{y:.1f}% of account<extra></extra>",
             ))
-            alloc_chart.update_layout(
-                height=350,
-                margin=dict(t=10, b=45),
-                yaxis_title="% of Account",
-                plot_bgcolor=charting.CHART_BACKGROUND,
-                paper_bgcolor=charting.CHART_BACKGROUND,
-                font=dict(color=charting.CHART_TEXT_COLOR),
-            )
-            alloc_chart.update_xaxes(gridcolor=charting.GRIDLINE_COLOR, showgrid=True, zeroline=False)
-            alloc_chart.update_yaxes(gridcolor=charting.GRIDLINE_COLOR, showgrid=True, zeroline=False)
-            st.plotly_chart(alloc_chart, theme=None)
+            st.plotly_chart(charting.style_simple_chart(alloc_chart, "% of Account"), theme=None)
 
 st.divider()
 

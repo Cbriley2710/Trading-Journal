@@ -1,4 +1,4 @@
-"""
+﻿"""
 Open Positions
 =====================
 Two things this page answers that no other page does: how much money is
@@ -39,24 +39,6 @@ def position_label(position):
     same convention as the Shortlist page's picker, so a short position
     is never mistaken for a long one on these charts."""
     return f"{position['symbol']} (Short)" if position["direction"] == "SHORT" else position["symbol"]
-
-
-def style_bar_chart(fig, yaxis_title):
-    """The shared dark DeepVue look used by every chart in this app,
-    applied here to plain go.Bar figures (built directly, not through
-    charting.build_figure(), since these are simple single-series bar
-    charts rather than price charts)."""
-    fig.update_layout(
-        height=350,
-        margin=dict(t=10, b=45),
-        yaxis_title=yaxis_title,
-        plot_bgcolor=charting.CHART_BACKGROUND,
-        paper_bgcolor=charting.CHART_BACKGROUND,
-        font=dict(color=charting.CHART_TEXT_COLOR),
-    )
-    fig.update_xaxes(gridcolor=charting.GRIDLINE_COLOR, showgrid=True, zeroline=False)
-    fig.update_yaxes(gridcolor=charting.GRIDLINE_COLOR, showgrid=True, zeroline=False)
-    return fig
 
 
 conn = database.get_connection()
@@ -163,7 +145,7 @@ else:
             textposition="outside",
             hovertemplate="%{x}<br>Current Value: $%{y:,.2f}<br>Cost Basis: $%{customdata:,.2f}<extra></extra>",
         ))
-        st.plotly_chart(style_bar_chart(equity_chart, "Current Value ($)"), theme=None)
+        st.plotly_chart(charting.style_simple_chart(equity_chart, "Current Value ($)"), theme=None)
     else:
         st.info("No priced positions to chart yet.")
 
@@ -187,7 +169,7 @@ else:
             textposition="outside",
             hovertemplate="%{x}<br>Heat: $%{y:,.2f}<br>%{customdata:.1f}% of position<extra></extra>",
         ))
-        st.plotly_chart(style_bar_chart(heat_chart, "Heat ($)"), theme=None)
+        st.plotly_chart(charting.style_simple_chart(heat_chart, "Heat ($)"), theme=None)
     else:
         st.info("No positions with a stop-loss set yet.")
 
@@ -230,4 +212,4 @@ else:
         textposition="outside",
         hovertemplate="%{x}: $%{y:,.2f}<br>%{customdata[0]}<extra></extra>",
     ))
-    st.plotly_chart(style_bar_chart(trend_chart, "P/L ($)"), theme=None)
+    st.plotly_chart(charting.style_simple_chart(trend_chart, "P/L ($)"), theme=None)

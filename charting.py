@@ -234,6 +234,28 @@ def fetch_latest_price(symbol):
     return recent["Close"].iloc[-1]
 
 
+def style_simple_chart(fig, yaxis_title, height=350):
+    """
+    Applies this app's shared dark look to a plain bar/line figure -
+    the Dashboard's summary charts and the Open Positions charts all
+    use this (the full price charts have their own styling inside
+    build_figure()). Returns the same figure, styled, so it can be
+    passed straight into st.plotly_chart(). Until this existed, the
+    exact same styling block was copy-pasted around both pages.
+    """
+    fig.update_layout(
+        height=height,
+        margin=dict(t=10, b=45),
+        yaxis_title=yaxis_title,
+        plot_bgcolor=CHART_BACKGROUND,
+        paper_bgcolor=CHART_BACKGROUND,
+        font=dict(color=CHART_TEXT_COLOR),
+    )
+    fig.update_xaxes(gridcolor=GRIDLINE_COLOR, showgrid=True, zeroline=False)
+    fig.update_yaxes(gridcolor=GRIDLINE_COLOR, showgrid=True, zeroline=False)
+    return fig
+
+
 def render_png(fig, width=1400, scale=2):
     """
     Renders a Plotly figure to PNG bytes via kaleido. Tries the plain,
