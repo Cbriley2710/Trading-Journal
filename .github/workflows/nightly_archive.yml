@@ -46,3 +46,19 @@ jobs:
           REPORT_EMAIL_APP_PASSWORD: ${{ secrets.REPORT_EMAIL_APP_PASSWORD }}
           REPORT_EMAIL_RECIPIENTS: ${{ secrets.REPORT_EMAIL_RECIPIENTS }}
         run: python nightly_archive.py
+
+      # Same script, same repo, but pointed at a second person's own
+      # database and email via their own set of repository secrets
+      # (prefixed FRIEND_) - this is what lets one shared app/repo run
+      # the nightly archive for two completely separate sets of trading
+      # data. continue-on-error so a problem here (or these secrets not
+      # being filled in yet) never marks the run that already archived
+      # your own data as failed.
+      - name: Run nightly archive (friend)
+        continue-on-error: true
+        env:
+          DATABASE_URL: ${{ secrets.FRIEND_DATABASE_URL }}
+          REPORT_EMAIL_FROM: ${{ secrets.FRIEND_REPORT_EMAIL_FROM }}
+          REPORT_EMAIL_APP_PASSWORD: ${{ secrets.FRIEND_REPORT_EMAIL_APP_PASSWORD }}
+          REPORT_EMAIL_RECIPIENTS: ${{ secrets.FRIEND_REPORT_EMAIL_RECIPIENTS }}
+        run: python nightly_archive.py
