@@ -2,9 +2,13 @@
 Import Trades
 =====================
 A browser-based alternative to running import_trades.py from a terminal -
-export your trade history from Fidelity, then drop the CSV file here
-instead of running the script from a terminal. Useful for keeping the
-shortlist current on a day you don't have this PC open.
+export your trade history from Fidelity or Schwab, then drop the CSV
+file here instead of running the script from a terminal. Useful for
+keeping the shortlist current on a day you don't have this PC open.
+
+Which brokerage exported the file is auto-detected from its header row
+(see analyze_trades.detect_csv_source()) - you never have to say which
+one it is.
 
 IMPORTANT DISTINCTION: this only updates the shared database (the same
 one the Dashboard, Trade Analyzer, Shortlist, and Logbook pages all read
@@ -35,8 +39,9 @@ nav.render_top_nav("Import Trades")
 st.title("Import Trades")
 
 st.write(
-    "Export your trade history from Fidelity (the single-account export), "
-    "then drop the CSV file below."
+    "Export your trade history from Fidelity (the single-account export) "
+    "or Schwab (Transaction History), then drop the CSV file below - the "
+    "brokerage is detected automatically."
 )
 st.caption(
     "Note: this updates the shared database only - it won't touch your "
@@ -45,7 +50,7 @@ st.caption(
     "the Excel tracker updated."
 )
 
-uploaded_file = st.file_uploader("Fidelity CSV export", type="csv")
+uploaded_file = st.file_uploader("Fidelity or Schwab CSV export", type="csv")
 
 if uploaded_file is not None:
     with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:

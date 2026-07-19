@@ -50,8 +50,9 @@ def load_trades():
 
 def trade_label(trade):
     sign = "+" if trade["profit_loss"] >= 0 else ""
+    short_tag = " (Short)" if trade["direction"] == "SHORT" else ""
     return (
-        f"{trade['symbol']}: {trade['entry_date']:%m/%d/%Y} to "
+        f"{trade['symbol']}{short_tag}: {trade['entry_date']:%m/%d/%Y} to "
         f"{trade['date']:%m/%d/%Y} ({sign}${trade['profit_loss']:,.2f})"
     )
 
@@ -83,12 +84,23 @@ selected_index = st.selectbox(
 )
 trade = trades_sorted[selected_index]
 
+is_short = trade["direction"] == "SHORT"
+# For a short, "sell_price" is the short sale (the entry event) and
+# "buy_price" is the cover (the exit event) - the opposite pairing
+# from a long trade. See match_trades_fifo() in analyze_trades.py.
+entry_price, exit_price = (trade["sell_price"], trade["buy_price"]) if is_short \
+    else (trade["buy_price"], trade["sell_price"])
+
 outcome_color = charting.GOOD_COLOR if trade["profit_loss"] >= 0 else charting.CRITICAL_COLOR
-pct_change = (trade["sell_price"] / trade["buy_price"] - 1) * 100
+# Expressed as % of entry price, using the actual (correctly-signed)
+# profit_loss rather than a raw price ratio - a profitable short would
+# otherwise show a misleading negative % (cover price fell below the
+# entry price, which is the whole point of a profitable short).
+pct_change = (trade["profit_loss"] / (entry_price * trade["quantity"])) * 100 if entry_price else 0.0
 
 cols = st.columns(5)
-fact_tile(cols[0], "Entry", f"${trade['buy_price']:,.2f}")
-fact_tile(cols[1], "Exit", f"${trade['sell_price']:,.2f}")
+fact_tile(cols[0], "Short Entry" if is_short else "Entry", f"${entry_price:,.2f}")
+fact_tile(cols[1], "Cover" if is_short else "Exit", f"${exit_price:,.2f}")
 fact_tile(cols[2], "Shares", f"{trade['quantity']:,.0f}")
 fact_tile(cols[3], "P/L", f"${trade['profit_loss']:,.2f}", outcome_color)
 fact_tile(cols[4], "% Change", f"{pct_change:,.2f}%", outcome_color)
@@ -145,6 +157,7 @@ st.caption(charting.build_ohlc_summary(history, trade["symbol"], timeframe_label
 entry_point = {
     "entry_date": trade["entry_date"], "buy_price": trade["buy_price"],
     "exit_date": trade["date"], "sell_price": trade["sell_price"],
+    "direction": trade["direction"],
 }
 fig, fit_payload = charting.build_figure(
     trade["symbol"], history, entry_point, settings, overlay_history, interval=interval,

@@ -48,6 +48,13 @@ def stat_tile(column, label, value, color=None):
     )
 
 
+def position_label(position):
+    """A position's symbol, tagged "(Short)" when it's a short position -
+    same convention as the Shortlist page's picker, so a short position
+    is never mistaken for a long one on these charts."""
+    return f"{position['symbol']} (Short)" if position["direction"] == "SHORT" else position["symbol"]
+
+
 def style_bar_chart(fig, yaxis_title):
     """The shared dark DeepVue look used by every chart in this app,
     applied here to plain go.Bar figures (built directly, not through
@@ -75,18 +82,28 @@ enriched = []
 if positions:
     with st.spinner("Fetching current prices..."):
         for position in positions:
+            is_short = position["direction"] == "SHORT"
             current_price = charting.fetch_latest_price(position["symbol"])
             cost_basis = position["avg_price"] * position["quantity"]
 
             current_value = unrealized_pl = None
             if current_price is not None:
                 current_value = current_price * position["quantity"]
-                unrealized_pl = current_value - cost_basis
+                # A short profits when price FALLS below your average
+                # entry - the opposite direction from a long.
+                unrealized_pl = (cost_basis - current_value) if is_short else (current_value - cost_basis)
 
             stop_loss = stops.get(position["symbol"])
             heat_dollars = heat_pct = None
             if stop_loss is not None and current_price is not None:
-                heat_dollars = max(0.0, (current_price - stop_loss) * position["quantity"])
+                # Heat is the dollar distance from today's price to the
+                # stop - for a long that's downside (current - stop);
+                # for a short the risk is the opposite direction, price
+                # rising up through the stop (stop - current).
+                if is_short:
+                    heat_dollars = max(0.0, (stop_loss - current_price) * position["quantity"])
+                else:
+                    heat_dollars = max(0.0, (current_price - stop_loss) * position["quantity"])
                 if current_value:
                     heat_pct = heat_dollars / current_value * 100
 
@@ -145,7 +162,7 @@ else:
         by_value = sorted(priced, key=lambda e: e["current_value"], reverse=True)
         equity_chart = go.Figure()
         equity_chart.add_trace(go.Bar(
-            x=[e["symbol"] for e in by_value],
+            x=[position_label(e) for e in by_value],
             y=[e["current_value"] for e in by_value],
             marker_color=charting.CATEGORICAL_PALETTE[0],
             customdata=[e["cost_basis"] for e in by_value],
@@ -169,7 +186,7 @@ else:
         by_heat = sorted(heat_positions, key=lambda e: e["heat_dollars"], reverse=True)
         heat_chart = go.Figure()
         heat_chart.add_trace(go.Bar(
-            x=[e["symbol"] for e in by_heat],
+            x=[position_label(e) for e in by_heat],
             y=[e["heat_dollars"] for e in by_heat],
             marker_color=charting.CRITICAL_COLOR,
             customdata=[e["heat_pct"] for e in by_heat],
@@ -191,13 +208,13 @@ trend_rows = []
 for trade in database.get_trades(conn):
     trend_rows.append({
         "symbol": trade["symbol"], "entry_date": trade["entry_date"],
-        "pl": trade["profit_loss"], "is_open": False,
+        "pl": trade["profit_loss"], "is_open": False, "direction": trade["direction"],
     })
 for e in enriched:
     if e["unrealized_pl"] is not None:
         trend_rows.append({
             "symbol": e["symbol"], "entry_date": e["entry_date"],
-            "pl": e["unrealized_pl"], "is_open": True,
+            "pl": e["unrealized_pl"], "is_open": True, "direction": e["direction"],
         })
 
 if not trend_rows:
@@ -209,7 +226,7 @@ else:
     trend_chart = go.Figure()
     trend_chart.add_hline(y=0, line_color=charting.MUTED_COLOR, line_width=1)
     trend_chart.add_trace(go.Bar(
-        x=[f"{r['symbol']} {r['entry_date']:%m/%d}" for r in last10],
+        x=[f"{r['symbol']}{' (S)' if r['direction'] == 'SHORT' else ''} {r['entry_date']:%m/%d}" for r in last10],
         y=[r["pl"] for r in last10],
         marker=dict(
             color=[charting.GOOD_COLOR if r["pl"] >= 0 else charting.CRITICAL_COLOR for r in last10],

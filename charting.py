@@ -293,7 +293,7 @@ def render_png(fig, width=1400, scale=2):
             kopts={"path": chromium_path})
 
 
-def build_archive_snapshot(symbol, entry_date, buy_price, entry_label, as_of):
+def build_archive_snapshot(symbol, entry_date, buy_price, entry_label, as_of, direction="LONG"):
     """
     Builds the fixed-format chart image archived into a ticker's Logbook:
     always the most recent ARCHIVE_VISIBLE_TRADING_DAYS ending at `as_of`,
@@ -307,8 +307,9 @@ def build_archive_snapshot(symbol, entry_date, buy_price, entry_label, as_of):
     moving averages - those come from your saved Chart Settings
     (database.get_chart_preferences()), the same ones the interactive
     chart shows, so an archived snapshot never falls out of sync with
-    what you've actually configured. Returns PNG bytes, or None if no
-    price data was found.
+    what you've actually configured. `direction` ("LONG" or "SHORT")
+    decides which way the entry marker points - see build_figure().
+    Returns PNG bytes, or None if no price data was found.
     """
     conn = database.get_connection()
     saved_prefs = database.get_chart_preferences(conn)
@@ -331,8 +332,8 @@ def build_archive_snapshot(symbol, entry_date, buy_price, entry_label, as_of):
     if history.empty:
         return None
 
-    entry_point = {"entry_date": entry_date, "buy_price": buy_price} if buy_price is not None \
-        else {"entry_date": entry_date, "buy_price": price_near_date(history, entry_date)}
+    entry_point = {"entry_date": entry_date, "buy_price": buy_price, "direction": direction} if buy_price is not None \
+        else {"entry_date": entry_date, "buy_price": price_near_date(history, entry_date), "direction": direction}
 
     margin_days = visible_days * ARCHIVE_RIGHT_MARGIN_FRACTION
     visible_range = (display_start, display_end + timedelta(days=margin_days))
@@ -460,6 +461,17 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
     sell_price = entry_point.get("sell_price")
     is_closed = exit_date is not None and sell_price is not None
 
+    # For a LONG trade the entry event is a buy and the exit is a sell,
+    # so the entry marker is an up-triangle. For a SHORT trade it's the
+    # other way around: the entry event is the short SALE (an up-front
+    # sell) and the exit is buying it back to cover - so the triangle
+    # directions swap. `buy_price`/`sell_price` keep their names either
+    # way (see match_trades_fifo() in analyze_trades.py for why), but
+    # which one lines up with entry_date vs exit_date flips too.
+    direction = entry_point.get("direction", "LONG")
+    entry_symbol = "triangle-down" if direction == "SHORT" else "triangle-up"
+    exit_symbol = "triangle-up" if direction == "SHORT" else "triangle-down"
+
     ma_periods = settings["ma_periods"]
     ma_colors = settings["ma_colors"]
 
@@ -499,7 +511,7 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
         primary_pct = (history["Close"] / baseline - 1) * 100
         overlay_baseline = overlay_history["Close"].iloc[0]
         overlay_pct = (overlay_history["Close"] / overlay_baseline - 1) * 100
-        entry_pct = (buy_price / baseline - 1) * 100
+        buy_pct = (buy_price / baseline - 1) * 100
 
         fit_payload["price"].append({
             "x": [ts.isoformat() for ts in history.index],
@@ -534,19 +546,20 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
             ), row=1, col=1)
 
         if is_closed:
-            exit_pct = (sell_price / baseline - 1) * 100
+            sell_pct = (sell_price / baseline - 1) * 100
+            entry_value, exit_value = (sell_pct, buy_pct) if direction == "SHORT" else (buy_pct, sell_pct)
             fig.add_trace(go.Scatter(
-                x=[entry_date, exit_date], y=[entry_pct, exit_pct],
+                x=[entry_date, exit_date], y=[entry_value, exit_value],
                 mode="lines+markers",
                 line=dict(color=outcome_color, width=2, dash="dot"),
-                marker=dict(size=14, symbol=["triangle-up", "triangle-down"], color=outcome_color),
+                marker=dict(size=14, symbol=[entry_symbol, exit_symbol], color=outcome_color),
                 name="Entry / Exit", showlegend=False,
                 hovertemplate="%{x|%b %d, %Y}: %{y:.2f}%<extra></extra>",
             ), row=1, col=1)
         else:
             fig.add_trace(go.Scatter(
-                x=[entry_date], y=[entry_pct], mode="markers",
-                marker=dict(size=14, symbol="triangle-up", color=outcome_color),
+                x=[entry_date], y=[buy_pct], mode="markers",
+                marker=dict(size=14, symbol=entry_symbol, color=outcome_color),
                 name=entry_label, showlegend=False,
                 hovertemplate="%{x|%b %d, %Y}: %{y:.2f}%<extra></extra>",
             ), row=1, col=1)
@@ -589,18 +602,19 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
             ), row=1, col=1)
 
         if is_closed:
+            entry_value, exit_value = (sell_price, buy_price) if direction == "SHORT" else (buy_price, sell_price)
             fig.add_trace(go.Scatter(
-                x=[entry_date, exit_date], y=[buy_price, sell_price],
+                x=[entry_date, exit_date], y=[entry_value, exit_value],
                 mode="lines+markers",
                 line=dict(color=outcome_color, width=2, dash="dot"),
-                marker=dict(size=14, symbol=["triangle-up", "triangle-down"], color=outcome_color),
+                marker=dict(size=14, symbol=[entry_symbol, exit_symbol], color=outcome_color),
                 name="Entry / Exit", showlegend=False,
                 hovertemplate="%{x|%b %d, %Y}: $%{y:,.2f}<extra></extra>",
             ), row=1, col=1)
         else:
             fig.add_trace(go.Scatter(
                 x=[entry_date], y=[buy_price], mode="markers",
-                marker=dict(size=14, symbol="triangle-up", color=outcome_color),
+                marker=dict(size=14, symbol=entry_symbol, color=outcome_color),
                 name=entry_label, showlegend=False,
                 hovertemplate="%{x|%b %d, %Y}: $%{y:,.2f}<extra></extra>",
             ), row=1, col=1)

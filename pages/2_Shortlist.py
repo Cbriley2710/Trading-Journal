@@ -133,7 +133,7 @@ def render_chart_and_journal(symbol, entry_point, entry_label, key_prefix):
         with st.spinner("Saving and archiving today's chart..."):
             png_bytes = charting.build_archive_snapshot(
                 symbol, entry_point["entry_date"], entry_point["buy_price"], entry_label,
-                datetime.combine(today, datetime.min.time()))
+                datetime.combine(today, datetime.min.time()), direction=entry_point.get("direction", "LONG"))
         database.upsert_logbook_entry(conn, symbol, today, notes=notes, chart_image=png_bytes)
         if png_bytes is not None:
             st.success("Saved - today's chart has been archived to the Logbook.")
@@ -158,8 +158,9 @@ def render_open_positions_section():
         return
 
     def position_label(position):
+        short_tag = " (Short)" if position["direction"] == "SHORT" else ""
         return (
-            f"{position['symbol']}: {position['quantity']:,.0f} shares @ "
+            f"{position['symbol']}{short_tag}: {position['quantity']:,.0f} shares @ "
             f"avg ${position['avg_price']:,.2f} (opened {position['entry_date']:%m/%d/%Y})"
         )
 
@@ -169,6 +170,7 @@ def render_open_positions_section():
     )
     position = positions[selected_index]
     symbol = position["symbol"]
+    is_short = position["direction"] == "SHORT"
 
     with st.spinner(f"Fetching current price for {symbol}..."):
         current_price = charting.fetch_latest_price(symbol)
@@ -176,11 +178,16 @@ def render_open_positions_section():
     unrealized_pl = None
     unrealized_color = None
     if current_price is not None:
-        unrealized_pl = (current_price - position["avg_price"]) * position["quantity"]
+        # A short profits when price FALLS below your average entry -
+        # the opposite direction from a long position.
+        if is_short:
+            unrealized_pl = (position["avg_price"] - current_price) * position["quantity"]
+        else:
+            unrealized_pl = (current_price - position["avg_price"]) * position["quantity"]
         unrealized_color = charting.GOOD_COLOR if unrealized_pl >= 0 else charting.CRITICAL_COLOR
 
     cols = st.columns(5)
-    fact_tile(cols[0], "Entry (avg)", f"${position['avg_price']:,.2f}")
+    fact_tile(cols[0], "Short Entry (avg)" if is_short else "Entry (avg)", f"${position['avg_price']:,.2f}")
     fact_tile(cols[1], "Entry Date", f"{position['entry_date']:%m/%d/%Y}")
     fact_tile(cols[2], "Shares", f"{position['quantity']:,.0f}")
     fact_tile(cols[3], "Current Price", f"${current_price:,.2f}" if current_price is not None else "N/A")
@@ -202,8 +209,11 @@ def render_open_positions_section():
 
     st.divider()
 
-    entry_point = {"entry_date": position["entry_date"], "buy_price": position["avg_price"]}
-    render_chart_and_journal(symbol, entry_point, "Entry", key_prefix="position")
+    entry_point = {
+        "entry_date": position["entry_date"], "buy_price": position["avg_price"],
+        "direction": position["direction"],
+    }
+    render_chart_and_journal(symbol, entry_point, "Short Entry" if is_short else "Entry", key_prefix="position")
 
 
 def render_watchlist_section():

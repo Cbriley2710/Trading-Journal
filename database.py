@@ -59,7 +59,12 @@ import psycopg2
 from psycopg2.extras import Json
 import streamlit as st
 
-from analyze_trades import load_transactions, match_trades_fifo
+from analyze_trades import (
+    detect_csv_source,
+    load_transactions,
+    load_transactions_schwab,
+    match_trades_fifo,
+)
 
 
 def _get_database_url():
@@ -122,6 +127,15 @@ def init_db(conn):
             profit_loss DOUBLE PRECISION NOT NULL
         )
     """)
+    # `trades` already existed before short-position support was added,
+    # so CREATE TABLE IF NOT EXISTS above won't retroactively add this
+    # column to it - this ADD COLUMN does, and is safe to run every
+    # time. Existing rows all get 'LONG' (correct, since every trade
+    # imported before this was long-only), and get fully recalculated
+    # with real directions the next time rebuild_trades() runs.
+    cur.execute("""
+        ALTER TABLE trades ADD COLUMN IF NOT EXISTS direction TEXT NOT NULL DEFAULT 'LONG'
+    """)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS logbook_entries (
             id SERIAL PRIMARY KEY,
@@ -168,20 +182,24 @@ def init_db(conn):
 
 def import_transactions(conn, csv_path):
     """
-    Reads every buy/sell row out of the CSV (reusing load_transactions()
-    from analyze_trades.py) and adds any that aren't already stored.
+    Reads every buy/sell (and short-sale) row out of the CSV and adds
+    any that aren't already stored. Auto-detects whether the file is a
+    Fidelity or Schwab export (see analyze_trades.detect_csv_source())
+    and calls the matching parser - you never have to say which one it
+    is, just drop the file in.
 
     The `UNIQUE` constraint on the transactions table (set up in
     init_db above) means a row that's an exact match - same date,
     symbol, action, price, and quantity - as one already stored gets
     silently skipped instead of stored twice, thanks to
-    "ON CONFLICT DO NOTHING" below. Since your Fidelity CSV always
-    contains your FULL history, this is what lets you just re-export
-    and re-import any time without creating duplicates.
+    "ON CONFLICT DO NOTHING" below. Since each export always contains
+    your FULL history, this is what lets you just re-export and
+    re-import any time without creating duplicates.
 
     Returns how many new rows were actually added.
     """
-    transactions = load_transactions(csv_path)
+    source = detect_csv_source(csv_path)
+    transactions = load_transactions_schwab(csv_path) if source == "schwab" else load_transactions(csv_path)
     cur = conn.cursor()
 
     new_count = 0
@@ -233,14 +251,14 @@ def rebuild_trades(conn):
         for row in cur.fetchall()
     ]
 
-    closed_trades, _open_lots = match_trades_fifo(transactions)
+    closed_trades, _open_long_lots, _open_short_lots = match_trades_fifo(transactions)
     stock_trades = [t for t in closed_trades if not t["symbol"].strip().startswith("-")]
 
     cur.execute("DELETE FROM trades")
     cur.executemany(
         """
-        INSERT INTO trades (symbol, entry_date, buy_price, quantity, exit_date, sell_price, profit_loss)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO trades (symbol, entry_date, buy_price, quantity, exit_date, sell_price, profit_loss, direction)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """,
         [
             (
@@ -251,6 +269,7 @@ def rebuild_trades(conn):
                 t["date"].date(),
                 t["sell_price"],
                 t["profit_loss"],
+                t["direction"],
             )
             for t in stock_trades
         ],
@@ -268,7 +287,7 @@ def get_trades(conn):
     """
     cur = conn.cursor()
     cur.execute("""
-        SELECT symbol, entry_date, buy_price, quantity, exit_date, sell_price, profit_loss
+        SELECT symbol, entry_date, buy_price, quantity, exit_date, sell_price, profit_loss, direction
         FROM trades
         ORDER BY entry_date
     """)
@@ -282,23 +301,50 @@ def get_trades(conn):
             "date": datetime.combine(row[4], datetime.min.time()),
             "sell_price": row[5],
             "profit_loss": row[6],
+            "direction": row[7],
         }
         for row in cur.fetchall()
     ]
 
 
+def _aggregate_open_lots(open_lots, direction):
+    """
+    Turns match_trades_fifo()'s per-symbol list of still-open lots into
+    one row per symbol (total shares, a quantity-weighted average
+    price, and the earliest entry date among them), tagged with
+    `direction` ("LONG" or "SHORT") - shared by get_open_positions()
+    for both its long and short lots, since the aggregation math is
+    identical for either.
+    """
+    positions = []
+    for symbol, lots in open_lots.items():
+        if not lots or symbol.strip().startswith("-"):
+            continue  # no open shares, or an options contract (not tracked here)
+        total_quantity = sum(lot["quantity"] for lot in lots)
+        total_cost = sum(lot["quantity"] * lot["price"] for lot in lots)
+        positions.append({
+            "symbol": symbol,
+            "direction": direction,
+            "quantity": total_quantity,
+            "avg_price": total_cost / total_quantity,
+            "entry_date": min(lot["date"] for lot in lots),
+        })
+    return positions
+
+
 def get_open_positions(conn):
     """
-    Returns currently-open positions (bought but not yet sold), computed
-    fresh from match_trades_fifo()'s open_lots - the other side of the
-    same FIFO matching that produces `trades`. This is derived data, not
-    something separately tracked, so it's always consistent with whatever
-    is currently in `transactions` - no separate "position opened" event
-    needs to be recorded anywhere.
+    Returns currently-open positions (bought but not yet sold, or sold
+    short but not yet covered), computed fresh from match_trades_fifo()'s
+    open lots - the other side of the same FIFO matching that produces
+    `trades`. This is derived data, not something separately tracked, so
+    it's always consistent with whatever is currently in `transactions` -
+    no separate "position opened" event needs to be recorded anywhere.
 
-    One row per symbol, aggregating multiple still-open buy lots together
-    (total shares, a quantity-weighted average entry price, and the
-    earliest entry date among them). Sorted oldest entry first.
+    One row per symbol per direction (see _aggregate_open_lots() above) -
+    a symbol could in principle appear twice, once "LONG" and once
+    "SHORT", if it somehow has both open at once; they aren't netted
+    against each other. Sorted oldest entry first.
     """
     cur = conn.cursor()
     cur.execute("SELECT date, symbol, action, price, quantity FROM transactions")
@@ -313,20 +359,12 @@ def get_open_positions(conn):
         for row in cur.fetchall()
     ]
 
-    _closed_trades, open_lots = match_trades_fifo(transactions)
+    _closed_trades, open_long_lots, open_short_lots = match_trades_fifo(transactions)
 
-    positions = []
-    for symbol, lots in open_lots.items():
-        if not lots or symbol.strip().startswith("-"):
-            continue  # no open shares, or an options contract (not tracked here)
-        total_quantity = sum(lot["quantity"] for lot in lots)
-        total_cost = sum(lot["quantity"] * lot["price"] for lot in lots)
-        positions.append({
-            "symbol": symbol,
-            "quantity": total_quantity,
-            "avg_price": total_cost / total_quantity,
-            "entry_date": min(lot["date"] for lot in lots),
-        })
+    positions = (
+        _aggregate_open_lots(open_long_lots, "LONG")
+        + _aggregate_open_lots(open_short_lots, "SHORT")
+    )
 
     return sorted(positions, key=lambda p: p["entry_date"])
 
