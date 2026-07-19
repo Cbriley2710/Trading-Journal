@@ -135,9 +135,16 @@ else:
     priced = [e for e in enriched if e["current_value"] is not None]
     unpriced_symbols = [e["symbol"] for e in enriched if e["current_value"] is None]
     if unpriced_symbols:
-        st.warning(f"No current price available for: {', '.join(unpriced_symbols)}.")
+        st.warning(
+            f"No current price available for: {', '.join(unpriced_symbols)} - "
+            "excluded from every total below so the tiles stay consistent "
+            "with each other."
+        )
 
-    total_cost_basis = sum(e["cost_basis"] for e in enriched)
+    # All three dollar tiles are computed over the same `priced` set -
+    # mixing all positions into one tile but only priced ones into the
+    # others would make the tiles quietly describe different things.
+    total_cost_basis = sum(e["cost_basis"] for e in priced)
     total_current_value = sum(e["current_value"] for e in priced)
     total_unrealized_pl = sum(e["unrealized_pl"] for e in priced)
     unrealized_color = charting.GOOD_COLOR if total_unrealized_pl >= 0 else charting.CRITICAL_COLOR
