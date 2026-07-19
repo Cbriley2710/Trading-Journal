@@ -57,6 +57,11 @@ DOWN_CANDLE_COLOR = "#f19a9b"
 VOLUME_UP_COLOR = "#1e6b28"
 VOLUME_DOWN_COLOR = "#ba1b21"
 
+# The hover crosshair - a light, subtle dotted line so it reads as a
+# cursor aid, not another data series competing with the candles/MAs.
+SPIKE_COLOR = "rgba(255, 255, 255, 0.4)"
+SPIKE_DASH = "dot"
+
 # Default colors offered for each moving average you type in, assigned in
 # this fixed order (1st MA gets blue, 2nd gets green, etc.) - just a
 # starting point, since the interactive toolbar also lets you override any
@@ -494,6 +499,17 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
     # the y-axis range as you scroll/pan through time.
     fit_payload = {"price": [], "volume": []}
 
+    # Each day's own close-over-close % change (same definition as
+    # build_ohlc_summary()'s "Chg%") - lets the hover side-panel in
+    # render_interactive_chart() show "date + % change" for whichever
+    # day you're hovering over, without trying to parse Plotly's own
+    # compact-encoded trace data back apart in JS.
+    daily_change_pct = history["Close"].pct_change() * 100
+    fit_payload["daily"] = {
+        "x": [ts.isoformat() for ts in history.index],
+        "pct": [None if pd.isna(v) else float(v) for v in daily_change_pct],
+    }
+
     if show_volume:
         fig = make_subplots(
             rows=2, cols=1, shared_xaxes=True,
@@ -686,10 +702,21 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
         # box instead of panning - "pan" is what actually lets you slide
         # back and forth through time.
         dragmode="pan",
+        # "closest" (rather than a unified "x") ties each hover event to
+        # a single nearest point - what the crosshair and hover side
+        # panel below are both built around.
+        hovermode="closest",
     )
+    # A light dotted crosshair that follows the cursor (not snapped to
+    # the nearest candle) across the full height/width of the chart -
+    # showspikes/spikemode="across" is what draws the actual lines;
+    # SPIKE_COLOR/SPIKE_DASH are shared by both axes so the vertical and
+    # horizontal lines match.
     fig.update_xaxes(
         gridcolor=GRIDLINE_COLOR, showgrid=True, zeroline=False, rangeslider_visible=False,
         rangebreaks=_compute_rangebreaks(history, interval),
+        showspikes=True, spikemode="across", spikesnap="cursor",
+        spikecolor=SPIKE_COLOR, spikethickness=1, spikedash=SPIKE_DASH,
     )
     if visible_range is not None:
         fig.update_xaxes(range=list(visible_range))
@@ -697,7 +724,11 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
     # on the chart only ever moves through time - it can never distort
     # the price scale, which is what makes trackpad scroll-to-zoom feel
     # like "see more/fewer days" instead of "zoom in/out on everything."
-    fig.update_yaxes(gridcolor=GRIDLINE_COLOR, showgrid=True, zeroline=False, fixedrange=True)
+    fig.update_yaxes(
+        gridcolor=GRIDLINE_COLOR, showgrid=True, zeroline=False, fixedrange=True,
+        showspikes=True, spikemode="across", spikesnap="cursor",
+        spikecolor=SPIKE_COLOR, spikethickness=1, spikedash=SPIKE_DASH,
+    )
     if show_volume:
         fig.update_yaxes(title_text="Volume", row=2, col=1)
 
@@ -719,7 +750,19 @@ _INTERACTIVE_CHART_HTML = """
 </style>
 </head>
 <body>
-<div id="__DIV_ID__" style="width:100%;"></div>
+<div style="display:flex; gap:12px;">
+    <div id="__DIV_ID__" style="flex:1 1 auto; min-width:0;"></div>
+    <div style="flex:0 0 130px; display:flex; flex-direction:column; justify-content:center; gap:14px; font-family:sans-serif;">
+        <div style="text-align:center;">
+            <div style="font-size:0.8rem; color:__MUTED_COLOR__;">Date</div>
+            <div id="__DIV_ID__-date" style="font-size:1rem; font-weight:600; color:__CHART_TEXT_COLOR__;">-</div>
+        </div>
+        <div style="text-align:center;">
+            <div style="font-size:0.8rem; color:__MUTED_COLOR__;">% Change</div>
+            <div id="__DIV_ID__-pct" style="font-size:1.1rem; font-weight:600; color:__CHART_TEXT_COLOR__;">-</div>
+        </div>
+    </div>
+</div>
 <script src="https://cdn.plot.ly/plotly-2.35.3.min.js"></script>
 <script>
 (function() {
@@ -771,7 +814,71 @@ _INTERACTIVE_CHART_HTML = """
         }
     }
 
+    // Maps a day's timestamp (ms) to its index in fitPayload.daily, so
+    // the hover panel can look up "date + % change" for whichever point
+    // is nearest the cursor - built once, keyed by real epoch-ms
+    // timestamps (not raw date strings) since Plotly's own hover event
+    // may format a date differently than fitPayload's ISO strings do,
+    // even though both describe the same moment.
+    var dailyByTime = {};
+    var dailyDates = [];
+    if (fitPayload.daily) {
+        fitPayload.daily.x.forEach(function(iso, i) {
+            var t = new Date(iso).getTime();
+            dailyByTime[t] = i;
+            dailyDates.push(t);
+        });
+    }
+
+    var monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                       "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+    function formatDate(t) {
+        var d = new Date(t);
+        return monthNames[d.getUTCMonth()] + " " + d.getUTCDate() + ", " + d.getUTCFullYear();
+    }
+
+    function showDailyInfo(index) {
+        var dateEl = document.getElementById("__DIV_ID__-date");
+        var pctEl = document.getElementById("__DIV_ID__-pct");
+        if (index === null || index === undefined) {
+            dateEl.textContent = "-";
+            pctEl.textContent = "-";
+            pctEl.style.color = "__CHART_TEXT_COLOR__";
+            return;
+        }
+        dateEl.textContent = formatDate(fitPayload.daily.x[index]);
+        var pct = fitPayload.daily.pct[index];
+        if (pct === null || pct === undefined) {
+            pctEl.textContent = "N/A";
+            pctEl.style.color = "__CHART_TEXT_COLOR__";
+        } else {
+            pctEl.textContent = (pct >= 0 ? "+" : "") + pct.toFixed(2) + "%";
+            pctEl.style.color = pct >= 0 ? "__GOOD_COLOR__" : "__CRITICAL_COLOR__";
+        }
+    }
+
     Plotly.newPlot("__DIV_ID__", figure.data, figure.layout, config).then(function(gd) {
+        // Starts on the most recent day, same as the OHLC summary line
+        // above the chart, until you actually hover over something.
+        if (dailyDates.length) {
+            showDailyInfo(dailyByTime[dailyDates[dailyDates.length - 1]]);
+        }
+
+        gd.on("plotly_hover", function(eventData) {
+            if (!eventData.points || !eventData.points.length) return;
+            var t = new Date(eventData.points[0].x).getTime();
+            if (dailyByTime.hasOwnProperty(t)) {
+                showDailyInfo(dailyByTime[t]);
+            }
+        });
+
+        gd.on("plotly_unhover", function() {
+            if (dailyDates.length) {
+                showDailyInfo(dailyByTime[dailyDates[dailyDates.length - 1]]);
+            }
+        });
+
         // Debounced: calling Plotly.relayout() synchronously on every
         // single scroll-wheel tick fights with Plotly's own in-progress
         // zoom/pan handling (a rapid sequence of scroll events each
@@ -826,6 +933,10 @@ def render_interactive_chart(fig, fit_payload):
     html = (
         _INTERACTIVE_CHART_HTML
         .replace("__CHART_BACKGROUND__", CHART_BACKGROUND)
+        .replace("__CHART_TEXT_COLOR__", CHART_TEXT_COLOR)
+        .replace("__MUTED_COLOR__", MUTED_COLOR)
+        .replace("__GOOD_COLOR__", GOOD_COLOR)
+        .replace("__CRITICAL_COLOR__", CRITICAL_COLOR)
         .replace("__DIV_ID__", div_id)
         .replace("__FIG_JSON__", fig.to_json())
         .replace("__FIT_JSON__", json.dumps(fit_payload))
