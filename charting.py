@@ -716,6 +716,16 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
     if show_volume:
         fig.update_yaxes(title_text="Volume", row=2, col=1)
 
+    # No floating tooltip box over the chart - the crosshair plus the
+    # live summary line above the chart replace it. "none" (rather than
+    # "skip") still fires the hover EVENTS that summary line depends
+    # on; it only hides Plotly's own popup label. This deliberately
+    # clears the hovertemplates set on individual traces above, since a
+    # trace's hovertemplate would otherwise take precedence.
+    for trace in fig.data:
+        trace.hovertemplate = None
+        trace.hoverinfo = "none"
+
     return fig, fit_payload
 
 
@@ -792,28 +802,41 @@ _INTERACTIVE_CHART_HTML = """
         }
     }
 
-    // Maps a day's timestamp (ms) to its index in fitPayload.daily, so
-    // the hover panel can look up "date + % change" for whichever point
-    // is nearest the cursor - built once, keyed by real epoch-ms
-    // timestamps (not raw date strings) since Plotly's own hover event
-    // may format a date differently than fitPayload's ISO strings do,
-    // even though both describe the same moment.
-    var dailyByTime = {};
-    var dailyDates = [];
+    // Turns any timestamp string into one canonical "YYYY-MM-DD HH:MM"
+    // key by pure text manipulation - deliberately NOT via new Date(),
+    // because JavaScript parses a date-only string ("2026-07-17", how
+    // Plotly reports a daily bar's x in its hover event) as UTC but a
+    // datetime string ("2026-07-17T00:00:00", how fitPayload's ISO
+    // strings look) as LOCAL time, so the two never produce the same
+    // epoch value even though they describe the same bar - which is
+    // exactly the mismatch that kept the summary line from updating.
+    function barKey(x) {
+        var s = String(x).replace("T", " ");
+        if (s.length === 10) s += " 00:00";
+        return s.slice(0, 16);
+    }
+
+    // Maps each bar's canonical key to its index in fitPayload.daily,
+    // so the summary line can look up the bar under the cursor.
+    var dailyByKey = {};
+    var lastIndex = null;
     if (fitPayload.daily) {
         fitPayload.daily.x.forEach(function(iso, i) {
-            var t = new Date(iso).getTime();
-            dailyByTime[t] = i;
-            dailyDates.push(t);
+            dailyByKey[barKey(iso)] = i;
+            lastIndex = i;
         });
     }
 
     var monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
                        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-    function formatDate(t) {
-        var d = new Date(t);
-        return monthNames[d.getUTCMonth()] + " " + d.getUTCDate() + ", " + d.getUTCFullYear();
+    // Reads the date parts straight out of the ISO string (again, no
+    // new Date() - see barKey above for why parsing is a trap here).
+    function formatDate(iso) {
+        var s = String(iso);
+        var month = parseInt(s.slice(5, 7), 10);
+        var day = parseInt(s.slice(8, 10), 10);
+        return monthNames[month - 1] + " " + day + ", " + s.slice(0, 4);
     }
 
     function formatPrice(v) {
@@ -861,24 +884,19 @@ _INTERACTIVE_CHART_HTML = """
     }
 
     Plotly.newPlot("__DIV_ID__", figure.data, figure.layout, config).then(function(gd) {
-        // Starts on the most recent day, same as the OHLC summary line
-        // above the chart, until you actually hover over something.
-        if (dailyDates.length) {
-            showDailyInfo(dailyByTime[dailyDates[dailyDates.length - 1]]);
-        }
+        // Starts on the most recent bar until you actually hover.
+        showDailyInfo(lastIndex);
 
         gd.on("plotly_hover", function(eventData) {
             if (!eventData.points || !eventData.points.length) return;
-            var t = new Date(eventData.points[0].x).getTime();
-            if (dailyByTime.hasOwnProperty(t)) {
-                showDailyInfo(dailyByTime[t]);
+            var key = barKey(eventData.points[0].x);
+            if (dailyByKey.hasOwnProperty(key)) {
+                showDailyInfo(dailyByKey[key]);
             }
         });
 
         gd.on("plotly_unhover", function() {
-            if (dailyDates.length) {
-                showDailyInfo(dailyByTime[dailyDates[dailyDates.length - 1]]);
-            }
+            showDailyInfo(lastIndex);
         });
 
         // Debounced: calling Plotly.relayout() synchronously on every
