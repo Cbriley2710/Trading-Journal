@@ -309,15 +309,22 @@ st.subheader("Trades")
 
 table = filtered.sort_values("date", ascending=False).copy()
 table["Result"] = table["profit_loss"].apply(lambda v: "✅ Win" if v > 0 else "❌ Loss" if v < 0 else "Breakeven")
+# For a SHORT trade the stored buy_price is the COVER (the exit event)
+# and sell_price is the short sale (the entry event) - the opposite
+# pairing from a long trade (see match_trades_fifo in analyze_trades.py).
+# Swap them for display so "Entry Price" always means the price the
+# trade was opened at, whichever direction it was.
+is_short = table["direction"] == "SHORT"
+table["Entry Price"] = table["buy_price"].where(~is_short, table["sell_price"])
+table["Exit Price"] = table["sell_price"].where(~is_short, table["buy_price"])
+table["Direction"] = table["direction"].map({"LONG": "Long", "SHORT": "Short"})
 table = table.rename(columns={
     "symbol": "Symbol",
     "entry_date": "Date of Entry",
-    "buy_price": "Entry Price",
     "quantity": "# Shares",
     "date": "Date of Exit",
-    "sell_price": "Exit Price",
     "profit_loss": "Profit/Loss",
-})[["Symbol", "Date of Entry", "Entry Price", "# Shares", "Date of Exit",
+})[["Symbol", "Direction", "Date of Entry", "Entry Price", "# Shares", "Date of Exit",
     "Exit Price", "Profit/Loss", "Result"]]
 
 st.dataframe(
