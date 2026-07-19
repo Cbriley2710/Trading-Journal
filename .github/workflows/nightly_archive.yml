@@ -42,4 +42,7 @@ jobs:
       - name: Run nightly archive
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          REPORT_EMAIL_FROM: ${{ secrets.REPORT_EMAIL_FROM }}
+          REPORT_EMAIL_APP_PASSWORD: ${{ secrets.REPORT_EMAIL_APP_PASSWORD }}
+          REPORT_EMAIL_RECIPIENTS: ${{ secrets.REPORT_EMAIL_RECIPIENTS }}
         run: python nightly_archive.py

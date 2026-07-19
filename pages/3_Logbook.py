@@ -11,11 +11,21 @@ snapshot + whatever you wrote in that day's Shortlist journal box) -
 see database.get_logbook_entries(). A day with no notes or no archived
 image yet (e.g. today, before tonight's archive run) still shows up,
 just with whichever piece is missing left blank.
+
+This page also has a "Daily Report" section - one PDF covering every
+list, emailed to a mailing list. See daily_report.py. If you don't
+click Generate yourself, nightly_archive.py sends it automatically as
+a fallback once the night's archiving is done, the same "manual action
+is primary, the nightly script is the fallback" pattern already used
+for per-ticker chart archiving.
 """
+
+from datetime import date
 
 import streamlit as st
 
 import auth
+import daily_report
 import database
 import nav
 
@@ -29,6 +39,33 @@ nav.render_top_nav("Logbook")
 st.title("Logbook")
 
 conn = database.get_connection()
+
+st.header("Daily Report")
+st.caption(
+    "One PDF covering every list (each ticker's archived chart + notes for "
+    "the day you pick), emailed to your configured recipients. If you don't "
+    "generate it yourself, tonight's automated archive run sends it for you "
+    "as a fallback."
+)
+report_cols = st.columns([1, 2])
+report_date = report_cols[0].date_input("Report date", value=date.today(), key="report_date")
+
+already_sent_at = database.get_daily_report_status(conn, report_date)
+if already_sent_at:
+    report_cols[1].caption(f"Already generated and emailed for this date, at {already_sent_at:%I:%M %p}.")
+else:
+    report_cols[1].caption("Not generated yet for this date.")
+
+if st.button("Generate & Email Report"):
+    with st.spinner("Building the PDF and sending it..."):
+        success, message = daily_report.generate_and_send_report(conn, report_date)
+    if success:
+        st.success(message)
+    else:
+        st.error(message)
+
+st.divider()
+
 symbols = database.get_logbook_symbols(conn)
 
 if not symbols:

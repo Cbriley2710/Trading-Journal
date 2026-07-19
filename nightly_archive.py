@@ -4,14 +4,16 @@ Nightly Archive
 A fallback safety net: snapshots every currently-open position's chart
 AND every manually-added Watchlist ticker's chart, archiving each -
 together with whatever journal notes were written for today via the
-Shortlist page - into that ticker's permanent Logbook.
+Shortlist page - into that ticker's permanent Logbook. Afterward, also
+sends the Daily Report PDF (see daily_report.py) if it hasn't already
+been generated and emailed for today.
 
-The Shortlist page's Save button already does this immediately when
-you save a journal entry, using the exact same
-charting.build_archive_snapshot() this script calls - so this script's
-job is really just to catch any ticker you didn't get around to saving
-a journal entry for on a given day, not the primary way archiving
-happens anymore.
+Both the chart archiving and the report-sending follow the same
+pattern: the Shortlist page's Save button (for charts) and the
+Logbook page's "Generate & Email Report" button (for the report)
+already do this immediately when used - this script's job is really
+just to catch whatever didn't get done by hand on a given day, not the
+primary way either one happens.
 
 NOT a Streamlit page - a plain script, meant to be run once a night by
 a scheduled GitHub Actions workflow (see
@@ -23,6 +25,7 @@ has no scheduler of its own. Can also be run manually any time (e.g.
 from datetime import date, datetime
 
 import charting
+import daily_report
 import database
 
 
@@ -38,6 +41,26 @@ def archive_ticker(conn, symbol, entry_date, buy_price, entry_label, today, as_o
         conn, symbol, today, chart_image=png_bytes, archived_at=datetime.now())
     print(f"  {symbol}: archived ({len(png_bytes)} bytes).")
     return True
+
+
+def send_daily_report_fallback(conn, today):
+    """
+    Generates and emails the Daily Report for `today` if nothing is
+    already recorded for it in database.daily_reports (i.e. the
+    Logbook page's "Generate & Email Report" button wasn't used today) -
+    wrapped so a problem here (bad email secrets, an SMTP hiccup) never
+    affects the chart-archiving work main() already did above it.
+    """
+    if database.get_daily_report_status(conn, today):
+        print("Daily report already generated and emailed for today - skipping.")
+        return
+
+    print("Daily report not yet sent today - generating and emailing it now.")
+    try:
+        success, message = daily_report.generate_and_send_report(conn, today)
+        print(f"  {message}")
+    except Exception as exc:
+        print(f"  Daily report failed unexpectedly: {exc}")
 
 
 def main():
@@ -63,6 +86,8 @@ def main():
     print(f"Found {len(watchlist)} watchlist ticker(s) to archive.")
     for entry in watchlist:
         archive_ticker(conn, entry["symbol"], entry["added_at"], None, "Added", today, as_of)
+
+    send_daily_report_fallback(conn, today)
 
     print("Done.")
 

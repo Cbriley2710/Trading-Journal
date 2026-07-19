@@ -224,6 +224,12 @@ def init_db(conn):
             CONSTRAINT single_row CHECK (id = 1)
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS daily_reports (
+            report_date DATE PRIMARY KEY,
+            generated_at TIMESTAMP NOT NULL
+        )
+    """)
     conn.commit()
 
 
@@ -658,5 +664,33 @@ def set_account_value(conn, account_value):
             updated_at = NOW()
         """,
         (account_value,),
+    )
+    conn.commit()
+
+
+def get_daily_report_status(conn, report_date):
+    """Returns when the daily PDF report was generated/emailed for a
+    given date, or None if it hasn't been yet - used both by the
+    Logbook page's status caption and by nightly_archive.py to decide
+    whether it needs to generate the report itself as a fallback."""
+    cur = conn.cursor()
+    cur.execute("SELECT generated_at FROM daily_reports WHERE report_date = %s", (report_date,))
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def mark_daily_report_generated(conn, report_date):
+    """Records that the daily report for a date has been generated and
+    emailed - overwriting any earlier timestamp, since re-generating on
+    purpose (the button can be clicked more than once a day) should
+    always count as the latest "done" marker."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO daily_reports (report_date, generated_at)
+        VALUES (%s, NOW())
+        ON CONFLICT (report_date) DO UPDATE SET generated_at = NOW()
+        """,
+        (report_date,),
     )
     conn.commit()
