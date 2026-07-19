@@ -4,16 +4,19 @@ Nightly Archive
 A fallback safety net: snapshots every currently-open position's chart
 AND every manually-added Watchlist ticker's chart, archiving each -
 together with whatever journal notes were written for today via the
-Shortlist page - into that ticker's permanent Logbook. Afterward, also
-sends the Daily Report PDF (see daily_report.py) if it hasn't already
-been generated and emailed for today.
+Shortlist page - into that ticker's permanent Logbook (see
+archiving.py). Afterward, also sends the Daily Report PDF (see
+daily_report.py) if it hasn't already been generated and emailed for
+today.
 
 Both the chart archiving and the report-sending follow the same
 pattern: the Shortlist page's Save button (for charts) and the
-Logbook page's "Generate & Email Report" button (for the report)
-already do this immediately when used - this script's job is really
-just to catch whatever didn't get done by hand on a given day, not the
-primary way either one happens.
+Logbook page's "Generate & Email Report" button (for the report -
+which itself re-archives everything for today too, see
+daily_report.generate_and_send_report()) already do this immediately
+when used - this script's job is really just to catch whatever didn't
+get done by hand on a given day, not the primary way either one
+happens.
 
 NOT a Streamlit page - a plain script, meant to be run once a night by
 a scheduled GitHub Actions workflow (see
@@ -22,25 +25,11 @@ has no scheduler of its own. Can also be run manually any time (e.g.
 `python nightly_archive.py`) to archive today's snapshot on demand.
 """
 
-from datetime import date, datetime
+from datetime import date
 
-import charting
+import archiving
 import daily_report
 import database
-
-
-def archive_ticker(conn, symbol, entry_date, buy_price, entry_label, today, as_of, direction="LONG"):
-    """Builds and archives one ticker's chart snapshot for today. Returns
-    True if it was archived, False if no price data was found."""
-    png_bytes = charting.build_archive_snapshot(symbol, entry_date, buy_price, entry_label, as_of, direction=direction)
-    if png_bytes is None:
-        print(f"  {symbol}: no price data found, skipping.")
-        return False
-
-    database.upsert_logbook_entry(
-        conn, symbol, today, chart_image=png_bytes, archived_at=datetime.now())
-    print(f"  {symbol}: archived ({len(png_bytes)} bytes).")
-    return True
 
 
 def send_daily_report_fallback(conn, today):
@@ -66,27 +55,8 @@ def send_daily_report_fallback(conn, today):
 def main():
     conn = database.get_connection()
     today = date.today()
-    as_of = datetime.combine(today, datetime.min.time())
 
-    positions = database.get_open_positions(conn)
-    print(f"Found {len(positions)} open position(s) to archive.")
-    archived_symbols = set()
-    for position in positions:
-        is_short = position["direction"] == "SHORT"
-        archive_ticker(
-            conn, position["symbol"], position["entry_date"], position["avg_price"],
-            "Short Entry" if is_short else "Entry", today, as_of, direction=position["direction"])
-        archived_symbols.add(position["symbol"])
-
-    watchlist = database.get_watchlist(conn)
-    # Skip anything already archived as an open position tonight, so a
-    # ticker that happens to be both isn't processed twice with a less
-    # meaningful "Added" marker overwriting the real "Entry" one.
-    watchlist = [w for w in watchlist if w["symbol"] not in archived_symbols]
-    print(f"Found {len(watchlist)} watchlist ticker(s) to archive.")
-    for entry in watchlist:
-        archive_ticker(conn, entry["symbol"], entry["added_at"], None, "Added", today, as_of)
-
+    archiving.archive_all(conn, today)
     send_daily_report_fallback(conn, today)
 
     print("Done.")

@@ -43,9 +43,11 @@ conn = database.get_connection()
 st.header("Daily Report")
 st.caption(
     "One PDF covering every list (each ticker's archived chart + notes for "
-    "the day you pick), emailed to your configured recipients. If you don't "
-    "generate it yourself, tonight's automated archive run sends it for you "
-    "as a fallback."
+    "the day you pick), emailed to your configured recipients. Choosing "
+    "today's date first archives a fresh chart for every open position and "
+    "watchlist ticker, so the report doesn't depend on tonight's automated "
+    "archive run having happened yet. If you don't generate it yourself, "
+    "that automated run sends it for you as a fallback."
 )
 report_cols = st.columns([1, 2])
 report_date = report_cols[0].date_input("Report date", value=date.today(), key="report_date")
@@ -57,8 +59,13 @@ else:
     report_cols[1].caption("Not generated yet for this date.")
 
 if st.button("Generate & Email Report"):
-    with st.spinner("Building the PDF and sending it..."):
-        success, message = daily_report.generate_and_send_report(conn, report_date)
+    is_today = report_date == date.today()
+    spinner_text = (
+        "Archiving fresh charts and building/sending the report..." if is_today
+        else "Building the PDF and sending it..."
+    )
+    with st.spinner(spinner_text):
+        success, message = daily_report.generate_and_send_report(conn, report_date, archive_first=is_today)
     if success:
         st.success(message)
     else:

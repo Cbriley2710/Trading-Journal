@@ -32,6 +32,7 @@ import streamlit as st
 from fpdf import FPDF
 from PIL import Image
 
+import archiving
 import database
 
 PAGE_MARGIN_MM = 15
@@ -193,15 +194,26 @@ def send_report_email(pdf_bytes, report_date):
         smtp.send_message(msg)
 
 
-def generate_and_send_report(conn, report_date):
+def generate_and_send_report(conn, report_date, archive_first=False):
     """
     Builds and emails the report for one day, then records it in
     database.daily_reports so nightly_archive.py's fallback knows not
     to also send one. Never raises - returns (success, message) so
     both the Logbook page's button and the nightly script can show/log
     the result the same simple way.
+
+    If archive_first is True, archives a fresh chart for every open
+    position and watchlist ticker (via archiving.archive_all()) before
+    building the PDF - this is what lets the Logbook page's button do
+    everything the nightly job would have done, on demand, instead of
+    only using whatever charts happened to already be archived. Only
+    meaningful for today: a past report_date can't retroactively get a
+    same-day snapshot, so the Logbook page only passes True when the
+    selected date is today.
     """
     try:
+        if archive_first:
+            archiving.archive_all(conn, report_date)
         pdf_bytes = build_report_pdf(conn, report_date)
         send_report_email(pdf_bytes, report_date)
     except Exception as exc:
