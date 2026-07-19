@@ -294,20 +294,26 @@ def render_watchlist_section():
                     st.session_state["watchlist_message"] = " ".join(parts)
                 st.rerun()
 
-            for entry in [w for w in watchlist if w["list_id"] == list_id]:
-                ticker_cols = st.columns([4, 1])
-                if ticker_cols[0].button(
-                    entry["symbol"], key=f"wl_{list_id}_{entry['symbol']}", width="stretch",
-                ):
-                    st.session_state["watchlist_selected"] = entry["symbol"]
-                if ticker_cols[1].button("✕", key=f"wlx_{list_id}_{entry['symbol']}"):
-                    database.remove_from_watchlist(conn, entry["symbol"])
-                    if st.session_state.get("watchlist_selected") == entry["symbol"]:
-                        del st.session_state["watchlist_selected"]
-                    st.session_state["watchlist_message"] = (
-                        f"Removed {entry['symbol']}. Its Logbook history is kept."
-                    )
-                    st.rerun()
+            # A fixed-height, scrollable window for the ticker list
+            # itself - so a long list scrolls in place instead of
+            # pushing the chart/journal section further down the page
+            # (only this part scrolls; the name and add-ticker inputs
+            # above stay put).
+            with st.container(height=250):
+                for entry in [w for w in watchlist if w["list_id"] == list_id]:
+                    ticker_cols = st.columns([4, 1])
+                    if ticker_cols[0].button(
+                        entry["symbol"], key=f"wl_{list_id}_{entry['symbol']}", width="stretch",
+                    ):
+                        st.session_state["watchlist_selected"] = entry["symbol"]
+                    if ticker_cols[1].button("✕", key=f"wlx_{list_id}_{entry['symbol']}"):
+                        database.remove_from_watchlist(conn, entry["symbol"])
+                        if st.session_state.get("watchlist_selected") == entry["symbol"]:
+                            del st.session_state["watchlist_selected"]
+                        st.session_state["watchlist_message"] = (
+                            f"Removed {entry['symbol']}. Its Logbook history is kept."
+                        )
+                        st.rerun()
 
     st.divider()
 
