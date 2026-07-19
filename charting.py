@@ -219,8 +219,16 @@ def fetch_latest_price(symbol):
     None if Yahoo Finance has no recent data for it. Used anywhere that
     just needs today's price: the Shortlist page's unrealized P/L, and
     the Open Positions page's equity/heat calculations.
+
+    Also returns None if the lookup itself blows up (a network hiccup,
+    Yahoo rate-limiting, etc.) - every caller already handles None as
+    "no price available right now," which beats crashing a whole page
+    over one symbol's failed lookup.
     """
-    recent = yf.Ticker(symbol).history(period="5d")
+    try:
+        recent = yf.Ticker(symbol).history(period="5d")
+    except Exception:
+        return None
     if recent.empty:
         return None
     return recent["Close"].iloc[-1]
