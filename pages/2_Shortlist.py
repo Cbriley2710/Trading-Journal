@@ -17,10 +17,13 @@ any ticker you don't get around to saving on a given day.
     CSV (no live broker feed), this list is only as current as your
     most recent import.
 
-  - Watchlist: tickers you add by hand below, independent of whether
-    you actually hold a position - see database.get_watchlist(). A
-    ticker stays here (and keeps getting archived) until you remove
-    it; removing it doesn't erase its Logbook history.
+  - Watchlists: FIVE side-by-side lists of tickers you add by hand
+    (one at a time or a pasted comma-separated batch), independent of
+    whether you actually hold a position - see database.get_watchlist().
+    Each list's name is editable, a ticker lives in one list at a time,
+    and clicking any ticker loads its chart + journal below. A ticker
+    stays listed (and keeps getting archived) until you remove it;
+    removing it doesn't erase its Logbook history.
 """
 
 from datetime import date, datetime, timedelta
@@ -217,47 +220,105 @@ def render_open_positions_section():
     render_chart_and_journal(symbol, entry_point, "Short Entry" if is_short else "Entry", key_prefix="position")
 
 
+def parse_ticker_input(text):
+    """
+    Turns "NVDA" or a pasted batch like "NVDA, AMD MSFT" (commas,
+    spaces, or new lines between tickers - however it was copied) into
+    a clean, de-duplicated list of uppercase symbols, keeping the order
+    they were typed.
+    """
+    symbols = []
+    for part in text.replace(",", " ").split():
+        sym = part.strip().upper()
+        if sym and sym not in symbols:
+            symbols.append(sym)
+    return symbols
+
+
 def render_watchlist_section():
-    st.header("Watchlist")
+    st.header("Watchlists")
     st.caption(
-        "Tickers you add here get the same daily chart + journal treatment "
-        "as an open position, even without an actual trade behind them - "
-        "they stay active until you remove them below."
+        "Five lists, each with an editable name. Add tickers one at a time "
+        "or paste a comma-separated batch; click any ticker to load its "
+        "chart and journal below. A ticker lives in one list at a time, and "
+        "every listed ticker gets the same nightly chart archive as an open "
+        "position."
     )
 
     conn = database.get_connection()
-
-    add_cols = st.columns([3, 1])
-    new_symbol = add_cols[0].text_input("Add a ticker", key="watchlist_add_input", placeholder="e.g. NVDA")
-    if add_cols[1].button("Add", key="watchlist_add_button") and new_symbol.strip():
-        database.add_to_watchlist(conn, new_symbol.strip().upper())
-        st.rerun()
-
+    names = database.get_watchlist_names(conn)
     watchlist = database.get_watchlist(conn)
 
-    if not watchlist:
-        st.info("Your watchlist is empty - add a ticker above to start tracking it.")
-        return
+    # A message from the previous button click (add/remove), stashed in
+    # session state so it survives the st.rerun() that refreshes the
+    # lists - showing it directly before rerunning would lose it.
+    if "watchlist_message" in st.session_state:
+        st.info(st.session_state.pop("watchlist_message"))
 
-    def watchlist_label(entry):
-        return f"{entry['symbol']} (added {entry['added_at']:%m/%d/%Y})"
+    columns = st.columns(5)
+    for list_id, column in zip(range(1, 6), columns):
+        with column:
+            # The list's name doubles as its editable title - typing a
+            # new name saves right away, same silent-save pattern as
+            # the Chart Settings moving averages.
+            new_name = st.text_input(
+                f"List {list_id} name", value=names[list_id],
+                key=f"wl_name_{list_id}", label_visibility="collapsed",
+            )
+            if new_name.strip() and new_name != names[list_id]:
+                database.set_watchlist_name(conn, list_id, new_name.strip())
 
-    selected_index = st.selectbox(
-        "Choose a watchlist ticker", options=range(len(watchlist)),
-        format_func=lambda i: watchlist_label(watchlist[i]),
-    )
-    entry = watchlist[selected_index]
-    symbol = entry["symbol"]
+            add_text = st.text_input(
+                "Add ticker(s)", key=f"wl_add_{list_id}",
+                placeholder="NVDA or NVDA, AMD", label_visibility="collapsed",
+            )
+            if st.button("Add", key=f"wl_add_btn_{list_id}") and add_text.strip():
+                already_elsewhere = []
+                added_count = 0
+                for sym in parse_ticker_input(add_text):
+                    if database.add_to_watchlist(conn, sym, list_id):
+                        added_count += 1
+                    else:
+                        already_elsewhere.append(sym)
+                parts = []
+                if added_count:
+                    parts.append(f"Added {added_count} ticker(s) to {new_name}.")
+                if already_elsewhere:
+                    locations = {w["symbol"]: w["list_id"] for w in database.get_watchlist(conn)}
+                    where = ", ".join(
+                        f"{sym} (already in {names.get(locations.get(sym), '?')})"
+                        for sym in already_elsewhere
+                    )
+                    parts.append(f"Not added: {where}.")
+                if parts:
+                    st.session_state["watchlist_message"] = " ".join(parts)
+                st.rerun()
 
-    if st.button(f"Remove {symbol} from Watchlist"):
-        database.remove_from_watchlist(conn, symbol)
-        st.success(f"Removed {symbol}. Its Logbook history is kept.")
-        st.rerun()
+            for entry in [w for w in watchlist if w["list_id"] == list_id]:
+                ticker_cols = st.columns([4, 1])
+                if ticker_cols[0].button(
+                    entry["symbol"], key=f"wl_{list_id}_{entry['symbol']}", width="stretch",
+                ):
+                    st.session_state["watchlist_selected"] = entry["symbol"]
+                if ticker_cols[1].button("✕", key=f"wlx_{list_id}_{entry['symbol']}"):
+                    database.remove_from_watchlist(conn, entry["symbol"])
+                    if st.session_state.get("watchlist_selected") == entry["symbol"]:
+                        del st.session_state["watchlist_selected"]
+                    st.session_state["watchlist_message"] = (
+                        f"Removed {entry['symbol']}. Its Logbook history is kept."
+                    )
+                    st.rerun()
 
     st.divider()
 
-    entry_point = {"entry_date": entry["added_at"]}
-    render_chart_and_journal(symbol, entry_point, "Added", key_prefix="watchlist")
+    selected = st.session_state.get("watchlist_selected")
+    entries_by_symbol = {w["symbol"]: w for w in watchlist}
+    if selected not in entries_by_symbol:
+        st.caption("Click a ticker above to load its chart and journal.")
+        return
+
+    entry_point = {"entry_date": entries_by_symbol[selected]["added_at"]}
+    render_chart_and_journal(selected, entry_point, "Added", key_prefix="watchlist")
 
 
 render_open_positions_section()

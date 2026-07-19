@@ -89,12 +89,38 @@ def _get_database_url():
     )
 
 
+# Whether this process has already made sure every table/column exists.
+# A page render opens several separate connections (one per section),
+# and running the schema setup on every single one caused a real
+# deadlock: an ALTER TABLE needs an exclusive lock on its table, and an
+# earlier connection from the SAME page that had merely SELECTed from
+# that table was still holding a read lock open - so the second
+# connection waited forever. Running init_db() once per process (the
+# first connection) avoids that entirely, and makes every later
+# connection faster too.
+_schema_ready = False
+
+
 def get_connection():
-    """Opens a connection to the hosted Postgres database and makes
-    sure both tables exist."""
+    """Opens a connection to the hosted Postgres database - the first
+    call in this process also makes sure every table exists."""
+    global _schema_ready
     conn = psycopg2.connect(_get_database_url())
-    init_db(conn)
+    if not _schema_ready:
+        init_db(conn)
+        _schema_ready = True
     return conn
+
+
+def _column_exists(cur, table, column):
+    """Whether a column already exists - a plain read, used so the
+    ALTER TABLE migrations below (which need an exclusive lock on their
+    table) only actually run the one time they have real work to do."""
+    cur.execute(
+        "SELECT 1 FROM information_schema.columns WHERE table_name = %s AND column_name = %s",
+        (table, column),
+    )
+    return cur.fetchone() is not None
 
 
 def init_db(conn):
@@ -129,13 +155,16 @@ def init_db(conn):
     """)
     # `trades` already existed before short-position support was added,
     # so CREATE TABLE IF NOT EXISTS above won't retroactively add this
-    # column to it - this ADD COLUMN does, and is safe to run every
-    # time. Existing rows all get 'LONG' (correct, since every trade
-    # imported before this was long-only), and get fully recalculated
-    # with real directions the next time rebuild_trades() runs.
-    cur.execute("""
-        ALTER TABLE trades ADD COLUMN IF NOT EXISTS direction TEXT NOT NULL DEFAULT 'LONG'
-    """)
+    # column to it - this ADD COLUMN does. Existing rows all get 'LONG'
+    # (correct, since every trade imported before this was long-only),
+    # and get fully recalculated with real directions the next time
+    # rebuild_trades() runs. Guarded by _column_exists so the exclusive
+    # table lock ALTER needs is only ever taken the one time there's
+    # real work to do.
+    if not _column_exists(cur, "trades", "direction"):
+        cur.execute("""
+            ALTER TABLE trades ADD COLUMN direction TEXT NOT NULL DEFAULT 'LONG'
+        """)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS logbook_entries (
             id SERIAL PRIMARY KEY,
@@ -152,6 +181,24 @@ def init_db(conn):
             id SERIAL PRIMARY KEY,
             symbol TEXT NOT NULL UNIQUE,
             added_at TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+    """)
+    # `watchlist` predates having five separate lists, so CREATE TABLE
+    # IF NOT EXISTS alone won't add this column to the existing table -
+    # this does (guarded like the trades migration above). Existing
+    # tickers land in list 1. A ticker still lives in exactly ONE list
+    # (the UNIQUE symbol constraint above stays) - the journal/Logbook
+    # is keyed per symbol per day, so the same ticker in two lists
+    # would share one journal anyway and just get archived twice a
+    # night.
+    if not _column_exists(cur, "watchlist", "list_id"):
+        cur.execute("""
+            ALTER TABLE watchlist ADD COLUMN list_id INTEGER NOT NULL DEFAULT 1
+        """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS watchlist_names (
+            list_id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL
         )
     """)
     cur.execute("""
@@ -439,31 +486,65 @@ def get_logbook_symbols(conn):
 
 
 def get_watchlist(conn):
-    """Returns every manually-tracked ticker, oldest added first."""
+    """Returns every manually-tracked ticker across all five lists,
+    oldest added first - each row says which list it belongs to."""
     cur = conn.cursor()
-    cur.execute("SELECT symbol, added_at FROM watchlist ORDER BY added_at")
-    return [{"symbol": row[0], "added_at": row[1]} for row in cur.fetchall()]
+    cur.execute("SELECT symbol, added_at, list_id FROM watchlist ORDER BY added_at")
+    return [{"symbol": row[0], "added_at": row[1], "list_id": row[2]} for row in cur.fetchall()]
 
 
-def add_to_watchlist(conn, symbol):
-    """Adds a ticker to the watchlist. Re-adding one already being tracked
-    is a harmless no-op - it doesn't reset its added_at date."""
+def add_to_watchlist(conn, symbol, list_id=1):
+    """
+    Adds a ticker to one of the five watchlists. A ticker can only live
+    in ONE list at a time - if it's already somewhere (this list or
+    another), nothing changes and this returns False so the page can
+    say where it already is. Returns True when it was actually added.
+    """
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO watchlist (symbol) VALUES (%s) ON CONFLICT (symbol) DO NOTHING",
-        (symbol,),
+        "INSERT INTO watchlist (symbol, list_id) VALUES (%s, %s) ON CONFLICT (symbol) DO NOTHING",
+        (symbol, list_id),
     )
     conn.commit()
+    return cur.rowcount == 1
 
 
 def remove_from_watchlist(conn, symbol):
     """
-    Removes a ticker from the watchlist - it stops being archived going
-    forward, but its existing logbook_entries history is untouched, same
-    as a closed trade's logbook staying permanently archived.
+    Removes a ticker from whichever watchlist it's in - it stops being
+    archived going forward, but its existing logbook_entries history is
+    untouched, same as a closed trade's logbook staying permanently
+    archived.
     """
     cur = conn.cursor()
     cur.execute("DELETE FROM watchlist WHERE symbol = %s", (symbol,))
+    conn.commit()
+
+
+def get_watchlist_names(conn):
+    """
+    Returns the display name of each of the five watchlists as
+    {1: "List 1", ..., 5: "List 5"} - falling back to those defaults
+    for any list whose name has never been edited.
+    """
+    cur = conn.cursor()
+    cur.execute("SELECT list_id, name FROM watchlist_names")
+    saved = dict(cur.fetchall())
+    return {list_id: saved.get(list_id, f"List {list_id}") for list_id in range(1, 6)}
+
+
+def set_watchlist_name(conn, list_id, name):
+    """Saves (or updates) one watchlist's display name - same upsert
+    pattern as set_stop_loss()."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO watchlist_names (list_id, name)
+        VALUES (%s, %s)
+        ON CONFLICT (list_id) DO UPDATE SET name = EXCLUDED.name
+        """,
+        (list_id, name),
+    )
     conn.commit()
 
 
