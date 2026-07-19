@@ -152,7 +152,8 @@ if settings["overlay_symbol"]:
         st.warning(f"No price data found for overlay ticker {settings['overlay_symbol']}. Showing chart without it.")
         overlay_history = None
 
-st.caption(charting.build_ohlc_summary(history, trade["symbol"], timeframe_label))
+# (The OHLC summary line now lives inside the chart component itself,
+# where it updates live as the crosshair moves - see charting.py.)
 
 entry_point = {
     "entry_date": trade["entry_date"], "buy_price": trade["buy_price"],

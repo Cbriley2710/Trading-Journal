@@ -87,6 +87,10 @@ TIMEFRAMES = {
     "Monthly": ("1mo", 365),
 }
 
+# The reverse lookup - which human-readable label goes with each yfinance
+# interval string - used by the live summary line above the chart.
+INTERVAL_LABELS = {interval: label for label, (interval, _days) in TIMEFRAMES.items()}
+
 # Actual fetched history is this many times wider than the default
 # visible window above, so there's real data to scroll/zoom into on
 # either side rather than hitting a hard, empty edge immediately.
@@ -220,40 +224,6 @@ def fetch_latest_price(symbol):
     if recent.empty:
         return None
     return recent["Close"].iloc[-1]
-
-
-def build_ohlc_summary(history, symbol, interval_label):
-    """
-    A one-line OHLC summary shown above the chart, DeepVue-style, e.g.
-    "MU - 1D   O 822.52   H 903.96   L 804.00   C 848.95   V 63.4M
-    Chg -4.25   Chg% -0.50%". Uses the last two rows of `history` (for
-    the day-over-day change) - no separate fetch needed. Returns an
-    empty string if there's no data.
-    """
-    if history.empty:
-        return ""
-
-    last = history.iloc[-1]
-    prev_close = history["Close"].iloc[-2] if len(history) > 1 else last["Close"]
-    change = last["Close"] - prev_close
-    change_pct = (change / prev_close * 100) if prev_close else 0
-
-    volume = last["Volume"]
-    if volume >= 1e9:
-        volume_str = f"{volume / 1e9:.1f}B"
-    elif volume >= 1e6:
-        volume_str = f"{volume / 1e6:.1f}M"
-    elif volume >= 1e3:
-        volume_str = f"{volume / 1e3:.1f}K"
-    else:
-        volume_str = f"{volume:,.0f}"
-
-    sign = "+" if change >= 0 else ""
-    return (
-        f"{symbol} · {interval_label}   "
-        f"O {last['Open']:,.2f}   H {last['High']:,.2f}   L {last['Low']:,.2f}   C {last['Close']:,.2f}   "
-        f"V {volume_str}   Chg {sign}{change:,.2f}   Chg% {sign}{change_pct:,.2f}%"
-    )
 
 
 def render_png(fig, width=1400, scale=2):
@@ -499,15 +469,29 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
     # the y-axis range as you scroll/pan through time.
     fit_payload = {"price": [], "volume": []}
 
-    # Each day's own close-over-close % change (same definition as
-    # build_ohlc_summary()'s "Chg%") - lets the hover side-panel in
-    # render_interactive_chart() show "date + % change" for whichever
-    # day you're hovering over, without trying to parse Plotly's own
-    # compact-encoded trace data back apart in JS.
+    # Every bar's own OHLC/volume/change numbers, plain-JSON - this is
+    # what feeds the live summary line shown above the chart in
+    # render_interactive_chart(): as the crosshair moves, the summary
+    # updates to whichever bar the cursor is nearest, without trying to
+    # parse Plotly's own compact-encoded trace data back apart in JS.
+    # Chg/Chg% are close-over-close from the previous bar.
+    daily_change = history["Close"].diff()
     daily_change_pct = history["Close"].pct_change() * 100
+    def _clean(series):
+        return [None if pd.isna(v) else float(v) for v in series]
     fit_payload["daily"] = {
         "x": [ts.isoformat() for ts in history.index],
-        "pct": [None if pd.isna(v) else float(v) for v in daily_change_pct],
+        "open": _clean(history["Open"]),
+        "high": _clean(history["High"]),
+        "low": _clean(history["Low"]),
+        "close": _clean(history["Close"]),
+        "volume": _clean(history["Volume"]),
+        "chg": _clean(daily_change),
+        "pct": _clean(daily_change_pct),
+    }
+    fit_payload["meta"] = {
+        "symbol": symbol,
+        "interval_label": INTERVAL_LABELS.get(interval, interval),
     }
 
     if show_volume:
@@ -750,19 +734,13 @@ _INTERACTIVE_CHART_HTML = """
 </style>
 </head>
 <body>
-<div style="display:flex; gap:12px;">
-    <div id="__DIV_ID__" style="flex:1 1 auto; min-width:0;"></div>
-    <div style="flex:0 0 130px; display:flex; flex-direction:column; justify-content:center; gap:14px; font-family:sans-serif;">
-        <div style="text-align:center;">
-            <div style="font-size:0.8rem; color:__MUTED_COLOR__;">Date</div>
-            <div id="__DIV_ID__-date" style="font-size:1rem; font-weight:600; color:__CHART_TEXT_COLOR__;">-</div>
-        </div>
-        <div style="text-align:center;">
-            <div style="font-size:0.8rem; color:__MUTED_COLOR__;">% Change</div>
-            <div id="__DIV_ID__-pct" style="font-size:1.1rem; font-weight:600; color:__CHART_TEXT_COLOR__;">-</div>
-        </div>
-    </div>
-</div>
+<!-- The live OHLC summary line - same format as the old static caption
+     ("MU - Daily  O ... H ... L ... C ... V ... Chg ... Chg% ..."), but
+     it now lives INSIDE this component so the hover script below can
+     update it to whichever bar the crosshair is over. -->
+<div id="__DIV_ID__-summary" style="font-family:sans-serif; font-size:0.85rem; font-weight:600;
+     color:__CHART_TEXT_COLOR__; padding:6px 10px 0 10px; white-space:nowrap;">&nbsp;</div>
+<div id="__DIV_ID__" style="width:100%;"></div>
 <script src="https://cdn.plot.ly/plotly-2.35.3.min.js"></script>
 <script>
 (function() {
@@ -838,24 +816,48 @@ _INTERACTIVE_CHART_HTML = """
         return monthNames[d.getUTCMonth()] + " " + d.getUTCDate() + ", " + d.getUTCFullYear();
     }
 
+    function formatPrice(v) {
+        if (v === null || v === undefined) return "N/A";
+        return v.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    }
+
+    function formatVolume(v) {
+        if (v === null || v === undefined) return "N/A";
+        if (v >= 1e9) return (v / 1e9).toFixed(1) + "B";
+        if (v >= 1e6) return (v / 1e6).toFixed(1) + "M";
+        if (v >= 1e3) return (v / 1e3).toFixed(1) + "K";
+        return Math.round(v).toLocaleString();
+    }
+
+    // Rewrites the summary line above the chart for one bar's data -
+    // the date plus O/H/L/C/V, and Chg/Chg% colored green or red.
     function showDailyInfo(index) {
-        var dateEl = document.getElementById("__DIV_ID__-date");
-        var pctEl = document.getElementById("__DIV_ID__-pct");
+        var el = document.getElementById("__DIV_ID__-summary");
         if (index === null || index === undefined) {
-            dateEl.textContent = "-";
-            pctEl.textContent = "-";
-            pctEl.style.color = "__CHART_TEXT_COLOR__";
+            el.innerHTML = "&nbsp;";
             return;
         }
-        dateEl.textContent = formatDate(fitPayload.daily.x[index]);
-        var pct = fitPayload.daily.pct[index];
-        if (pct === null || pct === undefined) {
-            pctEl.textContent = "N/A";
-            pctEl.style.color = "__CHART_TEXT_COLOR__";
-        } else {
-            pctEl.textContent = (pct >= 0 ? "+" : "") + pct.toFixed(2) + "%";
-            pctEl.style.color = pct >= 0 ? "__GOOD_COLOR__" : "__CRITICAL_COLOR__";
+        var d = fitPayload.daily;
+        var meta = fitPayload.meta || {symbol: "", interval_label: ""};
+        var parts = [
+            meta.symbol + " · " + meta.interval_label,
+            formatDate(d.x[index]),
+            "O " + formatPrice(d.open[index]),
+            "H " + formatPrice(d.high[index]),
+            "L " + formatPrice(d.low[index]),
+            "C " + formatPrice(d.close[index]),
+            "V " + formatVolume(d.volume[index]),
+        ];
+        var html = parts.join("&nbsp;&nbsp; ");
+        var chg = d.chg[index], pct = d.pct[index];
+        if (chg !== null && chg !== undefined && pct !== null && pct !== undefined) {
+            var sign = chg >= 0 ? "+" : "";
+            var color = chg >= 0 ? "__GOOD_COLOR__" : "__CRITICAL_COLOR__";
+            html += "&nbsp;&nbsp; <span style='color:" + color + ";'>"
+                + "Chg " + sign + formatPrice(chg)
+                + "&nbsp;&nbsp; Chg% " + sign + pct.toFixed(2) + "%</span>";
         }
+        el.innerHTML = html;
     }
 
     Plotly.newPlot("__DIV_ID__", figure.data, figure.layout, config).then(function(gd) {
@@ -928,13 +930,13 @@ def render_interactive_chart(fig, fit_payload):
     import uuid
 
     div_id = f"chart-{uuid.uuid4().hex[:8]}"
-    height = (fig.layout.height or 500) + 10
+    # +40 leaves room for the live OHLC summary line above the chart.
+    height = (fig.layout.height or 500) + 40
 
     html = (
         _INTERACTIVE_CHART_HTML
         .replace("__CHART_BACKGROUND__", CHART_BACKGROUND)
         .replace("__CHART_TEXT_COLOR__", CHART_TEXT_COLOR)
-        .replace("__MUTED_COLOR__", MUTED_COLOR)
         .replace("__GOOD_COLOR__", GOOD_COLOR)
         .replace("__CRITICAL_COLOR__", CRITICAL_COLOR)
         .replace("__DIV_ID__", div_id)
