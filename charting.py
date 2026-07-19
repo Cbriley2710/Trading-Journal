@@ -341,7 +341,7 @@ def render_settings_toolbar(container, key_prefix):
     conn = database.get_connection()
     saved_prefs = database.get_chart_preferences(conn)
 
-    with container.popover("Chart Settings", use_container_width=True):
+    with container.popover("Chart Settings", width="stretch"):
         chart_type = st.radio(
             "Chart Type", ["Candlestick", "Line"], horizontal=True, key=f"{key_prefix}_chart_type")
         price_scale = st.radio(

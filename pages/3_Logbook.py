@@ -48,7 +48,7 @@ for entry in entries:
     st.subheader(f"{entry['entry_date']:%A, %B %d, %Y}")
 
     if entry["chart_image"]:
-        st.image(entry["chart_image"], use_container_width=True)
+        st.image(entry["chart_image"], width="stretch")
     else:
         st.caption("No chart archived for this day yet - archives happen overnight.")
 

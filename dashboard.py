@@ -322,7 +322,7 @@ table = table.rename(columns={
 
 st.dataframe(
     table,
-    use_container_width=True,
+    width="stretch",
     hide_index=True,
     column_config={
         "Date of Entry": st.column_config.DateColumn(format="M/D/YYYY"),
