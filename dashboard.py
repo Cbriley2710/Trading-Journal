@@ -265,7 +265,7 @@ table = filtered.sort_values("date", ascending=False).copy()
 table["Result"] = table["profit_loss"].apply(lambda v: "✅ Win" if v > 0 else "❌ Loss" if v < 0 else "Breakeven")
 # For a SHORT trade the stored buy_price is the COVER (the exit event)
 # and sell_price is the short sale (the entry event) - the opposite
-# pairing from a long trade (see match_trades_fifo in analyze_trades.py).
+# pairing from a long trade (see match_trades_lifo in analyze_trades.py).
 # Swap them for display so "Entry Price" always means the price the
 # trade was opened at, whichever direction it was.
 is_short = table["direction"] == "SHORT"

@@ -80,7 +80,7 @@ trade = trades_sorted[selected_index]
 is_short = trade["direction"] == "SHORT"
 # For a short, "sell_price" is the short sale (the entry event) and
 # "buy_price" is the cover (the exit event) - the opposite pairing
-# from a long trade. See match_trades_fifo() in analyze_trades.py.
+# from a long trade. See match_trades_lifo() in analyze_trades.py.
 entry_price, exit_price = (trade["sell_price"], trade["buy_price"]) if is_short \
     else (trade["buy_price"], trade["sell_price"])
 

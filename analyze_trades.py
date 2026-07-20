@@ -171,7 +171,7 @@ def detect_csv_source(filename):
 
 # Schwab labels a short sale distinctly ("Sell Short"), but labels
 # covering that short (buying it back) with the exact same plain "Buy"
-# used for opening a brand new long position - match_trades_fifo() is
+# used for opening a brand new long position - match_trades_lifo() is
 # what actually tells those two apart (by checking whether a short
 # position is already open for that symbol), not this mapping.
 SCHWAB_ACTION_MAP = {"Buy": "BUY", "Sell": "SELL", "Sell Short": "SELL_SHORT"}
@@ -273,20 +273,28 @@ def _combine_fills(fills):
     }
 
 
-def match_trades_fifo(transactions):
+def match_trades_lifo(transactions):
     """
-    Matches each closing transaction to the oldest available opening
-    lot for that same ticker (FIFO) and calculates the profit or loss
-    for each matched portion - for both long trades (buy, then later
-    sell) and short trades (sell short, then later buy back to cover).
+    Matches each closing transaction to the most recently opened lot
+    for that same ticker (LIFO - Last In, First Out) and calculates the
+    profit or loss for each matched portion - for both long trades (buy,
+    then later sell) and short trades (sell short, then later buy back
+    to cover).
+
+    LIFO (rather than oldest-lot-first FIFO) matches how adding to a
+    position actually tends to get traded in practice: an add usually
+    carries its own tighter exit (a stop or a target) while the
+    original entry keeps riding - so a sell shortly after an add is far
+    more often closing that add than reaching all the way back to close
+    the original entry instead.
 
     A plain BUY first covers any already-open short position for that
-    symbol (oldest short lot first) before any leftover opens a new
-    long lot - this is how a short's "cover" is recognized, since
-    brokers (Schwab included) don't always give it its own distinct
-    action label the way they do for opening a short ("Sell Short").
-    A plain SELL only ever closes an open long lot - it never opens a
-    new short; only an explicit "SELL_SHORT" action does that.
+    symbol (most recently opened short lot first) before any leftover
+    opens a new long lot - this is how a short's "cover" is recognized,
+    since brokers (Schwab included) don't always give it its own
+    distinct action label the way they do for opening a short ("Sell
+    Short"). A plain SELL only ever closes an open long lot - it never
+    opens a new short; only an explicit "SELL_SHORT" action does that.
 
     Returns (closed_trades, open_long_lots, open_short_lots). Each
     closed trade is a dictionary like:
@@ -339,29 +347,29 @@ def match_trades_fifo(transactions):
             shares_to_buy = t["quantity"]
 
             # This buy first covers any already-open short position
-            # for this symbol (oldest short lot first) ...
+            # for this symbol (most recently opened short lot first) ...
             while shares_to_buy > 0 and open_short_lots[symbol]:
-                oldest_short = open_short_lots[symbol][0]
-                matched_quantity = min(oldest_short["quantity"], shares_to_buy)
+                most_recent_short = open_short_lots[symbol][-1]
+                matched_quantity = min(most_recent_short["quantity"], shares_to_buy)
 
-                profit_loss = (oldest_short["price"] - t["price"]) * matched_quantity
+                profit_loss = (most_recent_short["price"] - t["price"]) * matched_quantity
 
                 closed_trades.append({
                     "symbol": symbol,
                     "direction": "SHORT",
                     "buy_price": t["price"],
-                    "sell_price": oldest_short["price"],
+                    "sell_price": most_recent_short["price"],
                     "quantity": matched_quantity,
                     "profit_loss": profit_loss,
-                    "entry_date": oldest_short["date"],
+                    "entry_date": most_recent_short["date"],
                     "date": t["date"],
                 })
 
-                oldest_short["quantity"] -= matched_quantity
+                most_recent_short["quantity"] -= matched_quantity
                 shares_to_buy -= matched_quantity
 
-                if oldest_short["quantity"] == 0:
-                    open_short_lots[symbol].pop(0)
+                if most_recent_short["quantity"] == 0:
+                    open_short_lots[symbol].pop()
 
             # ... and any leftover quantity (past what was needed to
             # cover a short) opens a new long lot, same as before.
@@ -385,27 +393,27 @@ def match_trades_fifo(transactions):
                           f"{symbol} shares on {t['date'].date()} (no buy found).")
                     break
 
-                oldest_lot = open_long_lots[symbol][0]
-                matched_quantity = min(oldest_lot["quantity"], shares_to_sell)
+                most_recent_lot = open_long_lots[symbol][-1]
+                matched_quantity = min(most_recent_lot["quantity"], shares_to_sell)
 
-                profit_loss = (t["price"] - oldest_lot["price"]) * matched_quantity
+                profit_loss = (t["price"] - most_recent_lot["price"]) * matched_quantity
 
                 closed_trades.append({
                     "symbol": symbol,
                     "direction": "LONG",
-                    "buy_price": oldest_lot["price"],
+                    "buy_price": most_recent_lot["price"],
                     "sell_price": t["price"],
                     "quantity": matched_quantity,
                     "profit_loss": profit_loss,
-                    "entry_date": oldest_lot["date"],
+                    "entry_date": most_recent_lot["date"],
                     "date": t["date"],
                 })
 
-                oldest_lot["quantity"] -= matched_quantity
+                most_recent_lot["quantity"] -= matched_quantity
                 shares_to_sell -= matched_quantity
 
-                if oldest_lot["quantity"] == 0:
-                    open_long_lots[symbol].pop(0)
+                if most_recent_lot["quantity"] == 0:
+                    open_long_lots[symbol].pop()
 
     return closed_trades, open_long_lots, open_short_lots
 
@@ -488,7 +496,7 @@ def main():
     csv_path = find_csv_file()
     print(f"Reading trades from: {csv_path.name}\n")
     transactions = load_transactions(csv_path)
-    closed_trades, open_long_lots, open_short_lots = match_trades_fifo(transactions)
+    closed_trades, open_long_lots, open_short_lots = match_trades_lifo(transactions)
     build_report(closed_trades, open_long_lots, open_short_lots)
 
 

@@ -503,7 +503,7 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
     # other way around: the entry event is the short SALE (an up-front
     # sell) and the exit is buying it back to cover - so the triangle
     # directions swap. `buy_price`/`sell_price` keep their names either
-    # way (see match_trades_fifo() in analyze_trades.py for why), but
+    # way (see match_trades_lifo() in analyze_trades.py for why), but
     # which one lines up with entry_date vs exit_date flips too.
     direction = entry_point.get("direction", "LONG")
     entry_symbol = "triangle-down" if direction == "SHORT" else "triangle-up"

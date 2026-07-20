@@ -63,7 +63,7 @@ from analyze_trades import (
     detect_csv_source,
     load_transactions,
     load_transactions_schwab,
-    match_trades_fifo,
+    match_trades_lifo,
 )
 
 
@@ -277,8 +277,8 @@ def rebuild_trades(conn):
     Recalculates the entire `trades` table from scratch, using every
     row currently in `transactions`.
 
-    This reuses match_trades_fifo() from analyze_trades.py (the same
-    FIFO buy/sell matching logic the other scripts use), so a "trade"
+    This reuses match_trades_lifo() from analyze_trades.py (the same
+    LIFO buy/sell matching logic the other scripts use), so a "trade"
     here means exactly the same thing everywhere else in this project.
     Options contracts (tickers starting with "-") are left out, since
     this tracker is for stock trades only.
@@ -304,7 +304,7 @@ def rebuild_trades(conn):
         for row in cur.fetchall()
     ]
 
-    closed_trades, _open_long_lots, _open_short_lots = match_trades_fifo(transactions)
+    closed_trades, _open_long_lots, _open_short_lots = match_trades_lifo(transactions)
     stock_trades = [t for t in closed_trades if not t["symbol"].strip().startswith("-")]
 
     cur.execute("DELETE FROM trades")
@@ -362,7 +362,7 @@ def get_trades(conn):
 
 def _aggregate_open_lots(open_lots, direction):
     """
-    Turns match_trades_fifo()'s per-symbol list of still-open lots into
+    Turns match_trades_lifo()'s per-symbol list of still-open lots into
     one row per symbol (total shares, a quantity-weighted average
     price, and the earliest entry date among them), tagged with
     `direction` ("LONG" or "SHORT") - shared by get_open_positions()
@@ -388,7 +388,7 @@ def _aggregate_open_lots(open_lots, direction):
 def get_open_positions(conn):
     """
     Returns currently-open positions (bought but not yet sold, or sold
-    short but not yet covered), computed fresh from match_trades_fifo()'s
+    short but not yet covered), computed fresh from match_trades_lifo()'s
     open lots - the other side of the same FIFO matching that produces
     `trades`. This is derived data, not something separately tracked, so
     it's always consistent with whatever is currently in `transactions` -
@@ -412,7 +412,7 @@ def get_open_positions(conn):
         for row in cur.fetchall()
     ]
 
-    _closed_trades, open_long_lots, open_short_lots = match_trades_fifo(transactions)
+    _closed_trades, open_long_lots, open_short_lots = match_trades_lifo(transactions)
 
     positions = (
         _aggregate_open_lots(open_long_lots, "LONG")
