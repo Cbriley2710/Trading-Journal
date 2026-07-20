@@ -304,10 +304,16 @@ def match_trades_fifo(transactions):
     transactions = merge_partial_fills(transactions)
 
     # Sort transactions oldest-first so we process them in the order
-    # they actually happened. Python's sort keeps same-day rows in
-    # their original order, which in this file is already
-    # chronological (buys before sells on the same day).
-    transactions = sorted(transactions, key=lambda t: t["date"])
+    # they actually happened. There's no time-of-day in this data, only
+    # a date, so same-day trades are also sorted with BUY/SELL_SHORT
+    # before SELL - a same-day round trip almost always opens before it
+    # closes, and some brokers don't reliably label a same-day short
+    # sale as "Sell Short", so without this tiebreaker a same-day
+    # SELL-then-BUY pair (in whatever order the export happened to list
+    # them) can get processed as "sell with nothing to close" (silently
+    # dropped) followed by a same-day BUY that wrongly opens a brand
+    # new, never-closed position instead of the two matching each other.
+    transactions = sorted(transactions, key=lambda t: (t["date"], t["action"] == "SELL"))
 
     # For each ticker, we keep a "line" (list) of batches that haven't
     # been fully closed yet - one line for long positions (opened by a
