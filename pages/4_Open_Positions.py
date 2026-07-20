@@ -15,6 +15,8 @@ render_open_positions_section() there) - there's nowhere else in this
 app that stop price is tracked.
 """
 
+from datetime import date
+
 import streamlit as st
 import plotly.graph_objects as go
 
@@ -44,7 +46,18 @@ def position_label(position):
 conn = database.get_connection()
 positions = database.get_open_positions(conn)
 stops = database.get_all_stop_losses(conn)
-account_value = database.get_account_value(conn)
+
+# Same calculated-account-value formula as the Dashboard page (see its
+# Account Settings expander): a Jan 1 baseline plus this year's deposits
+# and realized P/L, plus open positions' unrealized P/L below once it's
+# known - so the Cash bar and % of account figures further down reflect
+# an actually-maintained account value instead of a stale typed-in one.
+jan1_balance = database.get_account_value(conn)
+deposits = database.get_deposits(conn)
+jan1_date = date(date.today().year, 1, 1)
+deposits_this_year = sum(d["amount"] for d in deposits if d["deposit_date"] >= jan1_date)
+realized_pl_this_year = database.get_realized_pl_since(conn, jan1_date)
+account_value = (jan1_balance + deposits_this_year + realized_pl_this_year) if jan1_balance else None
 
 # --- Gather live data for every open position ---------------------------
 enriched = []
@@ -117,6 +130,8 @@ else:
     total_current_value = sum(e["current_value"] for e in priced)
     total_unrealized_pl = sum(e["unrealized_pl"] for e in priced)
     unrealized_color = charting.GOOD_COLOR if total_unrealized_pl >= 0 else charting.CRITICAL_COLOR
+    if jan1_balance:
+        account_value = jan1_balance + deposits_this_year + realized_pl_this_year + total_unrealized_pl
 
     heat_positions = [e for e in priced if e["heat_dollars"] is not None]
     total_heat_dollars = sum(e["heat_dollars"] for e in heat_positions)

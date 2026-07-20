@@ -27,6 +27,8 @@ st.session_state remembers a correct password for the rest of your
 browser session, so it only asks once, not on every filter change.
 """
 
+from datetime import date
+
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -56,22 +58,37 @@ nav.render_top_nav("Dashboard")
 st.title("Trading Journal Dashboard")
 
 conn = database.get_connection()
-account_value = database.get_account_value(conn)
 
-# The one number the rest of this page doesn't otherwise know - your
-# actual account size. Once it's saved, dollar figures elsewhere on
-# this page can also be shown as a % of your real account.
-new_account_value = st.number_input(
-    "Current Account Value ($)", min_value=0.0, value=account_value or 0.0,
-    step=100.0, format="%.2f", key="account_value_input",
-)
-if st.button("Save Account Value"):
-    database.set_account_value(conn, new_account_value)
-    account_value = new_account_value
-    st.success(f"Account value saved at ${new_account_value:,.2f}.")
-st.caption(
-    "Used below for equity contribution per position and account % gain by time period."
-)
+# --- Calculated account value --------------------------------------------
+# Rather than needing the actual current account value typed in and kept
+# up to date by hand, this is built up from a Jan 1 baseline (set once a
+# year - see the Account Settings expander at the bottom of this page)
+# plus everything that's happened since: deposits, closed-trade P/L, and
+# open positions' unrealized P/L right now. Dollar figures further down
+# this page are shown as a % of this calculated value.
+jan1_balance = database.get_account_value(conn)
+deposits = database.get_deposits(conn)
+jan1_date = date(date.today().year, 1, 1)
+deposits_this_year = sum(d["amount"] for d in deposits if d["deposit_date"] >= jan1_date)
+realized_pl_this_year = database.get_realized_pl_since(conn, jan1_date)
+
+total_unrealized_pl_now = 0.0
+if jan1_balance:
+    open_positions_now = database.get_open_positions(conn)
+    if open_positions_now:
+        with st.spinner("Fetching current prices for account value..."):
+            for position in open_positions_now:
+                current_price = charting.fetch_latest_price(position["symbol"])
+                if current_price is None:
+                    continue
+                cost_basis = position["avg_price"] * position["quantity"]
+                current_value = current_price * position["quantity"]
+                is_short = position["direction"] == "SHORT"
+                total_unrealized_pl_now += (cost_basis - current_value) if is_short else (current_value - cost_basis)
+
+account_value = (
+    jan1_balance + deposits_this_year + realized_pl_this_year + total_unrealized_pl_now
+) if jan1_balance else None
 
 st.divider()
 
@@ -293,3 +310,53 @@ st.dataframe(
         "Profit/Loss": st.column_config.NumberColumn(format="$%.2f"),
     },
 )
+
+st.divider()
+
+with st.expander("Account Settings"):
+    st.caption(
+        "Set your account's value at the start of this year once - deposits "
+        "and trading P/L build up from there automatically, so this doesn't "
+        "need to be kept up to date by hand."
+    )
+    new_jan1_balance = st.number_input(
+        "Account Value as of Jan 1 ($)", min_value=0.0, value=jan1_balance or 0.0,
+        step=100.0, format="%.2f", key="jan1_balance_input",
+    )
+    if st.button("Save Jan 1 Value"):
+        database.set_account_value(conn, new_jan1_balance)
+        st.success(f"Jan 1 account value saved at ${new_jan1_balance:,.2f}.")
+        st.rerun()
+
+    if jan1_balance:
+        st.caption(
+            f"Calculated current account value: ${account_value:,.2f} "
+            f"(${jan1_balance:,.2f} Jan 1 baseline + ${deposits_this_year:,.2f} deposits "
+            f"this year + ${realized_pl_this_year:,.2f} realized P/L this year + "
+            f"${total_unrealized_pl_now:,.2f} unrealized P/L now)"
+        )
+
+    st.subheader("Deposits")
+    deposit_cols = st.columns([1, 1, 1])
+    deposit_amount = deposit_cols[0].number_input(
+        "Deposit Amount ($)", min_value=0.0, step=100.0, format="%.2f", key="deposit_amount_input")
+    deposit_date = deposit_cols[1].date_input("Deposit Date", value=date.today(), key="deposit_date_input")
+    deposit_cols[2].write("")  # vertical spacer so the button lines up with the inputs above
+    if deposit_cols[2].button("Add Deposit"):
+        if deposit_amount > 0:
+            database.add_deposit(conn, deposit_date, deposit_amount)
+            st.success(f"Deposit of ${deposit_amount:,.2f} on {deposit_date:%m/%d/%Y} added.")
+            st.rerun()
+        else:
+            st.warning("Enter a deposit amount greater than $0.")
+
+    if deposits:
+        for d in sorted(deposits, key=lambda d: d["deposit_date"], reverse=True):
+            row_cols = st.columns([1, 1, 1])
+            row_cols[0].write(f"{d['deposit_date']:%m/%d/%Y}")
+            row_cols[1].write(f"${d['amount']:,.2f}")
+            if row_cols[2].button("Delete", key=f"delete_deposit_{d['id']}"):
+                database.delete_deposit(conn, d["id"])
+                st.rerun()
+    else:
+        st.caption("No deposits recorded yet.")

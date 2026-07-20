@@ -230,6 +230,13 @@ def init_db(conn):
             generated_at TIMESTAMP NOT NULL
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS deposits (
+            id SERIAL PRIMARY KEY,
+            deposit_date DATE NOT NULL,
+            amount DOUBLE PRECISION NOT NULL
+        )
+    """)
     conn.commit()
 
 
@@ -641,9 +648,12 @@ def delete_stop_loss(conn, symbol):
 
 
 def get_account_value(conn):
-    """Returns the saved current account value, or None if it hasn't
-    been set yet - used to turn dollar figures on the Dashboard into a
-    percentage of your actual account size."""
+    """Returns the saved Jan 1 (start-of-year) account value baseline,
+    or None if it hasn't been set yet. This is a fixed starting point,
+    not today's value - the Dashboard adds this year's deposits and
+    profit/loss on top of it to arrive at today's calculated account
+    value, so this number only needs to be set once a year instead of
+    kept manually up to date."""
     cur = conn.cursor()
     cur.execute("SELECT account_value FROM account_settings WHERE id = 1")
     row = cur.fetchone()
@@ -651,9 +661,10 @@ def get_account_value(conn):
 
 
 def set_account_value(conn, account_value):
-    """Saves (or updates) the current account value - overwriting
-    whatever was saved before, since this is meant to always reflect
-    where your account stands today, not a history of past values."""
+    """Saves (or updates) the Jan 1 account value baseline - overwriting
+    whatever was saved before. Meant to be set once at the start of each
+    year, not adjusted day to day (deposits and trading P/L already
+    account for everything since then)."""
     cur = conn.cursor()
     cur.execute(
         """
@@ -666,6 +677,41 @@ def set_account_value(conn, account_value):
         (account_value,),
     )
     conn.commit()
+
+
+def get_deposits(conn):
+    """Returns every deposit ever recorded, oldest first, as
+    {"id", "deposit_date", "amount"} dictionaries."""
+    cur = conn.cursor()
+    cur.execute("SELECT id, deposit_date, amount FROM deposits ORDER BY deposit_date")
+    return [{"id": row[0], "deposit_date": row[1], "amount": row[2]} for row in cur.fetchall()]
+
+
+def add_deposit(conn, deposit_date, amount):
+    """Records one deposit into the trading account."""
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO deposits (deposit_date, amount) VALUES (%s, %s)",
+        (deposit_date, amount),
+    )
+    conn.commit()
+
+
+def delete_deposit(conn, deposit_id):
+    """Removes one deposit (e.g. one entered by mistake)."""
+    cur = conn.cursor()
+    cur.execute("DELETE FROM deposits WHERE id = %s", (deposit_id,))
+    conn.commit()
+
+
+def get_realized_pl_since(conn, since_date):
+    """Total profit/loss of every closed trade exited on or after
+    since_date - used to build up this year's calculated account value
+    on top of the Jan 1 baseline, without double-counting trades from
+    before then (those are already baked into that baseline)."""
+    cur = conn.cursor()
+    cur.execute("SELECT COALESCE(SUM(profit_loss), 0) FROM trades WHERE exit_date >= %s", (since_date,))
+    return cur.fetchone()[0]
 
 
 def get_daily_report_status(conn, report_date):
