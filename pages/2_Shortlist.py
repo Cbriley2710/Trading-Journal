@@ -132,17 +132,26 @@ def render_price_chart(symbol, entry_point, entry_label, key_prefix, stop_loss=N
 
 
 def render_journal_box(conn, symbol, key_prefix):
-    """Today's Journal text box, pre-filled with today's existing entry
-    for `symbol` if there is one. Just the textarea - no Save button -
-    so both the plain single-ticker view and the Journal Session queue
-    view can put their own button/navigation right after it."""
-    st.subheader("Today's Journal")
+    """
+    Today's Journal - a short text box, pre-filled with today's existing
+    entry for `symbol` if there is one, sized for a quick note rather
+    than a full-width essay box (a journal entry here is usually a
+    sentence or two). Narrow on purpose too, leaving a column beside it
+    free for the caller's own Save/Next/Skip button(s), so notes + Save
+    sit in one compact row near the bottom of the chart instead of a
+    full-width box with buttons stacked below it pushing everything
+    past one screen. Returns (notes, button_column) - the caller renders
+    its own button(s) into button_column.
+    """
     today = date.today()
     existing_entry = database.get_logbook_entry(conn, symbol, today)
     existing_notes = existing_entry["notes"] if existing_entry else ""
-    return st.text_area(
-        "Your thoughts on this trade today", value=existing_notes or "",
-        height=150, key=f"{key_prefix}_notes")
+
+    box_col, button_col = st.columns([3, 1])
+    notes = box_col.text_area(
+        "Today's Journal", value=existing_notes or "",
+        height=68, key=f"{key_prefix}_notes")
+    return notes, button_col
 
 
 def save_journal_entry(conn, symbol, entry_point, entry_label, notes, stop_loss=None):
@@ -170,9 +179,9 @@ def render_chart_and_journal(symbol, entry_point, entry_label, key_prefix, stop_
         return
 
     conn = database.get_connection()
-    notes = render_journal_box(conn, symbol, key_prefix)
+    notes, button_col = render_journal_box(conn, symbol, key_prefix)
 
-    if st.button("Save", key=f"{key_prefix}_save"):
+    if button_col.button("Save", key=f"{key_prefix}_save", width="stretch"):
         png_bytes = save_journal_entry(conn, symbol, entry_point, entry_label, notes, stop_loss=stop_loss)
         if png_bytes is not None:
             st.success("Saved - today's chart has been archived to the Logbook.")
@@ -488,11 +497,11 @@ def render_journal_session(conn):
             st.rerun()
         return
 
-    notes = render_journal_box(conn, symbol, key_prefix)
+    notes, button_col = render_journal_box(conn, symbol, key_prefix)
 
-    nav_cols = st.columns([2, 2, 6])
-    save_clicked = nav_cols[0].button("Save & Next →", type="primary", key=f"{key_prefix}_save_next")
-    skip_clicked = nav_cols[1].button("Skip", key=f"{key_prefix}_skip")
+    save_clicked = button_col.button(
+        "Save & Next →", type="primary", key=f"{key_prefix}_save_next", width="stretch")
+    skip_clicked = button_col.button("Skip", key=f"{key_prefix}_skip", width="stretch")
 
     if save_clicked:
         save_journal_entry(conn, symbol, entry_point, item["entry_label"], notes, stop_loss=stop_loss)

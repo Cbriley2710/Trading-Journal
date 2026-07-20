@@ -616,6 +616,20 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
         "lo": history["Volume"].tolist(), "hi": history["Volume"].tolist(),
     })
 
+    # Entry/exit/"Added" markers sit in a fixed band near the bottom of
+    # the price panel (just above the volume panel) instead of at the
+    # trade's actual price - they used to sit right on the candles at
+    # whatever price the trade happened to be at, which could land
+    # anywhere in the panel and get lost among the candles/MAs. A flat
+    # 8%-of-range gap below the lowest low keeps them clear of the
+    # candles without needing their own axis. This point still has to
+    # be added to fit_payload["price"] below (a second "series" entry)
+    # so the y-axis auto-fit (see fitYAxes() in render_interactive_chart)
+    # actually stretches down far enough to show it - otherwise it'd get
+    # clipped below the visible plot area whenever it's lower than every
+    # candle already fits for.
+    marker_y = history["Low"].min() - (history["High"].max() - history["Low"].min()) * 0.08
+
     if settings["chart_type"] == "Candlestick":
         fig.add_trace(go.Candlestick(
             x=history.index,
@@ -643,22 +657,46 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
         ), row=1, col=1)
 
     if is_closed:
+        # sell_price - buy_price is the per-share profit regardless of
+        # direction - for a LONG that's literally sell minus buy; for a
+        # SHORT, "sell_price" is the up-front short sale and "buy_price"
+        # is the later cover, so a cheaper cover than the original sale
+        # (a profit) already comes out positive the same way.
+        pl_per_share = sell_price - buy_price
         entry_value, exit_value = (sell_price, buy_price) if direction == "SHORT" else (buy_price, sell_price)
         fig.add_trace(go.Scatter(
-            x=[entry_date, exit_date], y=[entry_value, exit_value],
+            x=[entry_date, exit_date], y=[marker_y, marker_y],
             mode="lines+markers",
             line=dict(color=outcome_color, width=2, dash="dot"),
             marker=dict(size=14, symbol=[entry_symbol, exit_symbol], color=outcome_color),
             name="Entry / Exit", showlegend=False,
-            hovertemplate="%{x|%b %d, %Y}: $%{y:,.2f}<extra></extra>",
+            text=[
+                f"{entry_label}<br>{entry_date:%b %d, %Y} · ${entry_value:,.2f}",
+                f"Exit<br>{exit_date:%b %d, %Y} · ${exit_value:,.2f}<br>"
+                f"{'+' if pl_per_share >= 0 else ''}${pl_per_share:,.2f}/share",
+            ],
+            hovertemplate="%{text}<extra></extra>",
         ), row=1, col=1)
+        fit_payload["price"].append({
+            "x": [entry_date.isoformat(), exit_date.isoformat()],
+            "lo": [marker_y, marker_y], "hi": [marker_y, marker_y],
+        })
     else:
+        hover_text = (
+            f"Added to watchlist<br>{entry_date:%b %d, %Y}" if entry_label == "Added"
+            else f"{entry_label}<br>{entry_date:%b %d, %Y} · ${buy_price:,.2f}"
+        )
         fig.add_trace(go.Scatter(
-            x=[entry_date], y=[buy_price], mode="markers",
+            x=[entry_date], y=[marker_y], mode="markers",
             marker=dict(size=14, symbol=entry_symbol, color=outcome_color),
             name=entry_label, showlegend=False,
-            hovertemplate="%{x|%b %d, %Y}: $%{y:,.2f}<extra></extra>",
+            text=[hover_text],
+            hovertemplate="%{text}<extra></extra>",
         ), row=1, col=1)
+        fit_payload["price"].append({
+            "x": [entry_date.isoformat()],
+            "lo": [marker_y], "hi": [marker_y],
+        })
 
     if stop_loss is not None:
         fig.add_hline(
@@ -955,7 +993,13 @@ _INTERACTIVE_CHART_HTML = """
 
     // Rewrites the summary line above the chart for one bar's data -
     // the date plus O/H/L/C/V, and Chg/Chg% colored green or red.
-    function showDailyInfo(index) {
+    // `markerText` (optional) is an entry/exit/"Added" marker's own
+    // hover text - see the plotly_hover handler below for where it
+    // comes from - appended on its own line when the crosshair is
+    // lined up with one, since Plotly's own native hover popup is
+    // turned off everywhere on this chart (see build_figure() in
+    // charting.py) in favor of this single summary line.
+    function showDailyInfo(index, markerText) {
         var el = document.getElementById("__DIV_ID__-summary");
         if (index === null || index === undefined) {
             el.innerHTML = "&nbsp;";
@@ -981,6 +1025,9 @@ _INTERACTIVE_CHART_HTML = """
                 + "Chg " + sign + formatPrice(chg)
                 + "&nbsp;&nbsp; Chg% " + sign + pct.toFixed(2) + "%</span>";
         }
+        if (markerText) {
+            html += "<br>" + markerText;
+        }
         el.innerHTML = html;
     }
 
@@ -1002,8 +1049,17 @@ _INTERACTIVE_CHART_HTML = """
         gd.on("plotly_hover", function(eventData) {
             if (!eventData.points || !eventData.points.length) return;
             var key = barKey(eventData.points[0].x);
+            // hovermode "x" (see build_figure()) fires one point per
+            // trace sharing that x - an entry/exit/"Added" marker is
+            // the only trace on this chart with its own "text" set, so
+            // its presence here is what flags "the crosshair is lined
+            // up with a marker, not just a bar."
+            var markerText = null;
+            for (var i = 0; i < eventData.points.length; i++) {
+                if (eventData.points[i].text) { markerText = eventData.points[i].text; break; }
+            }
             if (dailyByKey.hasOwnProperty(key)) {
-                showDailyInfo(dailyByKey[key]);
+                showDailyInfo(dailyByKey[key], markerText);
             }
         });
 
