@@ -16,10 +16,11 @@ import charting
 import database
 
 
-def archive_ticker(conn, symbol, entry_date, buy_price, entry_label, today, as_of, direction="LONG"):
+def archive_ticker(conn, symbol, entry_date, buy_price, entry_label, today, as_of, direction="LONG", stop_loss=None):
     """Builds and archives one ticker's chart snapshot for today. Returns
     True if it was archived, False if no price data was found."""
-    png_bytes = charting.build_archive_snapshot(symbol, entry_date, buy_price, entry_label, as_of, direction=direction)
+    png_bytes = charting.build_archive_snapshot(
+        symbol, entry_date, buy_price, entry_label, as_of, direction=direction, stop_loss=stop_loss)
     if png_bytes is None:
         print(f"  {symbol}: no price data found, skipping.")
         return False
@@ -45,7 +46,8 @@ def archive_all(conn, today):
         is_short = position["direction"] == "SHORT"
         archive_ticker(
             conn, position["symbol"], position["entry_date"], position["avg_price"],
-            "Short Entry" if is_short else "Entry", today, as_of, direction=position["direction"])
+            "Short Entry" if is_short else "Entry", today, as_of, direction=position["direction"],
+            stop_loss=database.get_stop_loss(conn, position["symbol"]))
         archived_symbols.add(position["symbol"])
 
     watchlist = database.get_watchlist(conn)

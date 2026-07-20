@@ -344,7 +344,7 @@ def render_png(fig, width=1400, scale=2):
             kopts={"path": chromium_path})
 
 
-def build_archive_snapshot(symbol, entry_date, buy_price, entry_label, as_of, direction="LONG"):
+def build_archive_snapshot(symbol, entry_date, buy_price, entry_label, as_of, direction="LONG", stop_loss=None):
     """
     Builds the fixed-format chart image archived into a ticker's Logbook:
     always the most recent ARCHIVE_VISIBLE_TRADING_DAYS ending at `as_of`,
@@ -360,7 +360,9 @@ def build_archive_snapshot(symbol, entry_date, buy_price, entry_label, as_of, di
     chart shows, so an archived snapshot never falls out of sync with
     what you've actually configured. `direction` ("LONG" or "SHORT")
     decides which way the entry marker points - see build_figure().
-    Returns PNG bytes, or None if no price data was found.
+    `stop_loss`, if given, draws the same thin grey stop line the
+    interactive chart shows. Returns PNG bytes, or None if no price
+    data was found.
     """
     conn = database.get_connection()
     saved_prefs = database.get_chart_preferences(conn)
@@ -390,7 +392,8 @@ def build_archive_snapshot(symbol, entry_date, buy_price, entry_label, as_of, di
     visible_range = (display_start, display_end + timedelta(days=margin_days))
 
     fig, _fit_payload = build_figure(
-        symbol, history, entry_point, settings, entry_label=entry_label, visible_range=visible_range)
+        symbol, history, entry_point, settings, entry_label=entry_label, visible_range=visible_range,
+        stop_loss=stop_loss)
     return render_png(fig)
 
 
@@ -484,7 +487,7 @@ def render_settings_toolbar(container, key_prefix):
 
 
 def build_figure(symbol, history, entry_point, settings, overlay_history=None, entry_label="Entry", interval="1d",
-                  visible_range=None):
+                  visible_range=None, stop_loss=None):
     """
     Builds the go.Figure for a price chart: candlestick or line, moving
     averages, an entry marker (plus an exit marker and connecting line if
@@ -505,6 +508,8 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
     when `history` itself covers a much wider window than should be shown
     by default (see FETCH_BUFFER_MULTIPLIER), so there's real data to
     scroll/zoom into on either side without an immediate empty edge.
+    `stop_loss`, if given, draws a thin grey line at that price - only
+    open positions have one (see database.get_stop_loss()).
     """
     entry_date = entry_point["entry_date"]
     buy_price = entry_point["buy_price"]
@@ -639,6 +644,15 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
                 name=entry_label, showlegend=False,
                 hovertemplate="%{x|%b %d, %Y}: %{y:.2f}%<extra></extra>",
             ), row=1, col=1)
+
+        if stop_loss is not None:
+            stop_pct = (stop_loss / baseline - 1) * 100
+            fig.add_hline(
+                y=stop_pct, row=1, col=1,
+                line=dict(color=MUTED_COLOR, width=1, dash="dot"),
+                annotation_text="Stop", annotation_position="top left",
+                annotation_font=dict(color=MUTED_COLOR, size=10),
+            )
         yaxis_title = "% Change from start of chart"
 
     else:
@@ -694,6 +708,14 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
                 name=entry_label, showlegend=False,
                 hovertemplate="%{x|%b %d, %Y}: $%{y:,.2f}<extra></extra>",
             ), row=1, col=1)
+
+        if stop_loss is not None:
+            fig.add_hline(
+                y=stop_loss, row=1, col=1,
+                line=dict(color=MUTED_COLOR, width=1, dash="dot"),
+                annotation_text="Stop", annotation_position="top left",
+                annotation_font=dict(color=MUTED_COLOR, size=10),
+            )
         yaxis_title = "Price ($)"
 
         # Volume panel - bars colored the same up/down as the candles

@@ -57,10 +57,15 @@ def fact_tile(column, label, value, color=None):
     ui.stat_tile(column, label, value, color, size="1.3rem")
 
 
-def render_chart_and_journal(symbol, entry_point, entry_label, key_prefix):
+def render_price_chart(symbol, entry_point, entry_label, key_prefix, stop_loss=None):
     """
-    Shared by both sections below: the Timeframe/Chart-Settings controls,
-    the price chart itself, and the today's-journal box + Save button.
+    The Timeframe/Chart-Settings controls plus the price chart itself -
+    split out from render_chart_and_journal() below so the Journal
+    Session queue view (which needs the chart but its own Save/Next
+    buttons instead of a plain Save button) can reuse it too. Returns
+    the entry_point dict, possibly with a "buy_price" added (a watchlist
+    ticker starts with none - see below), or None if no price data was
+    found, so the caller knows to skip the journal box entirely.
     `key_prefix` keeps each section's Streamlit widgets independent (so
     picking a timeframe for a watchlist ticker doesn't affect the open
     position's chart, etc).
@@ -95,7 +100,7 @@ def render_chart_and_journal(symbol, entry_point, entry_label, key_prefix):
 
     if history.empty:
         st.warning(charting.history_error_message(history, symbol))
-        return
+        return None
 
     # A watchlist ticker has no real trade price - use the closing price
     # near when it was added instead, just for marker placement.
@@ -119,25 +124,55 @@ def render_chart_and_journal(symbol, entry_point, entry_label, key_prefix):
 
     fig, fit_payload = charting.build_figure(
         symbol, history, entry_point, settings, overlay_history, entry_label=entry_label, interval=interval,
-        visible_range=(visible_start, display_end))
+        visible_range=(visible_start, display_end), stop_loss=stop_loss)
     charting.render_interactive_chart(fig, fit_payload)
 
+    return entry_point
+
+
+def render_journal_box(conn, symbol, key_prefix):
+    """Today's Journal text box, pre-filled with today's existing entry
+    for `symbol` if there is one. Just the textarea - no Save button -
+    so both the plain single-ticker view and the Journal Session queue
+    view can put their own button/navigation right after it."""
     st.subheader("Today's Journal")
-    conn = database.get_connection()
     today = date.today()
     existing_entry = database.get_logbook_entry(conn, symbol, today)
     existing_notes = existing_entry["notes"] if existing_entry else ""
-
-    notes = st.text_area(
+    return st.text_area(
         "Your thoughts on this trade today", value=existing_notes or "",
         height=150, key=f"{key_prefix}_notes")
 
+
+def save_journal_entry(conn, symbol, entry_point, entry_label, notes, stop_loss=None):
+    """Archives today's chart snapshot and saves the journal entry -
+    the actual work behind every "Save" button on this page, whether
+    it's the plain single-ticker view or a Journal Session step."""
+    today = date.today()
+    with st.spinner("Saving and archiving today's chart..."):
+        png_bytes = charting.build_archive_snapshot(
+            symbol, entry_point["entry_date"], entry_point["buy_price"], entry_label,
+            datetime.combine(today, datetime.min.time()), direction=entry_point.get("direction", "LONG"),
+            stop_loss=stop_loss)
+    database.upsert_logbook_entry(conn, symbol, today, notes=notes, chart_image=png_bytes)
+    return png_bytes
+
+
+def render_chart_and_journal(symbol, entry_point, entry_label, key_prefix, stop_loss=None):
+    """
+    The plain single-ticker view: chart, then today's-journal box, then
+    a Save button. Used by both the watchlist ticker view and the open
+    position detail view below.
+    """
+    entry_point = render_price_chart(symbol, entry_point, entry_label, key_prefix, stop_loss=stop_loss)
+    if entry_point is None:
+        return
+
+    conn = database.get_connection()
+    notes = render_journal_box(conn, symbol, key_prefix)
+
     if st.button("Save", key=f"{key_prefix}_save"):
-        with st.spinner("Saving and archiving today's chart..."):
-            png_bytes = charting.build_archive_snapshot(
-                symbol, entry_point["entry_date"], entry_point["buy_price"], entry_label,
-                datetime.combine(today, datetime.min.time()), direction=entry_point.get("direction", "LONG"))
-        database.upsert_logbook_entry(conn, symbol, today, notes=notes, chart_image=png_bytes)
+        png_bytes = save_journal_entry(conn, symbol, entry_point, entry_label, notes, stop_loss=stop_loss)
         if png_bytes is not None:
             st.success("Saved - today's chart has been archived to the Logbook.")
         else:
@@ -153,13 +188,15 @@ def position_label(position):
     return f"{position['symbol']} (Short)" if position["direction"] == "SHORT" else position["symbol"]
 
 
-def render_position_detail(position, conn):
+def render_position_stats_and_stop(position, conn, key_prefix):
     """
-    The rich view for an open position: fact tiles (entry, current
-    price, unrealized P/L), the stop-loss input, and the chart +
-    journal - everything the old dropdown-based Open Positions section
-    used to show, now driven directly by a position dict from List 5
-    instead of a dropdown selection.
+    Fact tiles (entry, current price, unrealized P/L) plus the stop-loss
+    input for an open position - shared by the plain single-ticker
+    detail view and the Journal Session queue view below. Returns the
+    stop-loss price to draw on the chart: the live value sitting in the
+    box, even before "Save Stop Loss" is clicked, so dragging the stop
+    up/down previews on the chart immediately - or None if there isn't
+    one (0 means "no stop").
     """
     symbol = position["symbol"]
     is_short = position["direction"] == "SHORT"
@@ -193,9 +230,9 @@ def render_position_detail(position, conn):
     saved_stop = database.get_stop_loss(conn, symbol)
     new_stop = st.number_input(
         "Stop Loss (0 = no stop)", min_value=0.0, value=saved_stop or 0.0, step=0.01, format="%.2f",
-        key="stop_loss_input",
+        key=f"{key_prefix}_stop_loss_input",
     )
-    if st.button("Save Stop Loss", key="stop_loss_save"):
+    if st.button("Save Stop Loss", key=f"{key_prefix}_stop_loss_save"):
         # 0 means "no stop," not a real $0 stop price - storing an
         # actual $0 would make the Open Positions page count nearly the
         # whole position's value as heat.
@@ -206,13 +243,30 @@ def render_position_detail(position, conn):
             database.delete_stop_loss(conn, symbol)
             st.success(f"Stop loss for {symbol} cleared.")
 
+    return new_stop if new_stop > 0 else None
+
+
+def render_position_detail(position, conn):
+    """
+    The rich view for an open position: fact tiles (entry, current
+    price, unrealized P/L), the stop-loss input, and the chart +
+    journal - everything the old dropdown-based Open Positions section
+    used to show, now driven directly by a position dict from List 5
+    instead of a dropdown selection.
+    """
+    symbol = position["symbol"]
+    is_short = position["direction"] == "SHORT"
+
+    stop_loss = render_position_stats_and_stop(position, conn, key_prefix="position")
+
     st.divider()
 
     entry_point = {
         "entry_date": position["entry_date"], "buy_price": position["avg_price"],
         "direction": position["direction"],
     }
-    render_chart_and_journal(symbol, entry_point, "Short Entry" if is_short else "Entry", key_prefix="position")
+    render_chart_and_journal(
+        symbol, entry_point, "Short Entry" if is_short else "Entry", key_prefix="position", stop_loss=stop_loss)
 
 
 def parse_ticker_input(text):
@@ -363,4 +417,116 @@ def render_lists_section():
     st.caption("That ticker is no longer listed. Click one above to load its chart and journal.")
 
 
-render_lists_section()
+def build_journal_queue(conn):
+    """
+    Builds today's Journal Session queue: every open position first
+    (richer detail - fact tiles and a stop-loss line), then every
+    watchlist ticker not already covered by a position, in each list's
+    existing order. A symbol that's both an open position and sitting
+    on a watchlist is only journaled once, as the position.
+    """
+    queue = []
+    seen_symbols = set()
+
+    for position in database.get_open_positions(conn):
+        is_short = position["direction"] == "SHORT"
+        queue.append({
+            "symbol": position["symbol"],
+            "source": "position",
+            "position": position,
+            "entry_point": {
+                "entry_date": position["entry_date"], "buy_price": position["avg_price"],
+                "direction": position["direction"],
+            },
+            "entry_label": "Short Entry" if is_short else "Entry",
+        })
+        seen_symbols.add(position["symbol"])
+
+    for entry in database.get_watchlist(conn):
+        if entry["symbol"] in seen_symbols:
+            continue
+        queue.append({
+            "symbol": entry["symbol"],
+            "source": "watchlist",
+            "position": None,
+            "entry_point": {"entry_date": entry["added_at"]},
+            "entry_label": "Added",
+        })
+        seen_symbols.add(entry["symbol"])
+
+    return queue
+
+
+def render_journal_session(conn):
+    """
+    The guided Journal Session: walks through every ticker in the queue
+    one at a time, full-screen, so journaling all of them in one sitting
+    is click-write-Save & Next instead of scrolling back up to the
+    watchlists to pick the next ticker every time.
+    """
+    session = st.session_state["journal_session"]
+    queue, index = session["queue"], session["index"]
+
+    if index >= len(queue):
+        st.success(f"Session complete - journaled {len(queue)} ticker(s) today.")
+        if st.button("Back to Shortlist"):
+            del st.session_state["journal_session"]
+            st.rerun()
+        return
+
+    item = queue[index]
+    symbol = item["symbol"]
+    key_prefix = f"session_{index}"
+
+    header_cols = st.columns([5, 1])
+    header_cols[0].subheader(f"Reviewing {index + 1} of {len(queue)}: {symbol}")
+    if header_cols[1].button("Exit Session", key=f"{key_prefix}_exit"):
+        del st.session_state["journal_session"]
+        st.rerun()
+    st.progress(index / len(queue))
+
+    stop_loss = None
+    if item["source"] == "position":
+        stop_loss = render_position_stats_and_stop(item["position"], conn, key_prefix=key_prefix)
+        st.divider()
+
+    entry_point = render_price_chart(
+        symbol, item["entry_point"], item["entry_label"], key_prefix, stop_loss=stop_loss)
+
+    if entry_point is None:
+        # No price data for this one right now - nothing to journal
+        # against, so the only sensible move is on to the next ticker.
+        if st.button("Skip →", key=f"{key_prefix}_skip"):
+            session["index"] += 1
+            st.rerun()
+        return
+
+    notes = render_journal_box(conn, symbol, key_prefix)
+
+    nav_cols = st.columns([2, 2, 6])
+    save_clicked = nav_cols[0].button("Save & Next →", type="primary", key=f"{key_prefix}_save_next")
+    skip_clicked = nav_cols[1].button("Skip", key=f"{key_prefix}_skip")
+
+    if save_clicked:
+        save_journal_entry(conn, symbol, entry_point, item["entry_label"], notes, stop_loss=stop_loss)
+        session["index"] += 1
+        st.rerun()
+    elif skip_clicked:
+        session["index"] += 1
+        st.rerun()
+
+
+conn = database.get_connection()
+
+if st.session_state.get("journal_session") is not None:
+    render_journal_session(conn)
+else:
+    if st.button("📝 Start Journal Session", type="primary"):
+        queue = build_journal_queue(conn)
+        if not queue:
+            st.info("Nothing to journal yet - add a ticker to a watchlist or open a position first.")
+        else:
+            st.session_state["journal_session"] = {"queue": queue, "index": 0}
+            st.rerun()
+    st.divider()
+    render_lists_section()
