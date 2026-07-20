@@ -44,6 +44,7 @@ def position_label(position):
 conn = database.get_connection()
 positions = database.get_open_positions(conn)
 stops = database.get_all_stop_losses(conn)
+account_value = database.get_account_value(conn)
 
 # --- Gather live data for every open position ---------------------------
 enriched = []
@@ -133,19 +134,50 @@ else:
 
     # --- Equity by position ---------------------------------------------
     st.subheader("Equity by Position")
+    if not account_value:
+        st.caption(
+            "Set your account value on the Dashboard page to also see each "
+            "bar's % of account and a Cash bar for what's not invested."
+        )
     if priced:
-        by_value = sorted(priced, key=lambda e: e["current_value"], reverse=True)
+        equity_rows = []
+        for e in priced:
+            pct = (e["current_value"] / account_value * 100) if account_value else None
+            text = f"${e['current_value']:,.0f} ({pct:.1f}%)" if pct is not None else f"${e['current_value']:,.0f}"
+            equity_rows.append({
+                "label": position_label(e),
+                "value": e["current_value"],
+                "text": text,
+                "detail": f"Cost Basis: ${e['cost_basis']:,.2f}",
+                "color": charting.CATEGORICAL_PALETTE[0],
+            })
+
+        if account_value:
+            cash_amount = account_value - total_current_value
+            cash_pct = cash_amount / account_value * 100
+            equity_rows.append({
+                "label": "Cash",
+                "value": cash_amount,
+                "text": f"${cash_amount:,.0f} ({cash_pct:.1f}%)",
+                "detail": "Uninvested cash",
+                "color": charting.MUTED_COLOR,
+            })
+
+        equity_rows.sort(key=lambda r: r["value"], reverse=True)
+
         equity_chart = go.Figure()
         equity_chart.add_trace(go.Bar(
-            x=[position_label(e) for e in by_value],
-            y=[e["current_value"] for e in by_value],
-            marker_color=charting.CATEGORICAL_PALETTE[0],
-            customdata=[e["cost_basis"] for e in by_value],
-            text=[f"${e['current_value']:,.0f}" for e in by_value],
+            x=[r["value"] for r in equity_rows],
+            y=[r["label"] for r in equity_rows],
+            orientation="h",
+            marker_color=[r["color"] for r in equity_rows],
+            customdata=[r["detail"] for r in equity_rows],
+            text=[r["text"] for r in equity_rows],
             textposition="outside",
-            hovertemplate="%{x}<br>Current Value: $%{y:,.2f}<br>Cost Basis: $%{customdata:,.2f}<extra></extra>",
+            hovertemplate="%{y}<br>Value: $%{x:,.2f}<br>%{customdata}<extra></extra>",
         ))
-        st.plotly_chart(charting.style_simple_chart(equity_chart, "Current Value ($)"), theme=None)
+        equity_chart.update_yaxes(autorange="reversed")
+        st.plotly_chart(charting.style_simple_chart(equity_chart, "Current Value ($)", horizontal=True), theme=None)
     else:
         st.info("No priced positions to chart yet.")
 
@@ -158,18 +190,28 @@ else:
             "Shortlist page to include it here."
         )
     if heat_positions:
-        by_heat = sorted(heat_positions, key=lambda e: e["heat_dollars"], reverse=True)
+        heat_rows = []
+        for e in heat_positions:
+            acct_pct = (e["heat_dollars"] / account_value * 100) if account_value else None
+            text = f"${e['heat_dollars']:,.0f} ({acct_pct:.1f}% of acct)" if acct_pct is not None else f"${e['heat_dollars']:,.0f}"
+            detail = f"{e['heat_pct']:.1f}% of position value" if e["heat_pct"] is not None else ""
+            heat_rows.append({"label": position_label(e), "value": e["heat_dollars"], "text": text, "detail": detail})
+
+        heat_rows.sort(key=lambda r: r["value"], reverse=True)
+
         heat_chart = go.Figure()
         heat_chart.add_trace(go.Bar(
-            x=[position_label(e) for e in by_heat],
-            y=[e["heat_dollars"] for e in by_heat],
+            x=[r["value"] for r in heat_rows],
+            y=[r["label"] for r in heat_rows],
+            orientation="h",
             marker_color=charting.CRITICAL_COLOR,
-            customdata=[e["heat_pct"] for e in by_heat],
-            text=[f"${e['heat_dollars']:,.0f}" for e in by_heat],
+            customdata=[r["detail"] for r in heat_rows],
+            text=[r["text"] for r in heat_rows],
             textposition="outside",
-            hovertemplate="%{x}<br>Heat: $%{y:,.2f}<br>%{customdata:.1f}% of position<extra></extra>",
+            hovertemplate="%{y}<br>Heat: $%{x:,.2f}<br>%{customdata}<extra></extra>",
         ))
-        st.plotly_chart(charting.style_simple_chart(heat_chart, "Heat ($)"), theme=None)
+        heat_chart.update_yaxes(autorange="reversed")
+        st.plotly_chart(charting.style_simple_chart(heat_chart, "Heat ($)", horizontal=True), theme=None)
     else:
         st.info("No positions with a stop-loss set yet.")
 

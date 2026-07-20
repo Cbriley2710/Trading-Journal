@@ -266,7 +266,7 @@ def fetch_latest_price(symbol):
     return recent["Close"].iloc[-1]
 
 
-def style_simple_chart(fig, yaxis_title, height=350):
+def style_simple_chart(fig, value_axis_title, height=350, horizontal=False):
     """
     Applies this app's shared dark look to a plain bar/line figure -
     the Dashboard's summary charts and the Open Positions charts all
@@ -274,15 +274,29 @@ def style_simple_chart(fig, yaxis_title, height=350):
     build_figure()). Returns the same figure, styled, so it can be
     passed straight into st.plotly_chart(). Until this existed, the
     exact same styling block was copy-pasted around both pages.
+
+    Set horizontal=True for a horizontal bar chart (orientation="h" on
+    the trace itself) - the dollar/value axis is x instead of y there,
+    so value_axis_title labels the x axis instead of the y axis.
     """
     fig.update_layout(
         height=height,
         margin=dict(t=10, b=45),
-        yaxis_title=yaxis_title,
         plot_bgcolor=CHART_BACKGROUND,
         paper_bgcolor=CHART_BACKGROUND,
         font=dict(color=CHART_TEXT_COLOR),
     )
+    if horizontal:
+        fig.update_layout(xaxis_title=value_axis_title)
+        # A bar's "outside" text label sits just past its own end - for
+        # whichever bar is closest to the axis max, that label has no
+        # room left and gets clipped at the plot's edge. Padding the
+        # range a bit past the largest value leaves room for it.
+        values = [v for trace in fig.data for v in (trace.x or []) if v is not None]
+        if values:
+            fig.update_xaxes(range=[min(0, min(values)), max(values) * 1.2])
+    else:
+        fig.update_layout(yaxis_title=value_axis_title)
     fig.update_xaxes(gridcolor=GRIDLINE_COLOR, showgrid=True, zeroline=False)
     fig.update_yaxes(gridcolor=GRIDLINE_COLOR, showgrid=True, zeroline=False)
     return fig
