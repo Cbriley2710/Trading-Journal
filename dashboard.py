@@ -331,32 +331,35 @@ with st.expander("Account Settings"):
     if jan1_balance:
         st.caption(
             f"Calculated current account value: ${account_value:,.2f} "
-            f"(${jan1_balance:,.2f} Jan 1 baseline + ${deposits_this_year:,.2f} deposits "
-            f"this year + ${realized_pl_this_year:,.2f} realized P/L this year + "
-            f"${total_unrealized_pl_now:,.2f} unrealized P/L now)"
+            f"(${jan1_balance:,.2f} Jan 1 baseline + ${deposits_this_year:,.2f} net "
+            f"deposits/withdrawals this year + ${realized_pl_this_year:,.2f} realized P/L "
+            f"this year + ${total_unrealized_pl_now:,.2f} unrealized P/L now)"
         )
 
-    st.subheader("Deposits")
+    st.subheader("Deposits & Withdrawals")
+    st.caption("Enter a positive amount for a deposit, or a negative amount for a withdrawal.")
     deposit_cols = st.columns([1, 1, 1])
     deposit_amount = deposit_cols[0].number_input(
-        "Deposit Amount ($)", min_value=0.0, step=100.0, format="%.2f", key="deposit_amount_input")
-    deposit_date = deposit_cols[1].date_input("Deposit Date", value=date.today(), key="deposit_date_input")
+        "Amount ($, negative = withdrawal)", step=100.0, format="%.2f", key="deposit_amount_input")
+    deposit_date = deposit_cols[1].date_input("Date", value=date.today(), key="deposit_date_input")
     deposit_cols[2].write("")  # vertical spacer so the button lines up with the inputs above
-    if deposit_cols[2].button("Add Deposit"):
-        if deposit_amount > 0:
+    if deposit_cols[2].button("Add"):
+        if deposit_amount != 0:
             database.add_deposit(conn, deposit_date, deposit_amount)
-            st.success(f"Deposit of ${deposit_amount:,.2f} on {deposit_date:%m/%d/%Y} added.")
+            action = "Deposit" if deposit_amount > 0 else "Withdrawal"
+            st.success(f"{action} of ${abs(deposit_amount):,.2f} on {deposit_date:%m/%d/%Y} added.")
             st.rerun()
         else:
-            st.warning("Enter a deposit amount greater than $0.")
+            st.warning("Enter an amount other than $0.")
 
     if deposits:
         for d in sorted(deposits, key=lambda d: d["deposit_date"], reverse=True):
             row_cols = st.columns([1, 1, 1])
             row_cols[0].write(f"{d['deposit_date']:%m/%d/%Y}")
-            row_cols[1].write(f"${d['amount']:,.2f}")
+            amount_label = f"${d['amount']:,.2f}" if d["amount"] >= 0 else f"-${abs(d['amount']):,.2f} (withdrawal)"
+            row_cols[1].write(amount_label)
             if row_cols[2].button("Delete", key=f"delete_deposit_{d['id']}"):
                 database.delete_deposit(conn, d["id"])
                 st.rerun()
     else:
-        st.caption("No deposits recorded yet.")
+        st.caption("No deposits or withdrawals recorded yet.")

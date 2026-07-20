@@ -680,15 +680,19 @@ def set_account_value(conn, account_value):
 
 
 def get_deposits(conn):
-    """Returns every deposit ever recorded, oldest first, as
-    {"id", "deposit_date", "amount"} dictionaries."""
+    """Returns every deposit/withdrawal ever recorded, oldest first, as
+    {"id", "deposit_date", "amount"} dictionaries. A withdrawal is
+    stored as a negative amount - summing this column is all the
+    calculated account value needs, so there's no separate table or
+    sign-flipping logic for the two."""
     cur = conn.cursor()
     cur.execute("SELECT id, deposit_date, amount FROM deposits ORDER BY deposit_date")
     return [{"id": row[0], "deposit_date": row[1], "amount": row[2]} for row in cur.fetchall()]
 
 
 def add_deposit(conn, deposit_date, amount):
-    """Records one deposit into the trading account."""
+    """Records one deposit (positive amount) or withdrawal (negative
+    amount) for the trading account."""
     cur = conn.cursor()
     cur.execute(
         "INSERT INTO deposits (deposit_date, amount) VALUES (%s, %s)",
@@ -698,7 +702,7 @@ def add_deposit(conn, deposit_date, amount):
 
 
 def delete_deposit(conn, deposit_id):
-    """Removes one deposit (e.g. one entered by mistake)."""
+    """Removes one deposit/withdrawal (e.g. one entered by mistake)."""
     cur = conn.cursor()
     cur.execute("DELETE FROM deposits WHERE id = %s", (deposit_id,))
     conn.commit()
