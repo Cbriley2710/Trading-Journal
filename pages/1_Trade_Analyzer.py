@@ -71,6 +71,24 @@ if not trades:
 
 trades_sorted = sorted(trades, key=lambda t: t["date"], reverse=True)
 
+entry_dates = [t["entry_date"].date() for t in trades_sorted]
+min_entry_date, max_entry_date = min(entry_dates), max(entry_dates)
+
+date_range = st.date_input(
+    "Filter by entry date", value=(min_entry_date, max_entry_date),
+    min_value=min_entry_date, max_value=max_entry_date,
+)
+# date_input in range mode returns a single date until both ends have
+# been picked - only filter once we actually have a (start, end) pair,
+# so the list doesn't collapse to nothing while a user is mid-pick.
+if isinstance(date_range, tuple) and len(date_range) == 2:
+    range_start, range_end = date_range
+    trades_sorted = [t for t in trades_sorted if range_start <= t["entry_date"].date() <= range_end]
+
+if not trades_sorted:
+    st.info("No trades with an entry date in this range.")
+    st.stop()
+
 selected_index = st.selectbox(
     "Choose a trade", options=range(len(trades_sorted)),
     format_func=lambda i: trade_label(trades_sorted[i]),
