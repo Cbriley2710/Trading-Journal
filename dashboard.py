@@ -158,10 +158,13 @@ st.divider()
 # Uses trades_df (every closed trade), not `filtered` - this is meant to
 # answer "how has my whole account actually done," not whatever narrower
 # slice the sidebar filters happen to be set to. Realized P/L only (no
-# unrealized P/L from open positions), and every period's % is against
-# TODAY's account value, since there's no history of past account sizes.
+# unrealized P/L from open positions). Every period's % is against the
+# Jan 1 baseline specifically, NOT today's calculated account_value -
+# that value already has this year's P/L (and today's unrealized P/L)
+# baked into it, so using it as the denominator would inflate as the
+# year goes on and systematically understate every period's return.
 st.subheader("Account Performance")
-if account_value:
+if jan1_balance:
     today = pd.Timestamp.now().normalize()
     periods = [
         ("7 Days", today - pd.Timedelta(days=7)),
@@ -174,11 +177,11 @@ if account_value:
     for col, (label, cutoff) in zip(period_cols, periods):
         period_trades = trades_df if cutoff is None else trades_df[trades_df["date"] >= cutoff]
         period_pl = period_trades["profit_loss"].sum()
-        period_pct = period_pl / account_value * 100
+        period_pct = period_pl / jan1_balance * 100
         stat_tile(col, label, f"${period_pl:,.2f} ({period_pct:+.1f}%)",
                   GOOD_COLOR if period_pl >= 0 else CRITICAL_COLOR)
 else:
-    st.info("Set your account value above to see account performance by time period.")
+    st.info("Set your account value as of Jan 1 (Account Settings below) to see account performance by time period.")
 
 st.divider()
 
