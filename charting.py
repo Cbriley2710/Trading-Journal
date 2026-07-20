@@ -620,15 +620,32 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
     # the price panel (just above the volume panel) instead of at the
     # trade's actual price - they used to sit right on the candles at
     # whatever price the trade happened to be at, which could land
-    # anywhere in the panel and get lost among the candles/MAs. A flat
-    # 8%-of-range gap below the lowest low keeps them clear of the
-    # candles without needing their own axis. This point still has to
-    # be added to fit_payload["price"] below (a second "series" entry)
-    # so the y-axis auto-fit (see fitYAxes() in render_interactive_chart)
-    # actually stretches down far enough to show it - otherwise it'd get
-    # clipped below the visible plot area whenever it's lower than every
-    # candle already fits for.
-    marker_y = history["Low"].min() - (history["High"].max() - history["Low"].min()) * 0.08
+    # anywhere in the panel and get lost among the candles/MAs.
+    #
+    # This value is NOT fed into fit_payload - render_interactive_chart's
+    # fitYAxes() deliberately ignores it and instead repositions the
+    # marker trace(s) itself, dynamically, just below whatever the price
+    # axis's range already ended up being from the real candles alone
+    # (see repositionMarkers() there). Including this point in the fit
+    # calculation was tried first and was a real bug: since it sits well
+    # below the actual candles, the axis stretched down to fit it too,
+    # squashing the real price action into a thin band at the top of the
+    # chart instead of using the full height.
+    #
+    # This Python-computed value is still what's actually used for the
+    # non-interactive archived Logbook snapshot (build_archive_snapshot),
+    # which has no JS runtime to reposition anything after the fact -
+    # scoped to `visible_range` (the window actually shown), not the
+    # full fetched history (which reaches further back than what's
+    # visible - see FETCH_BUFFER_MULTIPLIER), so it lands close to right
+    # for whatever's actually on screen instead of some old, unrelated
+    # low from months before the visible window.
+    range_history = history
+    if visible_range is not None:
+        windowed = history[(history.index >= visible_range[0]) & (history.index <= visible_range[1])]
+        if not windowed.empty:
+            range_history = windowed
+    marker_y = range_history["Low"].min() - (range_history["High"].max() - range_history["Low"].min()) * 0.08
 
     if settings["chart_type"] == "Candlestick":
         fig.add_trace(go.Candlestick(
@@ -669,7 +686,7 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
             mode="lines+markers",
             line=dict(color=outcome_color, width=2, dash="dot"),
             marker=dict(size=14, symbol=[entry_symbol, exit_symbol], color=outcome_color),
-            name="Entry / Exit", showlegend=False,
+            name="Entry / Exit", showlegend=False, meta="entry_exit_marker",
             text=[
                 f"{entry_label}<br>{entry_date:%b %d, %Y} · ${entry_value:,.2f}",
                 f"Exit<br>{exit_date:%b %d, %Y} · ${exit_value:,.2f}<br>"
@@ -677,10 +694,6 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
             ],
             hovertemplate="%{text}<extra></extra>",
         ), row=1, col=1)
-        fit_payload["price"].append({
-            "x": [entry_date.isoformat(), exit_date.isoformat()],
-            "lo": [marker_y, marker_y], "hi": [marker_y, marker_y],
-        })
     else:
         hover_text = (
             f"Added to watchlist<br>{entry_date:%b %d, %Y}" if entry_label == "Added"
@@ -689,14 +702,10 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
         fig.add_trace(go.Scatter(
             x=[entry_date], y=[marker_y], mode="markers",
             marker=dict(size=14, symbol=entry_symbol, color=outcome_color),
-            name=entry_label, showlegend=False,
+            name=entry_label, showlegend=False, meta="entry_exit_marker",
             text=[hover_text],
             hovertemplate="%{text}<extra></extra>",
         ), row=1, col=1)
-        fit_payload["price"].append({
-            "x": [entry_date.isoformat()],
-            "lo": [marker_y], "hi": [marker_y],
-        })
 
     if stop_loss is not None:
         fig.add_hline(
@@ -915,6 +924,7 @@ _INTERACTIVE_CHART_HTML = """
     // Plotly's own scroll-zoom doesn't do on its own.
     function fitYAxes(gd, xmin, xmax) {
         var relayout = {};
+        var priceRange = null;
         // Plotly names axes in creation order, not visual/logical order -
         // make_subplots(specs=[[{secondary_y:true}], [{}]]) creates the
         // row-1 secondary axis (the overlay ticker's own scale) BEFORE
@@ -935,10 +945,41 @@ _INTERACTIVE_CHART_HTML = """
             var pad = (hi - lo) * 0.08 || Math.abs(hi) * 0.08 || 1;
             relayout[pair[1] + ".range"] = [lo - pad, hi + pad];
             relayout[pair[1] + ".autorange"] = false;
+            if (pair[0] === "price") priceRange = [lo - pad, hi + pad];
         });
         if (Object.keys(relayout).length) {
             Plotly.relayout(gd, relayout);
         }
+        // Deliberately AFTER computing the price range above, not part
+        // of it - see repositionMarkers()'s own comment for why an
+        // entry/exit/"Added" marker's fake, off-price position must
+        // never feed into that calculation itself.
+        if (priceRange) {
+            repositionMarkers(gd, priceRange);
+        }
+    }
+
+    // Keeps any entry/exit/"Added" marker trace (tagged via trace.meta
+    // === "entry_exit_marker", set in build_figure()) sitting just
+    // above the bottom of whatever the price axis's range actually is
+    // right now. This is deliberately NOT part of fitYAxes()'s own fit
+    // calculation - a marker's position here is a fixed decorative
+    // "just above the volume panel" spot, not a real price, so feeding
+    // it into that calculation would drag the axis down to include it,
+    // squashing the real candles into a thin band at the top instead of
+    // using the chart's full height (a real bug this replaced).
+    function repositionMarkers(gd, priceRange) {
+        var lo = priceRange[0], hi = priceRange[1];
+        var markerY = lo + (hi - lo) * 0.03;
+        var indices = [];
+        gd.data.forEach(function(trace, i) {
+            if (trace.meta === "entry_exit_marker") indices.push(i);
+        });
+        if (!indices.length) return;
+        var newYs = indices.map(function(i) {
+            return gd.data[i].y.map(function() { return markerY; });
+        });
+        Plotly.restyle(gd, {y: newYs}, indices);
     }
 
     // Turns any timestamp string into one canonical "YYYY-MM-DD HH:MM"
@@ -1087,7 +1128,17 @@ _INTERACTIVE_CHART_HTML = """
                 var update = {"yaxis.autorange": true};
                 if (gd.layout.yaxis2) { update["yaxis2.autorange"] = true; }
                 if (gd.layout.yaxis3) { update["yaxis3.autorange"] = true; }
-                Plotly.relayout(gd, update);
+                Plotly.relayout(gd, update).then(function() {
+                    // Only after the relayout promise resolves does
+                    // gd.layout.yaxis.range hold the actual numbers
+                    // Plotly's own autorange landed on (the request
+                    // above only says "autorange", not what to) - same
+                    // reasoning as fitYAxes() above for why markers are
+                    // repositioned from the result, not computed as
+                    // part of it.
+                    var range = gd.layout.yaxis && gd.layout.yaxis.range;
+                    if (range) repositionMarkers(gd, range);
+                });
             }
         });
     });
