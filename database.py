@@ -498,6 +498,42 @@ def get_logbook_symbols(conn):
     return [row[0] for row in cur.fetchall()]
 
 
+def get_logbook_summary(conn):
+    """
+    Returns one row per symbol with at least one logbook entry - how
+    many entries it has, and its earliest/latest entry_date - without
+    pulling every entry's full notes/chart_image just to build a ticker
+    list. This is what the Logbook page's date-range filter checks a
+    symbol against (does [first_entry, last_entry] overlap the selected
+    range at all) before it bothers fetching that symbol's actual
+    day-by-day entries.
+    """
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT symbol, COUNT(*), MIN(entry_date), MAX(entry_date)
+        FROM logbook_entries
+        GROUP BY symbol
+        ORDER BY symbol
+    """)
+    return [
+        {"symbol": row[0], "entry_count": row[1], "first_entry": row[2], "last_entry": row[3]}
+        for row in cur.fetchall()
+    ]
+
+
+def search_logbook_notes(conn, keyword):
+    """Returns the set of symbols with at least one logbook entry whose
+    notes contain `keyword` (case-insensitive) - used by the Logbook
+    page's keyword filter to narrow the ticker list down to ones worth
+    looking at, before you pick one to actually read."""
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT DISTINCT symbol FROM logbook_entries WHERE notes ILIKE %s",
+        (f"%{keyword}%",),
+    )
+    return {row[0] for row in cur.fetchall()}
+
+
 def get_watchlist(conn):
     """Returns every manually-tracked ticker across all five lists,
     oldest added first - each row says which list it belongs to."""
