@@ -10,13 +10,14 @@ spot a hot or cold streak early.
 "Heat" here means the dollar distance from today's price down to your
 stop-loss, times your shares - i.e. what you'd actually lose from here if
 the position got stopped out right now. That number only exists for a
-position once you've saved a stop-loss for it on the Shortlist page (see
-render_open_positions_section() there) - there's nowhere else in this
-app that stop price is tracked.
+position once you've set a stop-loss for it in the Positions & Stop-Loss
+table below - there's nowhere else in this app that stop price is
+tracked (see database.get_stop_loss()/set_stop_loss()).
 """
 
 from datetime import date
 
+import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 
@@ -100,12 +101,72 @@ if positions:
                 "heat_pct": heat_pct,
             })
 
+# --- Positions & stop-loss --------------------------------------------------
+# The one place stop-loss is set or moved - a table instead of a
+# per-ticker input buried in a chart page, so trailing every open
+# position's stop as the day goes is one scroll, not five page visits.
+if positions:
+    st.header("Positions & Stop-Loss")
+    st.caption("Edit the Stop Loss column directly - 0 (or blank) means no stop set.")
+
+    position_rows = [
+        {
+            "Ticker": position_label(e),
+            "Entry Date": e["entry_date"].strftime("%m/%d/%Y"),
+            "Shares": e["quantity"],
+            "Avg Price": e["avg_price"],
+            "Current Price": e["current_price"],
+            "Unrealized P/L": e["unrealized_pl"],
+            "Stop Loss": e["stop_loss"] or 0.0,
+            "_symbol": e["symbol"],
+        }
+        for e in enriched
+    ]
+    edited_rows = st.data_editor(
+        pd.DataFrame(position_rows),
+        column_order=[
+            "Ticker", "Entry Date", "Shares", "Avg Price",
+            "Current Price", "Unrealized P/L", "Stop Loss",
+        ],
+        column_config={
+            "Ticker": st.column_config.TextColumn(disabled=True),
+            "Entry Date": st.column_config.TextColumn(disabled=True),
+            "Shares": st.column_config.NumberColumn(disabled=True, format="%.0f"),
+            "Avg Price": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
+            "Current Price": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
+            "Unrealized P/L": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
+            "Stop Loss": st.column_config.NumberColumn(min_value=0.0, step=0.01, format="$%.2f"),
+        },
+        hide_index=True, width="stretch", key="positions_stop_loss_editor",
+    )
+
+    # Only ever writes to the database when a Stop Loss cell actually
+    # changed from what's currently saved - every other column is
+    # disabled (read-only) so there's nothing else here that could
+    # trigger a save. Re-running immediately afterward means the Equity
+    # & Heat numbers below reflect the new stop right away instead of
+    # lagging a rerun behind.
+    stop_loss_changed = False
+    for _, row in edited_rows.iterrows():
+        old_stop = round(stops.get(row["_symbol"]) or 0.0, 2)
+        new_stop = round(row["Stop Loss"] or 0.0, 2)
+        if new_stop != old_stop:
+            if new_stop > 0:
+                database.set_stop_loss(conn, row["_symbol"], new_stop)
+            else:
+                database.delete_stop_loss(conn, row["_symbol"])
+            stop_loss_changed = True
+    if stop_loss_changed:
+        st.rerun()
+
+    st.divider()
+
 # --- Equity & heat ---------------------------------------------------------
 st.header("Equity & Heat")
 st.caption(
     "\"Heat\" is how much you'd lose, from today's price, if every open "
-    "position hit its stop-loss right now. Set a stop for each position on "
-    "the Shortlist page to see it here."
+    "position hit its stop-loss right now. Set a stop for each position in "
+    "the Positions & Stop-Loss table above to see it here."
 )
 
 if not positions:
@@ -201,8 +262,8 @@ else:
     no_stop_symbols = [e["symbol"] for e in priced if e["stop_loss"] is None]
     if no_stop_symbols:
         st.caption(
-            f"No stop set for: {', '.join(no_stop_symbols)} - set one on the "
-            "Shortlist page to include it here."
+            f"No stop set for: {', '.join(no_stop_symbols)} - set one in the "
+            "table above to include it here."
         )
     if heat_positions:
         heat_rows = []

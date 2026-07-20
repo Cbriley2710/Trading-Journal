@@ -22,6 +22,7 @@ nightly archive script pass entry-only dicts (exit_date/sell_price = None),
 since those positions haven't been sold yet.
 """
 
+import re
 from datetime import timedelta
 
 import pandas as pd
@@ -397,12 +398,40 @@ def build_archive_snapshot(symbol, entry_date, buy_price, entry_label, as_of, di
     return render_png(fig)
 
 
+def _color_input(container, label, default_color, key):
+    """
+    A hex-code text box with a small color-swatch preview underneath,
+    used everywhere in this toolbar instead of st.color_picker.
+    st.color_picker's own picker panel (the gradient square/hue slider)
+    renders as a floating overlay Streamlit doesn't count as "inside"
+    whatever container it's nested in - so inside this toolbar's Chart
+    Settings expander, clicking that panel closed the whole expander
+    before the picked color ever took effect (a Streamlit platform
+    quirk, not something fixable from here). A plain text box has no
+    floating panel of its own, so it can't run into that.
+    """
+    color = container.text_input(label, value=default_color, key=key, max_chars=7)
+    if not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+        color = default_color
+    container.markdown(
+        f'<div style="width:100%;height:0.6rem;border-radius:3px;'
+        f'background:{color};margin-top:-0.6rem;"></div>',
+        unsafe_allow_html=True,
+    )
+    return color
+
+
 def render_settings_toolbar(container, key_prefix):
     """
-    Renders the "Chart Settings" popover (chart type, colors, price scale,
+    Renders the "Chart Settings" panel (chart type, colors, price scale,
     moving averages, overlay ticker) and returns a settings dict shaped
     like DEFAULT_SETTINGS above. Used by any page that wants the same
     interactive Chart Settings experience Trade Analyzer introduced.
+
+    This is an expander, not a popover - a popover auto-closes on any
+    click it considers "outside" itself, which caused the same kind of
+    problem _color_input() below is guarding against (see its docstring).
+    An expander only closes when you click its own header again.
 
     `key_prefix` must be unique to the caller (e.g. "position", "watchlist",
     "trade_analyzer") - Shortlist's Open Positions and Watchlist sections
@@ -420,7 +449,7 @@ def render_settings_toolbar(container, key_prefix):
     conn = database.get_connection()
     saved_prefs = database.get_chart_preferences(conn)
 
-    with container.popover("Chart Settings", width="stretch"):
+    with container.expander("Chart Settings"):
         chart_type = st.radio(
             "Chart Type", ["Candlestick", "Line"], horizontal=True, key=f"{key_prefix}_chart_type")
         price_scale = st.radio(
@@ -428,15 +457,12 @@ def render_settings_toolbar(container, key_prefix):
 
         if chart_type == "Candlestick":
             candle_cols = st.columns(2)
-            up_color = candle_cols[0].color_picker(
-                "Bullish candle", value=UP_CANDLE_COLOR, key=f"{key_prefix}_up_color")
-            down_color = candle_cols[1].color_picker(
-                "Bearish candle", value=DOWN_CANDLE_COLOR, key=f"{key_prefix}_down_color")
+            up_color = _color_input(candle_cols[0], "Bullish candle", UP_CANDLE_COLOR, f"{key_prefix}_up_color")
+            down_color = _color_input(candle_cols[1], "Bearish candle", DOWN_CANDLE_COLOR, f"{key_prefix}_down_color")
             line_color = None
         else:
             up_color = down_color = None
-            line_color = st.color_picker(
-                "Line color", value=CATEGORICAL_PALETTE[0], key=f"{key_prefix}_line_color")
+            line_color = _color_input(st, "Line color", CATEGORICAL_PALETTE[0], f"{key_prefix}_line_color")
 
         ma_text = st.text_input(
             "Moving Averages (comma-separated periods)", value=saved_prefs["ma_text"],
@@ -450,9 +476,8 @@ def render_settings_toolbar(container, key_prefix):
             for i, period in enumerate(ma_periods):
                 default_color = saved_prefs["ma_colors"].get(
                     str(period), CATEGORICAL_PALETTE[i % len(CATEGORICAL_PALETTE)])
-                ma_colors[period] = ma_color_cols[i].color_picker(
-                    f"{period}-period", value=default_color, key=f"{key_prefix}_ma_color_{period}",
-                )
+                ma_colors[period] = _color_input(
+                    ma_color_cols[i], f"{period}-period", default_color, f"{key_prefix}_ma_color_{period}")
 
         current_colors = {str(period): color for period, color in ma_colors.items()}
         if ma_text != saved_prefs["ma_text"] or current_colors != saved_prefs["ma_colors"]:
@@ -464,13 +489,12 @@ def render_settings_toolbar(container, key_prefix):
         ).strip().upper()
         overlay_color = None
         if overlay_symbol:
-            overlay_color = st.color_picker(
-                "Overlay color", value=CATEGORICAL_PALETTE[4], key=f"{key_prefix}_overlay_color")
+            overlay_color = _color_input(st, "Overlay color", CATEGORICAL_PALETTE[4], f"{key_prefix}_overlay_color")
             st.caption(
-                "With an overlay, both tickers are shown as % change from the "
-                "start of the chart, not raw price - comparing two different "
-                "stocks' actual dollar prices on the same axis wouldn't mean "
-                "anything, since they're not on the same scale."
+                "The overlay ticker gets its own price scale on the left "
+                "(the dashed line) - comparing two different stocks' dollar "
+                "prices on the SAME scale wouldn't mean anything, since "
+                "they're not likely to trade anywhere near each other."
             )
 
     return {
@@ -492,12 +516,16 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
     Builds the go.Figure for a price chart: candlestick or line, moving
     averages, an entry marker (plus an exit marker and connecting line if
     the trade is already closed), a volume panel, and an optional overlay
-    ticker shown as % change. Returns `(fig, fit_payload)` - `fig` gets
-    rendered via render_interactive_chart() (or, for a static image,
-    render_png()); `fit_payload` is a plain-JSON record of the real
-    price/volume data render_interactive_chart()'s zoom handler needs to
-    refit the y-axis as you scroll/pan (callers that don't need
-    interactivity, like build_archive_snapshot(), can ignore it).
+    ticker plotted against its own secondary price scale (see
+    secondary_y in the subplot specs below - a straight dollar-for-dollar
+    comparison against the primary symbol's scale wouldn't mean much,
+    since two different stocks are rarely anywhere near the same price).
+    Returns `(fig, fit_payload)` - `fig` gets rendered via
+    render_interactive_chart() (or, for a static image, render_png());
+    `fit_payload` is a plain-JSON record of the real price/volume/overlay
+    data render_interactive_chart()'s zoom handler needs to refit each
+    y-axis as you scroll/pan (callers that don't need interactivity, like
+    build_archive_snapshot(), can ignore it).
 
     `entry_label` names that marker - "Entry" for a real trade (the
     default), or something like "Added" for a watchlist ticker with no
@@ -537,18 +565,14 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
         outcome_color = CATEGORICAL_PALETTE[0]
 
     has_overlay = overlay_history is not None and not overlay_history.empty
-    # The overlay (% change) view and volume don't mix meaningfully on the
-    # same chart - volume is specific to the primary symbol's own shares
-    # traded, so the volume panel only appears when there's no overlay.
-    show_volume = not has_overlay
 
     # A plain-JSON (not Plotly's own, sometimes binary-encoded, figure
-    # JSON) record of what the price/volume axes should fit at any given
-    # visible time window - built directly from this data, not by trying
-    # to parse Plotly's serialized traces back apart in JavaScript.
-    # render_interactive_chart()'s zoom handler uses this to recompute
-    # the y-axis range as you scroll/pan through time.
-    fit_payload = {"price": [], "volume": []}
+    # JSON) record of what the price/volume/overlay axes should fit at
+    # any given visible time window - built directly from this data, not
+    # by trying to parse Plotly's serialized traces back apart in
+    # JavaScript. render_interactive_chart()'s zoom handler uses this to
+    # recompute each y-axis range as you scroll/pan through time.
+    fit_payload = {"price": [], "volume": [], "overlay": []}
 
     # Every bar's own OHLC/volume/change numbers, plain-JSON - this is
     # what feeds the live summary line shown above the chart in
@@ -575,170 +599,112 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
         "interval_label": INTERVAL_LABELS.get(interval, interval),
     }
 
-    if show_volume:
-        fig = make_subplots(
-            rows=2, cols=1, shared_xaxes=True,
-            row_heights=[0.75, 0.25], vertical_spacing=0.03,
-        )
-    else:
-        fig = make_subplots(rows=1, cols=1)
+    # secondary_y=True on row 1 only is what makes an overlay ticker's
+    # own price scale possible below - row 2 (volume) never needs one.
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True,
+        row_heights=[0.75, 0.25], vertical_spacing=0.03,
+        specs=[[{"secondary_y": True}], [{}]],
+    )
 
-    if has_overlay:
-        # Two different stocks' raw dollar prices aren't on the same scale,
-        # so comparing them only makes sense as % change from a shared
-        # starting point - this replaces the candlestick/absolute-price
-        # view entirely while an overlay is active.
-        baseline = history["Close"].iloc[0]
-        primary_pct = (history["Close"] / baseline - 1) * 100
-        overlay_baseline = overlay_history["Close"].iloc[0]
-        overlay_pct = (overlay_history["Close"] / overlay_baseline - 1) * 100
-        buy_pct = (buy_price / baseline - 1) * 100
+    fit_payload["price"].append({
+        "x": [ts.isoformat() for ts in history.index],
+        "lo": history["Low"].tolist(), "hi": history["High"].tolist(),
+    })
+    fit_payload["volume"].append({
+        "x": [ts.isoformat() for ts in history.index],
+        "lo": history["Volume"].tolist(), "hi": history["Volume"].tolist(),
+    })
 
-        fit_payload["price"].append({
-            "x": [ts.isoformat() for ts in history.index],
-            "lo": primary_pct.tolist(), "hi": primary_pct.tolist(),
-        })
-        fit_payload["price"].append({
-            "x": [ts.isoformat() for ts in overlay_history.index],
-            "lo": overlay_pct.tolist(), "hi": overlay_pct.tolist(),
-        })
-
-        fig.add_trace(go.Scatter(
-            x=history.index, y=primary_pct, mode="lines",
-            line=dict(color=settings["line_color"] or CATEGORICAL_PALETTE[0], width=2),
+    if settings["chart_type"] == "Candlestick":
+        fig.add_trace(go.Candlestick(
+            x=history.index,
+            open=history["Open"], high=history["High"],
+            low=history["Low"], close=history["Close"],
             name=symbol,
-            hovertemplate="%{x|%b %d, %Y}: %{y:.2f}%<extra></extra>",
+            increasing_line_color=settings["up_color"], increasing_fillcolor=settings["up_color"],
+            decreasing_line_color=settings["down_color"], decreasing_fillcolor=settings["down_color"],
+            showlegend=False,
         ), row=1, col=1)
+    else:
         fig.add_trace(go.Scatter(
-            x=overlay_history.index, y=overlay_pct, mode="lines",
+            x=history.index, y=history["Close"], mode="lines",
+            line=dict(color=settings["line_color"], width=2),
+            name=symbol, showlegend=False,
+        ), row=1, col=1)
+    for period in ma_periods:
+        if f"MA{period}" not in history.columns:
+            continue  # fetch_history was called with a different set of periods
+        fig.add_trace(go.Scatter(
+            x=history.index, y=history[f"MA{period}"], mode="lines",
+            line=dict(color=ma_colors[period], width=1.5),
+            name=f"{period}-period MA",
+            hovertemplate="%{x|%b %d, %Y}: $%{y:,.2f}<extra></extra>",
+        ), row=1, col=1)
+
+    if is_closed:
+        entry_value, exit_value = (sell_price, buy_price) if direction == "SHORT" else (buy_price, sell_price)
+        fig.add_trace(go.Scatter(
+            x=[entry_date, exit_date], y=[entry_value, exit_value],
+            mode="lines+markers",
+            line=dict(color=outcome_color, width=2, dash="dot"),
+            marker=dict(size=14, symbol=[entry_symbol, exit_symbol], color=outcome_color),
+            name="Entry / Exit", showlegend=False,
+            hovertemplate="%{x|%b %d, %Y}: $%{y:,.2f}<extra></extra>",
+        ), row=1, col=1)
+    else:
+        fig.add_trace(go.Scatter(
+            x=[entry_date], y=[buy_price], mode="markers",
+            marker=dict(size=14, symbol=entry_symbol, color=outcome_color),
+            name=entry_label, showlegend=False,
+            hovertemplate="%{x|%b %d, %Y}: $%{y:,.2f}<extra></extra>",
+        ), row=1, col=1)
+
+    if stop_loss is not None:
+        fig.add_hline(
+            y=stop_loss, row=1, col=1,
+            line=dict(color=MUTED_COLOR, width=1, dash="dot"),
+            annotation_text="Stop", annotation_position="top left",
+            annotation_font=dict(color=MUTED_COLOR, size=10),
+        )
+
+    # Volume panel - bars colored the same up/down as the candles
+    # would be conventionally (green/red), which is deliberately
+    # different from this chart's own blue/pink candle colors,
+    # matching the DeepVue reference.
+    volume_colors = [
+        VOLUME_UP_COLOR if close >= open_ else VOLUME_DOWN_COLOR
+        for open_, close in zip(history["Open"], history["Close"])
+    ]
+    fig.add_trace(go.Bar(
+        x=history.index, y=history["Volume"],
+        marker_color=volume_colors,
+        name="Volume", showlegend=False,
+        hovertemplate="%{x|%b %d, %Y}: %{y:,.0f}<extra></extra>",
+    ), row=2, col=1)
+    volume_ma = history["Volume"].rolling(50, min_periods=1).mean()
+    fig.add_trace(go.Scatter(
+        x=history.index, y=volume_ma, mode="lines",
+        line=dict(color=CHART_TEXT_COLOR, width=1.5),
+        name="Avg Volume", showlegend=False,
+        hovertemplate="%{x|%b %d, %Y}: %{y:,.0f}<extra></extra>",
+    ), row=2, col=1)
+
+    # An overlay ticker gets its own line on a SECOND price scale (see
+    # secondary_y above), not a % change conversion - two different
+    # stocks' raw dollar prices are never expected to land in the same
+    # range, so sharing the primary axis would squash one of them flat.
+    if has_overlay:
+        fit_payload["overlay"].append({
+            "x": [ts.isoformat() for ts in overlay_history.index],
+            "lo": overlay_history["Close"].tolist(), "hi": overlay_history["Close"].tolist(),
+        })
+        fig.add_trace(go.Scatter(
+            x=overlay_history.index, y=overlay_history["Close"], mode="lines",
             line=dict(color=settings["overlay_color"], width=2, dash="dash"),
             name=settings["overlay_symbol"],
-            hovertemplate="%{x|%b %d, %Y}: %{y:.2f}%<extra></extra>",
-        ), row=1, col=1)
-        for period in ma_periods:
-            if f"MA{period}" not in history.columns:
-                continue  # fetch_history was called with a different set of periods
-            ma_pct = (history[f"MA{period}"] / baseline - 1) * 100
-            fig.add_trace(go.Scatter(
-                x=history.index, y=ma_pct, mode="lines",
-                line=dict(color=ma_colors[period], width=1.5),
-                name=f"{period}-period MA",
-                hovertemplate="%{x|%b %d, %Y}: %{y:.2f}%<extra></extra>",
-            ), row=1, col=1)
-
-        if is_closed:
-            sell_pct = (sell_price / baseline - 1) * 100
-            entry_value, exit_value = (sell_pct, buy_pct) if direction == "SHORT" else (buy_pct, sell_pct)
-            fig.add_trace(go.Scatter(
-                x=[entry_date, exit_date], y=[entry_value, exit_value],
-                mode="lines+markers",
-                line=dict(color=outcome_color, width=2, dash="dot"),
-                marker=dict(size=14, symbol=[entry_symbol, exit_symbol], color=outcome_color),
-                name="Entry / Exit", showlegend=False,
-                hovertemplate="%{x|%b %d, %Y}: %{y:.2f}%<extra></extra>",
-            ), row=1, col=1)
-        else:
-            fig.add_trace(go.Scatter(
-                x=[entry_date], y=[buy_pct], mode="markers",
-                marker=dict(size=14, symbol=entry_symbol, color=outcome_color),
-                name=entry_label, showlegend=False,
-                hovertemplate="%{x|%b %d, %Y}: %{y:.2f}%<extra></extra>",
-            ), row=1, col=1)
-
-        if stop_loss is not None:
-            stop_pct = (stop_loss / baseline - 1) * 100
-            fig.add_hline(
-                y=stop_pct, row=1, col=1,
-                line=dict(color=MUTED_COLOR, width=1, dash="dot"),
-                annotation_text="Stop", annotation_position="top left",
-                annotation_font=dict(color=MUTED_COLOR, size=10),
-            )
-        yaxis_title = "% Change from start of chart"
-
-    else:
-        fit_payload["price"].append({
-            "x": [ts.isoformat() for ts in history.index],
-            "lo": history["Low"].tolist(), "hi": history["High"].tolist(),
-        })
-        fit_payload["volume"].append({
-            "x": [ts.isoformat() for ts in history.index],
-            "lo": history["Volume"].tolist(), "hi": history["Volume"].tolist(),
-        })
-
-        if settings["chart_type"] == "Candlestick":
-            fig.add_trace(go.Candlestick(
-                x=history.index,
-                open=history["Open"], high=history["High"],
-                low=history["Low"], close=history["Close"],
-                name=symbol,
-                increasing_line_color=settings["up_color"], increasing_fillcolor=settings["up_color"],
-                decreasing_line_color=settings["down_color"], decreasing_fillcolor=settings["down_color"],
-                showlegend=False,
-            ), row=1, col=1)
-        else:
-            fig.add_trace(go.Scatter(
-                x=history.index, y=history["Close"], mode="lines",
-                line=dict(color=settings["line_color"], width=2),
-                name=symbol, showlegend=False,
-            ), row=1, col=1)
-        for period in ma_periods:
-            if f"MA{period}" not in history.columns:
-                continue  # fetch_history was called with a different set of periods
-            fig.add_trace(go.Scatter(
-                x=history.index, y=history[f"MA{period}"], mode="lines",
-                line=dict(color=ma_colors[period], width=1.5),
-                name=f"{period}-period MA",
-                hovertemplate="%{x|%b %d, %Y}: $%{y:,.2f}<extra></extra>",
-            ), row=1, col=1)
-
-        if is_closed:
-            entry_value, exit_value = (sell_price, buy_price) if direction == "SHORT" else (buy_price, sell_price)
-            fig.add_trace(go.Scatter(
-                x=[entry_date, exit_date], y=[entry_value, exit_value],
-                mode="lines+markers",
-                line=dict(color=outcome_color, width=2, dash="dot"),
-                marker=dict(size=14, symbol=[entry_symbol, exit_symbol], color=outcome_color),
-                name="Entry / Exit", showlegend=False,
-                hovertemplate="%{x|%b %d, %Y}: $%{y:,.2f}<extra></extra>",
-            ), row=1, col=1)
-        else:
-            fig.add_trace(go.Scatter(
-                x=[entry_date], y=[buy_price], mode="markers",
-                marker=dict(size=14, symbol=entry_symbol, color=outcome_color),
-                name=entry_label, showlegend=False,
-                hovertemplate="%{x|%b %d, %Y}: $%{y:,.2f}<extra></extra>",
-            ), row=1, col=1)
-
-        if stop_loss is not None:
-            fig.add_hline(
-                y=stop_loss, row=1, col=1,
-                line=dict(color=MUTED_COLOR, width=1, dash="dot"),
-                annotation_text="Stop", annotation_position="top left",
-                annotation_font=dict(color=MUTED_COLOR, size=10),
-            )
-        yaxis_title = "Price ($)"
-
-        # Volume panel - bars colored the same up/down as the candles
-        # would be conventionally (green/red), which is deliberately
-        # different from this chart's own blue/pink candle colors,
-        # matching the DeepVue reference.
-        volume_colors = [
-            VOLUME_UP_COLOR if close >= open_ else VOLUME_DOWN_COLOR
-            for open_, close in zip(history["Open"], history["Close"])
-        ]
-        fig.add_trace(go.Bar(
-            x=history.index, y=history["Volume"],
-            marker_color=volume_colors,
-            name="Volume", showlegend=False,
-            hovertemplate="%{x|%b %d, %Y}: %{y:,.0f}<extra></extra>",
-        ), row=2, col=1)
-        volume_ma = history["Volume"].rolling(50, min_periods=1).mean()
-        fig.add_trace(go.Scatter(
-            x=history.index, y=volume_ma, mode="lines",
-            line=dict(color=CHART_TEXT_COLOR, width=1.5),
-            name="Avg Volume", showlegend=False,
-            hovertemplate="%{x|%b %d, %Y}: %{y:,.0f}<extra></extra>",
-        ), row=2, col=1)
+            hovertemplate="%{x|%b %d, %Y}: $%{y:,.2f}<extra></extra>",
+        ), row=1, col=1, secondary_y=True)
 
     # A large, faint watermark of the symbol behind the price panel.
     fig.add_annotation(
@@ -748,33 +714,36 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
 
     # Right-edge colored badges: current price + each moving average's
     # latest value, in that line's own color - a distinctive DeepVue touch.
-    if not has_overlay:
-        last_price = history["Close"].iloc[-1]
+    last_price = history["Close"].iloc[-1]
+    fig.add_annotation(
+        x=1, xref="x domain", y=last_price, yref="y",
+        text=f"{last_price:,.2f}", showarrow=False, xanchor="left",
+        font=dict(color=BADGE_TEXT_COLOR, size=11),
+        bgcolor=outcome_color, borderpad=3,
+    )
+    for period in ma_periods:
+        col_name = f"MA{period}"
+        if col_name not in history.columns:
+            continue
+        last_ma = history[col_name].iloc[-1]
+        if pd.isna(last_ma):
+            continue
         fig.add_annotation(
-            x=1, xref="x domain", y=last_price, yref="y",
-            text=f"{last_price:,.2f}", showarrow=False, xanchor="left",
+            x=1, xref="x domain", y=last_ma, yref="y",
+            text=f"{last_ma:,.2f}", showarrow=False, xanchor="left",
             font=dict(color=BADGE_TEXT_COLOR, size=11),
-            bgcolor=outcome_color, borderpad=3,
+            bgcolor=ma_colors[period], borderpad=3,
         )
-        for period in ma_periods:
-            col_name = f"MA{period}"
-            if col_name not in history.columns:
-                continue
-            last_ma = history[col_name].iloc[-1]
-            if pd.isna(last_ma):
-                continue
-            fig.add_annotation(
-                x=1, xref="x domain", y=last_ma, yref="y",
-                text=f"{last_ma:,.2f}", showarrow=False, xanchor="left",
-                font=dict(color=BADGE_TEXT_COLOR, size=11),
-                bgcolor=ma_colors[period], borderpad=3,
-            )
 
     fig.update_layout(
-        height=560 if show_volume else 500,
-        margin=dict(t=30, b=35, r=55),
-        yaxis_title=yaxis_title,
-        yaxis_type="log" if (settings["price_scale"] == "Log" and not has_overlay) else "linear",
+        height=560,
+        # The overlay's own axis needs room on the left when it's
+        # active; otherwise there's nothing over there since the price
+        # scale itself lives on the right (see the side="right" update
+        # below) - no need to reserve the space when it's not in use.
+        margin=dict(t=30, b=35, l=50 if has_overlay else 10, r=60),
+        yaxis_title="Price ($)",
+        yaxis_type="log" if settings["price_scale"] == "Log" else "linear",
         plot_bgcolor=CHART_BACKGROUND,
         paper_bgcolor=CHART_BACKGROUND,
         font=dict(color=CHART_TEXT_COLOR),
@@ -784,10 +753,13 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
         # box instead of panning - "pan" is what actually lets you slide
         # back and forth through time.
         dragmode="pan",
-        # "closest" (rather than a unified "x") ties each hover event to
-        # a single nearest point - what the crosshair and hover side
-        # panel below are both built around.
-        hovermode="closest",
+        # "x" fires a hover event for whichever bar the crosshair's
+        # vertical line is over, based on x-position alone - not
+        # "closest" (nearest point counting BOTH x and y distance),
+        # which used to mean the OHLC summary line below only updated
+        # when the cursor was also close to that bar's actual price,
+        # not just lined up with it.
+        hovermode="x",
     )
     # A light dotted crosshair that follows the cursor (not snapped to
     # the nearest candle) across the full height/width of the chart -
@@ -810,9 +782,29 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
         gridcolor=GRIDLINE_COLOR, showgrid=True, zeroline=False, fixedrange=True,
         showspikes=True, spikemode="across", spikesnap="cursor",
         spikecolor=SPIKE_COLOR, spikethickness=1, spikedash=SPIKE_DASH,
+        side="right",
     )
-    if show_volume:
-        fig.update_yaxes(title_text="Volume", row=2, col=1)
+    fig.update_yaxes(title_text="Volume", row=2, col=1)
+    if has_overlay:
+        # Overrides the generic styling just above for this one axis -
+        # on the left (opposite the primary scale) and without its own
+        # gridlines, so it doesn't compete with the primary axis's grid
+        # for the same horizontal lines. Colored to match its line/badge
+        # so it reads as "belonging" to that ticker at a glance.
+        fig.update_yaxes(
+            side="left", showgrid=False, zeroline=False, fixedrange=True,
+            title_text=settings["overlay_symbol"],
+            title_font=dict(color=settings["overlay_color"]),
+            tickfont=dict(color=settings["overlay_color"]),
+            row=1, col=1, secondary_y=True,
+        )
+    else:
+        # make_subplots() above always reserves this secondary axis (so
+        # the SAME figure layout works whether or not an overlay ends up
+        # attached to it) - without hiding it here, an unused empty axis
+        # would otherwise still render on the right, right on top of the
+        # real price axis, whenever there's no overlay ticker.
+        fig.update_yaxes(visible=False, row=1, col=1, secondary_y=True)
 
     # No floating tooltip box over the chart - the crosshair plus the
     # live summary line above the chart replace it. "none" (rather than
@@ -839,6 +831,11 @@ _INTERACTIVE_CHART_HTML = """
        overlaps the bottom of the chart, right where the x-axis date
        labels are. */
     html, body { margin: 0; padding: 0; overflow: hidden; background: __CHART_BACKGROUND__; }
+    /* Plotly's own drag-catching layer defaults to a plain arrow/grab
+       cursor since dragmode is "pan" - forcing it to a crosshair matches
+       the crosshair spike lines already drawn on hover, without changing
+       the actual pan/scroll behavior underneath. */
+    #__DIV_ID__ .nsewdrag { cursor: crosshair !important; }
 </style>
 </head>
 <body>
@@ -880,7 +877,13 @@ _INTERACTIVE_CHART_HTML = """
     // Plotly's own scroll-zoom doesn't do on its own.
     function fitYAxes(gd, xmin, xmax) {
         var relayout = {};
-        [["price", "yaxis"], ["volume", "yaxis2"]].forEach(function(pair) {
+        // Plotly names axes in creation order, not visual/logical order -
+        // make_subplots(specs=[[{secondary_y:true}], [{}]]) creates the
+        // row-1 secondary axis (the overlay ticker's own scale) BEFORE
+        // row 2's own axis (volume), so volume ends up "yaxis3" and the
+        // overlay ends up "yaxis2" - the reverse of what the names might
+        // suggest at a glance.
+        [["price", "yaxis"], ["volume", "yaxis3"], ["overlay", "yaxis2"]].forEach(function(pair) {
             var seriesList = fitPayload[pair[0]];
             if (!seriesList || !seriesList.length) return;
             var lo = Infinity, hi = -Infinity;
@@ -985,6 +988,17 @@ _INTERACTIVE_CHART_HTML = """
         // Starts on the most recent bar until you actually hover.
         showDailyInfo(lastIndex);
 
+        // Fits the y-axis to the initial visible window right away -
+        // without this, the price/volume scale stayed sized to the
+        // FULL fetched history (including all the extra data fetched
+        // outside the visible window - see FETCH_BUFFER_MULTIPLIER)
+        // until the first scroll/pan triggered the plotly_relayout
+        // handler below, which is the only other place this ran.
+        var initialRange = gd.layout.xaxis && gd.layout.xaxis.range;
+        if (initialRange && initialRange.length === 2) {
+            fitYAxes(gd, new Date(initialRange[0]).getTime(), new Date(initialRange[1]).getTime());
+        }
+
         gd.on("plotly_hover", function(eventData) {
             if (!eventData.points || !eventData.points.length) return;
             var key = barKey(eventData.points[0].x);
@@ -1016,6 +1030,7 @@ _INTERACTIVE_CHART_HTML = """
                 if (pending) clearTimeout(pending);
                 var update = {"yaxis.autorange": true};
                 if (gd.layout.yaxis2) { update["yaxis2.autorange"] = true; }
+                if (gd.layout.yaxis3) { update["yaxis3.autorange"] = true; }
                 Plotly.relayout(gd, update);
             }
         });

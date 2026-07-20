@@ -28,8 +28,9 @@ get around to saving on a given day.
 
 Clicking any ticker in any list loads its chart + journal below - List
 5's tickers additionally show fact tiles (entry price, current price,
-unrealized P/L) and a stop-loss input, since those need a real trade
-behind them.
+unrealized P/L, stop-loss), since those need a real trade behind them.
+Stop-loss itself is set/edited on the Open Positions page, not here -
+see database.get_stop_loss()/set_stop_loss().
 """
 
 from datetime import date, datetime, timedelta
@@ -188,15 +189,17 @@ def position_label(position):
     return f"{position['symbol']} (Short)" if position["direction"] == "SHORT" else position["symbol"]
 
 
-def render_position_stats_and_stop(position, conn, key_prefix):
+def render_position_stats(position, conn):
     """
-    Fact tiles (entry, current price, unrealized P/L) plus the stop-loss
-    input for an open position - shared by the plain single-ticker
-    detail view and the Journal Session queue view below. Returns the
-    stop-loss price to draw on the chart: the live value sitting in the
-    box, even before "Save Stop Loss" is clicked, so dragging the stop
-    up/down previews on the chart immediately - or None if there isn't
-    one (0 means "no stop").
+    Fact tiles (entry, current price, unrealized P/L, stop-loss) for an
+    open position - shared by the plain single-ticker detail view and
+    the Journal Session queue view below. Returns the saved stop-loss
+    price to draw on the chart, or None if there isn't one.
+
+    Stop-loss itself is read-only here - it's set and edited on the
+    Open Positions page now (a table of every position with an editable
+    Stop Loss column), not per-ticker on this page, so there's one
+    place to manage all of them instead of hunting through each chart.
     """
     symbol = position["symbol"]
     is_short = position["direction"] == "SHORT"
@@ -215,49 +218,33 @@ def render_position_stats_and_stop(position, conn, key_prefix):
             unrealized_pl = (current_price - position["avg_price"]) * position["quantity"]
         unrealized_color = charting.GOOD_COLOR if unrealized_pl >= 0 else charting.CRITICAL_COLOR
 
-    cols = st.columns(5)
+    stop_loss = database.get_stop_loss(conn, symbol)
+
+    cols = st.columns(6)
     fact_tile(cols[0], "Short Entry (avg)" if is_short else "Entry (avg)", f"${position['avg_price']:,.2f}")
     fact_tile(cols[1], "Entry Date", f"{position['entry_date']:%m/%d/%Y}")
     fact_tile(cols[2], "Shares", f"{position['quantity']:,.0f}")
     fact_tile(cols[3], "Current Price", f"${current_price:,.2f}" if current_price is not None else "N/A")
     fact_tile(cols[4], "Unrealized P/L",
               f"${unrealized_pl:,.2f}" if unrealized_pl is not None else "N/A", unrealized_color)
+    fact_tile(cols[5], "Stop Loss", f"${stop_loss:,.2f}" if stop_loss is not None else "Not set")
+    st.caption("Set or move the stop-loss for this position on the Open Positions page.")
 
-    # A stop-loss price isn't tracked anywhere else in the app - saving it
-    # here is what lets the Open Positions page compute "heat" (dollar
-    # risk from the current price down to this stop). You can come back
-    # and move it any time (e.g. trailing it up as the trade works).
-    saved_stop = database.get_stop_loss(conn, symbol)
-    new_stop = st.number_input(
-        "Stop Loss (0 = no stop)", min_value=0.0, value=saved_stop or 0.0, step=0.01, format="%.2f",
-        key=f"{key_prefix}_stop_loss_input",
-    )
-    if st.button("Save Stop Loss", key=f"{key_prefix}_stop_loss_save"):
-        # 0 means "no stop," not a real $0 stop price - storing an
-        # actual $0 would make the Open Positions page count nearly the
-        # whole position's value as heat.
-        if new_stop > 0:
-            database.set_stop_loss(conn, symbol, new_stop)
-            st.success(f"Stop loss for {symbol} saved at ${new_stop:,.2f}.")
-        else:
-            database.delete_stop_loss(conn, symbol)
-            st.success(f"Stop loss for {symbol} cleared.")
-
-    return new_stop if new_stop > 0 else None
+    return stop_loss
 
 
 def render_position_detail(position, conn):
     """
     The rich view for an open position: fact tiles (entry, current
-    price, unrealized P/L), the stop-loss input, and the chart +
-    journal - everything the old dropdown-based Open Positions section
-    used to show, now driven directly by a position dict from List 5
-    instead of a dropdown selection.
+    price, unrealized P/L, stop-loss), and the chart + journal -
+    everything the old dropdown-based Open Positions section used to
+    show, now driven directly by a position dict from List 5 instead of
+    a dropdown selection.
     """
     symbol = position["symbol"]
     is_short = position["direction"] == "SHORT"
 
-    stop_loss = render_position_stats_and_stop(position, conn, key_prefix="position")
+    stop_loss = render_position_stats(position, conn)
 
     st.divider()
 
@@ -487,7 +474,7 @@ def render_journal_session(conn):
 
     stop_loss = None
     if item["source"] == "position":
-        stop_loss = render_position_stats_and_stop(item["position"], conn, key_prefix=key_prefix)
+        stop_loss = render_position_stats(item["position"], conn)
         st.divider()
 
     entry_point = render_price_chart(
