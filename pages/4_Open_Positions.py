@@ -14,17 +14,16 @@ position once you've set a stop-loss for it in the Positions & Stop-Loss
 table below - there's nowhere else in this app that stop price is
 tracked (see database.get_stop_loss()/set_stop_loss()).
 
-Right below that table, each position also gets its own MA Mode
-selector (Off/Manual/Auto) - an opt-in way to track a trend-following
-exit against a moving average, and optionally have this app trail
-your stop-loss up to it automatically (see ma_strategy.py). The MA
-period and every other threshold it uses are global, set on the
-Settings page - only the mode is chosen per ticker here.
+That same table also has an MA Mode column (O/M/A toggle buttons per
+position) - an opt-in way to track a trend-following exit against a
+moving average, and optionally have this app trail your stop-loss up
+to it automatically (see ma_strategy.py). The MA period and every
+other threshold it uses are global, set on the Settings page - only
+the mode is chosen per ticker here.
 """
 
 from datetime import date
 
-import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 
@@ -132,72 +131,35 @@ if positions:
 # The one place stop-loss is set or moved - a table instead of a
 # per-ticker input buried in a chart page, so trailing every open
 # position's stop as the day goes is one scroll, not five page visits.
+# MA Mode (see ma_strategy.py) is one column of this same table: three
+# small O/M/A toggle buttons - "Off" does nothing; "Manual" shows a
+# read-only signal in the last column; "Auto" also trails Stop Loss up
+# to the moving average once it's cleared cost basis by enough, never
+# loosening a tighter stop already set by hand. The MA period and every
+# threshold this uses are global, set on the Settings page.
+#
+# Built as a plain grid of st.columns rows, not st.data_editor - a
+# data_editor column can't hold three buttons in one cell, and a
+# SelectboxColumn version of this turned out to be unreliable (a
+# picked value could revert before the script ever saw it, likely the
+# grid's own reconciliation fighting with a row that has several
+# live-recomputed columns). Individual widgets with their own stable
+# keys (buttons, number_input) don't have that problem.
 if positions:
     st.header("Positions & Stop-Loss")
-    st.caption("Edit the Stop Loss column directly - 0 (or blank) means no stop set.")
-
-    position_rows = [
-        {
-            "Ticker": position_label(e),
-            "Entry Date": e["entry_date"].strftime("%m/%d/%Y"),
-            "Shares": e["quantity"],
-            "Avg Price": e["avg_price"],
-            "Current Price": e["current_price"],
-            "Unrealized P/L": e["unrealized_pl"],
-            "Stop Loss": e["stop_loss"] or 0.0,
-            "_symbol": e["symbol"],
-        }
-        for e in enriched
-    ]
-    edited_rows = st.data_editor(
-        pd.DataFrame(position_rows),
-        column_order=[
-            "Ticker", "Entry Date", "Shares", "Avg Price",
-            "Current Price", "Unrealized P/L", "Stop Loss",
-        ],
-        column_config={
-            "Ticker": st.column_config.TextColumn(disabled=True),
-            "Entry Date": st.column_config.TextColumn(disabled=True),
-            "Shares": st.column_config.NumberColumn(disabled=True, format="%.0f"),
-            "Avg Price": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
-            "Current Price": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
-            "Unrealized P/L": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
-            "Stop Loss": st.column_config.NumberColumn(min_value=0.0, step=0.01, format="$%.2f"),
-        },
-        hide_index=True, width="stretch", key="positions_stop_loss_editor",
+    st.caption(
+        "Edit Stop Loss directly - 0 (or blank) means no stop set. MA Mode: "
+        "click O/M/A to switch (highlighted = active); Manual/Auto show a "
+        "live signal in the last column."
     )
 
-    # Only ever writes to the database when a Stop Loss cell actually
-    # changed from what's currently saved - every other column is
-    # disabled (read-only) so there's nothing else here that could
-    # trigger a save. Re-running immediately afterward means the Equity
-    # & Heat numbers below reflect the new stop right away instead of
-    # lagging a rerun behind.
-    stop_loss_changed = False
-    for _, row in edited_rows.iterrows():
-        old_stop = round(stops.get(row["_symbol"]) or 0.0, 2)
-        new_stop = round(row["Stop Loss"] or 0.0, 2)
-        if new_stop != old_stop:
-            if new_stop > 0:
-                database.set_stop_loss(conn, row["_symbol"], new_stop)
-            else:
-                database.delete_stop_loss(conn, row["_symbol"])
-            stop_loss_changed = True
-    if stop_loss_changed:
-        st.rerun()
-
-    # --- MA Mode, per ticker (see ma_strategy.py) --------------------------
-    # Three small toggle buttons (O/M/A) per position, not a data_editor
-    # column or a selectbox - same active/disabled-button pattern
-    # nav.py's own top nav already uses reliably (the active choice
-    # shown highlighted and disabled, the others plain clickable
-    # buttons that switch to themselves when clicked). "Off" does
-    # nothing; "Manual" shows a read-only signal below; "Auto" also
-    # trails Stop Loss (above) up to the moving average once it's
-    # cleared cost basis by enough - never loosening a tighter stop
-    # already set by hand. The MA period and every threshold this uses
-    # are global, set on the Settings page.
-    st.caption("MA Mode - O(ff) / M(anual) / A(uto): click to switch, the active one is highlighted.")
+    COLUMN_WIDTHS = [1.3, 1.0, 0.7, 0.9, 0.9, 1.0, 1.0, 0.35, 0.35, 0.35, 2.2]
+    header_cols = st.columns(COLUMN_WIDTHS)
+    for col, label in zip(header_cols, [
+        "Ticker", "Entry Date", "Shares", "Avg Price", "Current Price",
+        "Unrealized P/L", "Stop Loss", "O", "M", "A", "MA Signal",
+    ]):
+        col.markdown(f"**{label}**")
 
     def signal_text(e):
         sig = e["ma_signal"]
@@ -222,11 +184,29 @@ if positions:
 
     for e in enriched:
         symbol = e["symbol"]
+        (ticker_col, entry_col, shares_col, avg_col, price_col,
+         pl_col, stop_col, o_col, m_col, a_col, signal_col) = st.columns(COLUMN_WIDTHS)
+
+        ticker_col.write(position_label(e))
+        entry_col.write(e["entry_date"].strftime("%m/%d/%Y"))
+        shares_col.write(f"{e['quantity']:,.0f}")
+        avg_col.write(f"${e['avg_price']:,.2f}")
+        price_col.write(f"${e['current_price']:,.2f}" if e["current_price"] is not None else "N/A")
+        pl_col.write(f"${e['unrealized_pl']:,.2f}" if e["unrealized_pl"] is not None else "N/A")
+
+        new_stop = stop_col.number_input(
+            "Stop Loss", min_value=0.0, step=0.01, format="%.2f",
+            value=e["stop_loss"] or 0.0, key=f"stop_loss_{symbol}", label_visibility="collapsed",
+        )
+        old_stop = round(stops.get(symbol) or 0.0, 2)
+        if round(new_stop, 2) != old_stop:
+            if new_stop > 0:
+                database.set_stop_loss(conn, symbol, round(new_stop, 2))
+            else:
+                database.delete_stop_loss(conn, symbol)
+            st.rerun()
+
         current_mode = e["ma_settings"]["mode"]
-
-        label_col, o_col, m_col, a_col, info_col = st.columns([2, 1, 1, 1, 4])
-        label_col.write(position_label(e))
-
         for mode_col, mode_value, mode_letter in ((o_col, "off", "O"), (m_col, "manual", "M"), (a_col, "auto", "A")):
             is_active = current_mode == mode_value
             if mode_col.button(
@@ -243,7 +223,9 @@ if positions:
 
         if e["ma_signal"] is not None:
             ma_text = f"MA ${e['ma_signal']['ma_value']:,.2f}" if e["ma_signal"]["ma_value"] is not None else "MA N/A"
-            info_col.caption(f"{ma_text} · {signal_text(e)} · {distance_text(e)}")
+            signal_col.caption(f"{ma_text} · {signal_text(e)} · {distance_text(e)}")
+        else:
+            signal_col.write("")
 
     st.divider()
 
