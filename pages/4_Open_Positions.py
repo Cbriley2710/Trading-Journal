@@ -162,29 +162,32 @@ if positions:
         col.markdown(f"**{label}**")
 
     def render_signal(col, e):
-        """Colored badges instead of one long string - a glance at the
+        """Colored badges laid out side by side (nested sub-columns
+        within this one column) instead of stacked - a glance at the
         color tells you severity before you even read the text."""
         sig = e["ma_signal"]
         if sig["ma_value"] is None:
             col.caption("No price data")
             return
-        col.caption(f"MA ${sig['ma_value']:,.2f}")
+
+        ma_col, trend_col, distance_col = col.columns([1, 1.2, 1.3])
+        ma_col.caption(f"MA ${sig['ma_value']:,.2f}")
 
         threshold = e["ma_settings"]["closes_threshold"]
         if sig["sell_signal"]:
-            col.badge(f"{sig['signal_closes']}/{threshold} against trend", icon="\U0001F514", color="red")
+            trend_col.badge(f"{sig['signal_closes']}/{threshold} vs trend", icon="\U0001F514", color="red")
         elif sig["signal_closes"] > 0:
-            col.badge(f"{sig['signal_closes']}/{threshold} against trend", color="yellow")
+            trend_col.badge(f"{sig['signal_closes']}/{threshold} vs trend", color="yellow")
         else:
-            col.badge("On trend", color="green")
+            trend_col.badge("On trend", color="green")
 
         if sig["distance_pct"] is not None:
             if sig["extended"]:
-                col.badge(f"{sig['distance_pct']:.1f}% from MA", icon="\U0001F680", color="orange")
+                distance_col.badge(f"{sig['distance_pct']:.1f}% from MA", icon="\U0001F680", color="orange")
             elif sig["approaching"]:
-                col.badge(f"{sig['distance_pct']:.1f}% from MA", icon="⚠️", color="yellow")
+                distance_col.badge(f"{sig['distance_pct']:.1f}% from MA", icon="⚠️", color="yellow")
             else:
-                col.badge(f"{sig['distance_pct']:.1f}% from MA", color="gray")
+                distance_col.badge(f"{sig['distance_pct']:.1f}% from MA", color="gray")
 
     for e in enriched:
         symbol = e["symbol"]
