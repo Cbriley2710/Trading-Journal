@@ -8,6 +8,13 @@ to a mailing list. Reads exactly the same data the Logbook page
 already shows per symbol (database.get_logbook_entry()), just
 assembled into one file instead of browsed one ticker at a time.
 
+Landscape, one page per ticker, dark-themed to match the chart images
+themselves (charting.py's own CHART_BACKGROUND/CHART_TEXT_COLOR/
+MUTED_COLOR) - a chart archived from this app is already a wide,
+dark-background image, so a landscape page fits it without shrinking
+it down, and a dark page background means there's no bright white
+border around a dark chart.
+
 Two things call generate_and_send_report() below: the "Generate &
 Email Report" button on the Logbook page (always runs when clicked),
 and nightly_archive.py (only runs if nothing is recorded yet for today
@@ -33,10 +40,41 @@ from fpdf import FPDF
 from PIL import Image
 
 import archiving
+import charting
 import database
 
 PAGE_MARGIN_MM = 15
-CONTENT_WIDTH_MM = 210 - 2 * PAGE_MARGIN_MM  # A4 width minus left/right margins
+# A4 LANDSCAPE is 297mm x 210mm (width and height swapped from the
+# usual portrait 210mm x 297mm) - one wide chart per page instead of
+# several narrower ones stacked on a tall portrait page.
+CONTENT_WIDTH_MM = 297 - 2 * PAGE_MARGIN_MM
+
+
+def _hex_to_rgb(hex_color):
+    """"#RRGGBB" -> (r, g, b) ints - fpdf2's set_fill_color()/
+    set_text_color() want separate 0-255 numbers, not a hex string."""
+    hex_color = hex_color.lstrip("#")
+    return tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+
+
+PAGE_BACKGROUND_RGB = _hex_to_rgb(charting.CHART_BACKGROUND)
+TEXT_COLOR_RGB = _hex_to_rgb(charting.CHART_TEXT_COLOR)
+MUTED_TEXT_RGB = _hex_to_rgb(charting.MUTED_COLOR)
+
+
+class DarkReportPDF(FPDF):
+    """
+    A plain FPDF with one difference: every page gets the app's own
+    dark chart background painted first. fpdf2 calls header()
+    automatically at the start of every add_page() - overriding it
+    here is what lets a single definition cover every page (including
+    ones fpdf2's own auto-page-break inserts mid-document for long
+    notes) instead of every call site needing to remember to paint the
+    background itself.
+    """
+    def header(self):
+        self.set_fill_color(*PAGE_BACKGROUND_RGB)
+        self.rect(0, 0, self.w, self.h, "F")
 
 
 def _get_secret(key):
@@ -74,93 +112,89 @@ def _position_label(position):
     return f"{position['symbol']} (Short)" if position["direction"] == "SHORT" else position["symbol"]
 
 
-def _ensure_room(pdf, needed_height_mm):
-    """Starts a new page first if `needed_height_mm` of content
-    wouldn't fit above the bottom margin - fpdf2's automatic page break
-    only triggers on a full cell/line write, which would let a large
-    chart image get cut off mid-image across a page boundary."""
-    if pdf.get_y() + needed_height_mm > pdf.h - pdf.b_margin:
-        pdf.add_page()
+def _write_ticker_page(pdf, section_label, symbol, entry):
+    """
+    One ticker's own page: a small "which list" breadcrumb, the symbol
+    as a heading, its archived chart image (or a note that it isn't
+    archived yet), and its notes (or a note that none were recorded) -
+    the same pieces the Logbook page shows for one day, just given a
+    full page each instead of flowing several onto a shared one.
+    """
+    pdf.add_page()
 
+    pdf.set_text_color(*MUTED_TEXT_RGB)
+    pdf.set_font("Helvetica", size=11)
+    pdf.cell(0, 7, _safe_text(section_label), new_x="LMARGIN", new_y="NEXT")
 
-def _write_ticker_section(pdf, symbol, entry):
-    """One ticker's block: its symbol as a sub-heading, then its chart
-    image (or a note that it isn't archived yet) and its notes (or a
-    note that none were recorded) - mirroring exactly what the Logbook
-    page already shows for one day."""
-    pdf.set_font("Helvetica", style="B", size=12)
-    _ensure_room(pdf, 10)
-    pdf.cell(0, 8, _safe_text(symbol), new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("Helvetica", size=10)
+    pdf.set_text_color(*TEXT_COLOR_RGB)
+    pdf.set_font("Helvetica", style="B", size=18)
+    pdf.cell(0, 11, _safe_text(symbol), new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(2)
 
     if entry is None:
+        pdf.set_font("Helvetica", size=11)
         pdf.cell(0, 6, "Not archived yet.", new_x="LMARGIN", new_y="NEXT")
-        pdf.ln(4)
         return
 
     if entry["chart_image"]:
         image = Image.open(io.BytesIO(entry["chart_image"]))
         scaled_height_mm = CONTENT_WIDTH_MM * (image.height / image.width)
-        _ensure_room(pdf, scaled_height_mm)
-        # fpdf2's image() already advances the cursor by the image's
-        # own height - adding scaled_height_mm again here would double
-        # it and leave a large blank gap before the notes below.
-        pdf.image(image, x=pdf.l_margin, w=CONTENT_WIDTH_MM)
-        pdf.ln(2)
+        # A landscape page is much shorter than it is wide - a chart
+        # scaled to the full content width can be taller than what's
+        # actually left on the page once the heading above and notes
+        # below are accounted for. Cap it to whatever room remains and
+        # scale the WIDTH down to match instead, keeping the image's
+        # own aspect ratio rather than letting it run off the page.
+        room_for_notes_mm = 25
+        max_height_mm = pdf.h - pdf.get_y() - pdf.b_margin - room_for_notes_mm
+        if scaled_height_mm > max_height_mm:
+            scaled_height_mm = max_height_mm
+            image_width_mm = scaled_height_mm * (image.width / image.height)
+        else:
+            image_width_mm = CONTENT_WIDTH_MM
+        x = pdf.l_margin + (CONTENT_WIDTH_MM - image_width_mm) / 2
+        pdf.image(image, x=x, w=image_width_mm)
+        pdf.ln(3)
     else:
+        pdf.set_font("Helvetica", size=11)
         pdf.cell(0, 6, "No chart archived for this day yet.", new_x="LMARGIN", new_y="NEXT")
 
     notes_text = entry["notes"].strip() if entry["notes"] else ""
     pdf.set_font("Helvetica", style="I", size=10)
     pdf.multi_cell(0, 6, _safe_text(notes_text or "No notes recorded for this day."))
-    pdf.ln(4)
 
 
 def build_report_pdf(conn, report_date):
     """
-    Builds the full report for one day and returns it as PDF bytes:
-    one section per watchlist (its saved name from
-    database.get_watchlist_names()) listing every ticker currently in
-    it, then an Open Positions section from
-    database.get_open_positions() - each ticker showing that day's
-    archived chart + notes via database.get_logbook_entry().
+    Builds the full report for one day and returns it as PDF bytes: a
+    cover page with the date, then one page per ticker - every list
+    (Lists 1-4, by their saved names) followed by Open Positions - each
+    showing that day's archived chart + notes via
+    database.get_logbook_entry(). A list with nothing in it is skipped
+    entirely rather than given an empty page.
     """
     names = database.get_watchlist_names(conn)
     watchlist = database.get_watchlist(conn)
     positions = database.get_open_positions(conn)
 
-    pdf = FPDF(format="A4")
+    pdf = DarkReportPDF(format="A4", orientation="L")
     pdf.set_margin(PAGE_MARGIN_MM)
     pdf.set_auto_page_break(auto=True, margin=PAGE_MARGIN_MM)
     pdf.add_page()
 
-    pdf.set_font("Helvetica", style="B", size=18)
-    pdf.cell(0, 12, _safe_text(f"Daily Report - {report_date:%B %d, %Y}"), new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(4)
+    pdf.set_text_color(*TEXT_COLOR_RGB)
+    pdf.set_font("Helvetica", style="B", size=24)
+    pdf.cell(0, 16, _safe_text(f"Daily Report - {report_date:%B %d, %Y}"), new_x="LMARGIN", new_y="NEXT")
 
     for list_id in range(1, 5):
         symbols = [w["symbol"] for w in watchlist if w["list_id"] == list_id]
-        pdf.set_font("Helvetica", style="B", size=14)
-        _ensure_room(pdf, 12)
-        pdf.cell(0, 10, _safe_text(names[list_id]), new_x="LMARGIN", new_y="NEXT")
-        if not symbols:
-            pdf.set_font("Helvetica", size=10)
-            pdf.cell(0, 6, "No tickers in this list.", new_x="LMARGIN", new_y="NEXT")
-            pdf.ln(4)
-            continue
         for symbol in symbols:
-            _write_ticker_section(pdf, symbol, database.get_logbook_entry(conn, symbol, report_date))
+            _write_ticker_page(
+                pdf, names[list_id], symbol, database.get_logbook_entry(conn, symbol, report_date))
 
-    pdf.set_font("Helvetica", style="B", size=14)
-    _ensure_room(pdf, 12)
-    pdf.cell(0, 10, "Open Positions", new_x="LMARGIN", new_y="NEXT")
-    if not positions:
-        pdf.set_font("Helvetica", size=10)
-        pdf.cell(0, 6, "No open positions right now.", new_x="LMARGIN", new_y="NEXT")
-    else:
-        for position in positions:
-            entry = database.get_logbook_entry(conn, position["symbol"], report_date)
-            _write_ticker_section(pdf, _position_label(position), entry)
+    for position in positions:
+        entry = database.get_logbook_entry(conn, position["symbol"], report_date)
+        _write_ticker_page(pdf, "Open Positions", _position_label(position), entry)
 
     return bytes(pdf.output())
 
