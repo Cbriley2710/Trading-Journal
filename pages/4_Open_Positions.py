@@ -14,10 +14,12 @@ position once you've set a stop-loss for it in the Positions & Stop-Loss
 table below - there's nowhere else in this app that stop price is
 tracked (see database.get_stop_loss()/set_stop_loss()).
 
-Below that is the MA Stop Rule table - an opt-in, per-position way to
-track a trend-following exit against a moving average, and optionally
-have this app trail your stop-loss up to it automatically (see
-ma_strategy.py). Its defaults live on the Settings page.
+The Positions & Stop-Loss table also has an MA Mode column - an
+opt-in, per-position way to track a trend-following exit against a
+moving average, and optionally have this app trail your stop-loss up
+to it automatically (see ma_strategy.py). The MA period and every
+other threshold it uses are global, set on the Settings page - only
+the mode (Off/Manual/Auto) is chosen per ticker here.
 """
 
 from datetime import date
@@ -130,80 +132,21 @@ if positions:
 # The one place stop-loss is set or moved - a table instead of a
 # per-ticker input buried in a chart page, so trailing every open
 # position's stop as the day goes is one scroll, not five page visits.
+# MA Mode (see ma_strategy.py) lives right here too, rather than a
+# separate table: "Off" (default) does nothing; "Manual" shows a
+# read-only signal (MA Value/Signal/vs MA) for you to act on
+# yourself; "Auto" also trails Stop Loss up to the moving average once
+# it's cleared cost basis by enough (see the Settings page for the MA
+# period/thresholds this uses - global for every position, not
+# per-ticker).
 if positions:
     st.header("Positions & Stop-Loss")
-    st.caption("Edit the Stop Loss column directly - 0 (or blank) means no stop set.")
-
-    position_rows = [
-        {
-            "Ticker": position_label(e),
-            "Entry Date": e["entry_date"].strftime("%m/%d/%Y"),
-            "Shares": e["quantity"],
-            "Avg Price": e["avg_price"],
-            "Current Price": e["current_price"],
-            "Unrealized P/L": e["unrealized_pl"],
-            "Stop Loss": e["stop_loss"] or 0.0,
-            "_symbol": e["symbol"],
-        }
-        for e in enriched
-    ]
-    edited_rows = st.data_editor(
-        pd.DataFrame(position_rows),
-        column_order=[
-            "Ticker", "Entry Date", "Shares", "Avg Price",
-            "Current Price", "Unrealized P/L", "Stop Loss",
-        ],
-        column_config={
-            "Ticker": st.column_config.TextColumn(disabled=True),
-            "Entry Date": st.column_config.TextColumn(disabled=True),
-            "Shares": st.column_config.NumberColumn(disabled=True, format="%.0f"),
-            "Avg Price": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
-            "Current Price": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
-            "Unrealized P/L": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
-            "Stop Loss": st.column_config.NumberColumn(min_value=0.0, step=0.01, format="$%.2f"),
-        },
-        hide_index=True, width="stretch", key="positions_stop_loss_editor",
-    )
-
-    # Only ever writes to the database when a Stop Loss cell actually
-    # changed from what's currently saved - every other column is
-    # disabled (read-only) so there's nothing else here that could
-    # trigger a save. Re-running immediately afterward means the Equity
-    # & Heat numbers below reflect the new stop right away instead of
-    # lagging a rerun behind.
-    stop_loss_changed = False
-    for _, row in edited_rows.iterrows():
-        old_stop = round(stops.get(row["_symbol"]) or 0.0, 2)
-        new_stop = round(row["Stop Loss"] or 0.0, 2)
-        if new_stop != old_stop:
-            if new_stop > 0:
-                database.set_stop_loss(conn, row["_symbol"], new_stop)
-            else:
-                database.delete_stop_loss(conn, row["_symbol"])
-            stop_loss_changed = True
-    if stop_loss_changed:
-        st.rerun()
-
-    st.divider()
-
-    # --- MA Stop Rule -----------------------------------------------------
-    # A discretionary trend-following exit rule (see ma_strategy.py):
-    # sell a LONG once it's closed below its own moving average for a
-    # set number of days in a row (the mirror for a SHORT is closing
-    # back above it), and optionally trail the stop-loss up to that
-    # average once it's cleared cost basis by enough. "Off" by default
-    # for every position - nothing is fetched or computed until you
-    # turn a position on.
-    st.header("MA Stop Rule")
     st.caption(
-        "Off by default. \"Manual\" shows the signal for you to act on "
-        "yourself; \"Auto\" also trails this position's Stop Loss (above) "
-        "up to the moving average once it's cleared cost basis by enough - "
-        "never loosening a tighter stop you've already set by hand. Every "
-        "column but Mode starts from the defaults on the Settings page - "
-        "edit a cell to override just this position (editing ANY cell "
-        "pins the whole row to its current values, so it stops following "
-        "future changes to the global defaults)."
+        "Edit the Stop Loss column directly - 0 (or blank) means no stop "
+        "set. MA Mode: \"Off\" does nothing; \"Manual\" shows the MA "
+        "Value/Signal/vs MA columns as a read-only signal; \"Auto\" also "
+        "trails Stop Loss up to the moving average once unlocked - never "
+        "loosening a tighter stop you've already set by hand."
     )
 
     MODE_DISPLAY = {"off": "Off", "manual": "Manual", "auto": "Auto"}
@@ -232,15 +175,16 @@ if positions:
             return f"{sig['distance_pct']:.1f}% ⚠️ Approaching"
         return f"{sig['distance_pct']:.1f}%"
 
-    ma_rows = [
+    position_rows = [
         {
             "Ticker": position_label(e),
-            "Mode": MODE_DISPLAY[e["ma_settings"]["mode"]],
-            "MA Period": e["ma_settings"]["ma_period"],
-            "Closes": e["ma_settings"]["closes_threshold"],
-            "Unlock %": e["ma_settings"]["unlock_pct"],
-            "Approach %": e["ma_settings"]["approach_pct"],
-            "Extended %": e["ma_settings"]["extended_pct"],
+            "Entry Date": e["entry_date"].strftime("%m/%d/%Y"),
+            "Shares": e["quantity"],
+            "Avg Price": e["avg_price"],
+            "Current Price": e["current_price"],
+            "Unrealized P/L": e["unrealized_pl"],
+            "Stop Loss": e["stop_loss"] or 0.0,
+            "MA Mode": MODE_DISPLAY[e["ma_settings"]["mode"]],
             "MA Value": e["ma_signal"]["ma_value"] if e["ma_signal"] else None,
             "Signal": signal_text(e),
             "vs MA": distance_text(e),
@@ -248,44 +192,60 @@ if positions:
         }
         for e in enriched
     ]
-    edited_ma_rows = st.data_editor(
-        pd.DataFrame(ma_rows),
+    edited_rows = st.data_editor(
+        pd.DataFrame(position_rows),
         column_order=[
-            "Ticker", "Mode", "MA Period", "Closes", "Unlock %",
-            "Approach %", "Extended %", "MA Value", "Signal", "vs MA",
+            "Ticker", "Entry Date", "Shares", "Avg Price", "Current Price",
+            "Unrealized P/L", "Stop Loss", "MA Mode", "MA Value", "Signal", "vs MA",
         ],
         column_config={
             "Ticker": st.column_config.TextColumn(disabled=True),
-            "Mode": st.column_config.SelectboxColumn(options=["Off", "Manual", "Auto"]),
-            "MA Period": st.column_config.NumberColumn(min_value=2, step=1, format="%d"),
-            "Closes": st.column_config.NumberColumn(min_value=1, step=1, format="%d"),
-            "Unlock %": st.column_config.NumberColumn(min_value=0.0, step=0.5, format="%.1f%%"),
-            "Approach %": st.column_config.NumberColumn(min_value=0.0, step=0.1, format="%.1f%%"),
-            "Extended %": st.column_config.NumberColumn(min_value=0.0, step=0.5, format="%.1f%%"),
+            "Entry Date": st.column_config.TextColumn(disabled=True),
+            "Shares": st.column_config.NumberColumn(disabled=True, format="%.0f"),
+            "Avg Price": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
+            "Current Price": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
+            "Unrealized P/L": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
+            "Stop Loss": st.column_config.NumberColumn(min_value=0.0, step=0.01, format="$%.2f"),
+            "MA Mode": st.column_config.SelectboxColumn(options=["Off", "Manual", "Auto"]),
             "MA Value": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
             "Signal": st.column_config.TextColumn(disabled=True),
             "vs MA": st.column_config.TextColumn(disabled=True),
         },
-        hide_index=True, width="stretch", key="ma_stop_rule_editor",
+        hide_index=True, width="stretch", key="positions_stop_loss_editor",
     )
 
-    ma_settings_changed = False
-    for _, row in edited_ma_rows.iterrows():
+    # Writes to the database when a Stop Loss cell or the MA Mode
+    # changed from what's currently saved - every other column is
+    # disabled (read-only) so there's nothing else here that could
+    # trigger a save. Re-running immediately afterward means the Equity
+    # & Heat numbers below (and a just-toggled MA signal) reflect the
+    # change right away instead of lagging a rerun behind.
+    anything_changed = False
+    for _, row in edited_rows.iterrows():
         symbol = row["_symbol"]
-        existing = next(e["ma_settings"] for e in enriched if e["symbol"] == symbol)
-        new_mode = MODE_INTERNAL[row["Mode"]]
-        new_period = int(row["MA Period"])
-        new_closes = int(row["Closes"])
-        new_unlock = round(float(row["Unlock %"]), 2)
-        new_approach = round(float(row["Approach %"]), 2)
-        new_extended = round(float(row["Extended %"]), 2)
-        if (new_mode != existing["mode"] or new_period != existing["ma_period"]
-                or new_closes != existing["closes_threshold"] or new_unlock != round(existing["unlock_pct"], 2)
-                or new_approach != round(existing["approach_pct"], 2) or new_extended != round(existing["extended_pct"], 2)):
-            database.save_position_ma_settings(
-                conn, symbol, new_mode, new_period, new_closes, new_unlock, new_approach, new_extended)
-            ma_settings_changed = True
-    if ma_settings_changed:
+
+        old_stop = round(stops.get(symbol) or 0.0, 2)
+        new_stop = round(row["Stop Loss"] or 0.0, 2)
+        if new_stop != old_stop:
+            if new_stop > 0:
+                database.set_stop_loss(conn, symbol, new_stop)
+            else:
+                database.delete_stop_loss(conn, symbol)
+            anything_changed = True
+
+        existing_mode = next(e["ma_settings"]["mode"] for e in enriched if e["symbol"] == symbol)
+        new_mode = MODE_INTERNAL[row["MA Mode"]]
+        if new_mode != existing_mode:
+            # The other five MA settings (period/closes/unlock%/
+            # approach%/extended%) are left as None here on purpose -
+            # this table only ever sets Mode per ticker, so every
+            # position always follows the Settings page's global
+            # numbers rather than a per-ticker override (see
+            # database.get_position_ma_settings()).
+            database.save_position_ma_settings(conn, symbol, new_mode, None, None, None, None, None)
+            anything_changed = True
+
+    if anything_changed:
         st.rerun()
 
     st.divider()

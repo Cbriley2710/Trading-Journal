@@ -9,10 +9,11 @@ the wrong side of it count as a sell signal, how far that average needs
 to clear cost basis before a trailing stop takes over, and the distance
 thresholds behind its "approaching"/"extended" warnings.
 
-These are just the DEFAULTS - any individual open position can still
-override any of these for itself in the MA Stop Rule table (Open
-Positions page); a position that hasn't customized a field falls back
-to whatever's saved here.
+These numbers are global, used by every position - the Open Positions
+page only lets you choose Off/Manual/Auto per ticker, not override the
+MA period or thresholds individually (see database.get_position_ma_
+settings(), which still supports a per-position override at the data
+layer if a future UI ever wants to expose one).
 """
 
 import streamlit as st
@@ -35,8 +36,8 @@ settings = database.get_strategy_settings(conn)
 
 st.header("MA Stop Rule Defaults")
 st.caption(
-    "Used by every open position that hasn't set its own override in the "
-    "MA Stop Rule table on the Open Positions page."
+    "Used by every open position - the Open Positions page only lets you "
+    "choose Off/Manual/Auto per ticker; these numbers apply globally."
 )
 
 col1, col2 = st.columns(2)
