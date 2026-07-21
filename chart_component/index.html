@@ -190,6 +190,11 @@ ported over unchanged - drawing tools are additive, not a replacement.
             },
             text: list.map(function() { return symbol === "triangle-up" ? "Up marker" : "Down marker"; }),
             hovertemplate: "%{text}<extra></extra>",
+            // Plotly's own floating tooltip (left enabled here on
+            // purpose - see build_figure()'s matching note in
+            // charting.py for why) shows this right next to the arrow
+            // itself, dark-themed to match the rest of the chart.
+            hoverlabel: {bgcolor: "#111214", bordercolor: list[0] ? list[0].color : "#2375f4", font: {color: "#d1d4dc", size: 11}},
             showlegend: false,
             name: symbol === "triangle-up" ? "__arrows_up" : "__arrows_down",
         };
@@ -342,7 +347,7 @@ ported over unchanged - drawing tools are additive, not a replacement.
         return Math.round(v).toLocaleString();
     }
 
-    function showDailyInfo(index, markerText) {
+    function showDailyInfo(index) {
         var el = document.getElementById("summary");
         if (index === null || index === undefined) {
             el.innerHTML = "&nbsp;";
@@ -368,7 +373,6 @@ ported over unchanged - drawing tools are additive, not a replacement.
                 + "Chg " + sign + formatPrice(chg)
                 + "&nbsp;&nbsp; Chg% " + sign + pct.toFixed(2) + "%</span>";
         }
-        if (markerText) html += "<br>" + markerText;
         el.innerHTML = html;
     }
 
@@ -443,19 +447,14 @@ ported over unchanged - drawing tools are additive, not a replacement.
             gd.on("plotly_hover", function(eventData) {
                 if (!eventData.points || !eventData.points.length) return;
                 var key = barKey(eventData.points[0].x);
-                // hovermode "x" (see build_figure()) fires one point per
-                // trace sharing that x - candlestick/MA/volume traces
-                // never set "text", so the first point that HAS one is
-                // whichever marker (entry/exit or a drawn arrow) is at
-                // this bar, if any.
-                var markerText = null;
-                for (var i = 0; i < eventData.points.length; i++) {
-                    if (eventData.points[i].text) {
-                        markerText = eventData.points[i].text;
-                        break;
-                    }
-                }
-                if (dailyByKey.hasOwnProperty(key)) showDailyInfo(dailyByKey[key], markerText);
+                // Marker info (entry/exit or a drawn arrow) now shows in
+                // Plotly's own floating tooltip next to the marker itself
+                // (see hovertemplate/hoverlabel on those traces in
+                // charting.py and buildArrowTrace() below) instead of
+                // being appended here - growing this fixed summary line
+                // used to shove the whole chart down every time a marker
+                // was hovered.
+                if (dailyByKey.hasOwnProperty(key)) showDailyInfo(dailyByKey[key]);
             });
 
             gd.on("plotly_unhover", function() { showDailyInfo(lastIndex); });

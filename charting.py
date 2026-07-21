@@ -913,13 +913,26 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
         # real price axis, whenever there's no overlay ticker.
         fig.update_yaxes(visible=False, row=1, col=1, secondary_y=True)
 
-    # No floating tooltip box over the chart - the crosshair plus the
-    # live summary line above the chart replace it. "none" (rather than
-    # "skip") still fires the hover EVENTS that summary line depends
-    # on; it only hides Plotly's own popup label. This deliberately
-    # clears the hovertemplates set on individual traces above, since a
-    # trace's hovertemplate would otherwise take precedence.
+    # No floating tooltip box over the chart for candles/MAs/volume -
+    # the crosshair plus the live summary line above the chart replace
+    # it. "none" (rather than "skip") still fires the hover EVENTS that
+    # summary line depends on; it only hides Plotly's own popup label.
+    #
+    # Entry/exit markers are the one exception, left alone here on
+    # purpose: showing what a marker IS used to mean appending a second
+    # line to that summary line instead, which changed its height every
+    # time the crosshair crossed a marker - the whole chart visibly
+    # jumped up and down below it. Plotly's own floating tooltip doesn't
+    # have that problem (it's an overlay, not part of the page layout),
+    # and it already appears anchored right next to the marker itself,
+    # which happens to sit in the low band near the volume panel - so
+    # this is what actually satisfies "show it near the arrow" instead
+    # of "show it in a fixed bar that has to grow to fit it."
     for trace in fig.data:
+        if trace.meta == "entry_exit_marker":
+            trace.hoverlabel = dict(
+                bgcolor=CHART_BACKGROUND, bordercolor=outcome_color, font=dict(color=CHART_TEXT_COLOR, size=11))
+            continue
         trace.hovertemplate = None
         trace.hoverinfo = "none"
 
