@@ -21,6 +21,7 @@ PAGES = [
     ("Shortlist", "pages/2_Shortlist.py"),
     ("Open Positions", "pages/4_Open_Positions.py"),
     ("Logbook", "pages/3_Logbook.py"),
+    ("Settings", "pages/5_Settings.py"),
 ]
 
 

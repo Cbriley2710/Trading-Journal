@@ -217,10 +217,38 @@ def init_db(conn):
     cur.execute("""
         CREATE TABLE IF NOT EXISTS position_stops (
             symbol TEXT PRIMARY KEY,
-            stop_loss DOUBLE PRECISION NOT NULL,
+            stop_loss DOUBLE PRECISION,
             updated_at TIMESTAMP NOT NULL DEFAULT NOW()
         )
     """)
+    # stop_loss used to be NOT NULL, back when a row only ever existed
+    # for a symbol that had a real dollar stop set. Now a row can also
+    # exist purely to hold this symbol's MA Stop Rule settings (see the
+    # ma_* columns below) before any dollar stop has been set - DROP
+    # NOT NULL is safe to run every time (a no-op once already
+    # dropped), unlike ADD COLUMN, so no _column_exists guard is
+    # needed here.
+    cur.execute("ALTER TABLE position_stops ALTER COLUMN stop_loss DROP NOT NULL")
+    # The MA Stop Rule (see ma_strategy.py): an open position can opt
+    # into tracking itself against a moving average, either as an
+    # informational signal ("manual") or as something that actively
+    # trails the stop-loss up to the MA once it's cleared cost basis
+    # by enough ("auto") - see pages/4_Open_Positions.py. Every ma_*
+    # column except mode is nullable on purpose - NULL means "use the
+    # global default from strategy_settings instead of a per-position
+    # override" (see database.get_position_ma_settings()).
+    if not _column_exists(cur, "position_stops", "ma_stop_mode"):
+        cur.execute("ALTER TABLE position_stops ADD COLUMN ma_stop_mode TEXT NOT NULL DEFAULT 'off'")
+    if not _column_exists(cur, "position_stops", "ma_period"):
+        cur.execute("ALTER TABLE position_stops ADD COLUMN ma_period INTEGER")
+    if not _column_exists(cur, "position_stops", "ma_closes_threshold"):
+        cur.execute("ALTER TABLE position_stops ADD COLUMN ma_closes_threshold INTEGER")
+    if not _column_exists(cur, "position_stops", "ma_unlock_pct"):
+        cur.execute("ALTER TABLE position_stops ADD COLUMN ma_unlock_pct DOUBLE PRECISION")
+    if not _column_exists(cur, "position_stops", "ma_approach_pct"):
+        cur.execute("ALTER TABLE position_stops ADD COLUMN ma_approach_pct DOUBLE PRECISION")
+    if not _column_exists(cur, "position_stops", "ma_extended_pct"):
+        cur.execute("ALTER TABLE position_stops ADD COLUMN ma_extended_pct DOUBLE PRECISION")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS account_settings (
             id INTEGER PRIMARY KEY DEFAULT 1,
@@ -254,6 +282,22 @@ def init_db(conn):
             color TEXT NOT NULL,
             width DOUBLE PRECISION NOT NULL,
             opacity DOUBLE PRECISION NOT NULL
+        )
+    """)
+    # Global defaults for the MA Stop Rule (see ma_strategy.py) - one
+    # row, edited on the Settings page. Any individual open position
+    # can override any of these (see position_stops.ma_* columns
+    # above); a position that hasn't customized a field just uses
+    # whatever's saved here.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS strategy_settings (
+            id INTEGER PRIMARY KEY DEFAULT 1,
+            ma_period INTEGER NOT NULL DEFAULT 21,
+            closes_threshold INTEGER NOT NULL DEFAULT 2,
+            unlock_pct DOUBLE PRECISION NOT NULL DEFAULT 5.0,
+            approach_pct DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+            extended_pct DOUBLE PRECISION NOT NULL DEFAULT 10.0,
+            CONSTRAINT single_row CHECK (id = 1)
         )
     """)
     conn.commit()
@@ -803,15 +847,131 @@ def set_stop_loss(conn, symbol, stop_loss):
 
 def delete_stop_loss(conn, symbol):
     """
-    Removes the saved stop-loss for a symbol entirely - used when a stop
-    of $0 is "saved" on the Shortlist page, which means "I don't have a
-    stop for this anymore," not "my stop is literally zero dollars."
-    (Storing an actual $0 stop would make the Open Positions page count
-    nearly the whole position's value as heat.) Deleting a stop that
-    was never saved is a harmless no-op.
+    Clears the saved stop-loss for a symbol - used when a stop of $0 is
+    "saved" on the Shortlist page, which means "I don't have a stop for
+    this anymore," not "my stop is literally zero dollars." (Storing an
+    actual $0 stop would make the Open Positions page count nearly the
+    whole position's value as heat.) Clearing a stop that was never set
+    is a harmless no-op.
+
+    Only clears the stop_loss column (UPDATE, not DELETE) - the row can
+    also hold this symbol's MA Stop Rule settings now (see
+    save_position_ma_settings()), which should survive clearing just
+    the dollar stop.
     """
     cur = conn.cursor()
-    cur.execute("DELETE FROM position_stops WHERE symbol = %s", (symbol,))
+    cur.execute("UPDATE position_stops SET stop_loss = NULL WHERE symbol = %s", (symbol,))
+    conn.commit()
+
+
+# The built-in fallback for the MA Stop Rule's global settings (see
+# ma_strategy.py) until you've saved your own on the Settings page -
+# a 21-day MA, 2 closes on the wrong side of it to trigger, the MA
+# needing to clear cost basis by 5% before a trailing stop takes over,
+# and 1%/10% distance thresholds for the "approaching"/"extended"
+# badges.
+_DEFAULT_STRATEGY_SETTINGS = {
+    "ma_period": 21, "closes_threshold": 2, "unlock_pct": 5.0,
+    "approach_pct": 1.0, "extended_pct": 10.0,
+}
+
+
+def get_strategy_settings(conn):
+    """
+    Returns the saved global defaults for the MA Stop Rule (see
+    ma_strategy.py) - one row, since this app has a single user.
+    Falls back to _DEFAULT_STRATEGY_SETTINGS until you've saved your
+    own on the Settings page.
+    """
+    cur = conn.cursor()
+    cur.execute("SELECT ma_period, closes_threshold, unlock_pct, approach_pct, extended_pct FROM strategy_settings WHERE id = 1")
+    row = cur.fetchone()
+    if row is None:
+        return dict(_DEFAULT_STRATEGY_SETTINGS)
+    return {
+        "ma_period": row[0], "closes_threshold": row[1], "unlock_pct": row[2],
+        "approach_pct": row[3], "extended_pct": row[4],
+    }
+
+
+def save_strategy_settings(conn, ma_period, closes_threshold, unlock_pct, approach_pct, extended_pct):
+    """Saves the global default MA Stop Rule settings - see get_strategy_settings()."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO strategy_settings (id, ma_period, closes_threshold, unlock_pct, approach_pct, extended_pct)
+        VALUES (1, %s, %s, %s, %s, %s)
+        ON CONFLICT (id) DO UPDATE SET
+            ma_period = EXCLUDED.ma_period,
+            closes_threshold = EXCLUDED.closes_threshold,
+            unlock_pct = EXCLUDED.unlock_pct,
+            approach_pct = EXCLUDED.approach_pct,
+            extended_pct = EXCLUDED.extended_pct
+        """,
+        (ma_period, closes_threshold, unlock_pct, approach_pct, extended_pct),
+    )
+    conn.commit()
+
+
+def get_position_ma_settings(conn, symbol, defaults):
+    """
+    Returns this position's MA Stop Rule settings, merged with the
+    global `defaults` (see get_strategy_settings()) for any field this
+    position hasn't customized - a position that's never been touched
+    gets {"mode": "off", ...all the global defaults...}. `mode` is
+    "off"/"manual"/"auto" (see pages/4_Open_Positions.py).
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT ma_stop_mode, ma_period, ma_closes_threshold, ma_unlock_pct, ma_approach_pct, ma_extended_pct
+        FROM position_stops WHERE symbol = %s
+        """,
+        (symbol,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return {"mode": "off", **defaults}
+    mode, ma_period, closes_threshold, unlock_pct, approach_pct, extended_pct = row
+    return {
+        "mode": mode or "off",
+        "ma_period": ma_period if ma_period is not None else defaults["ma_period"],
+        "closes_threshold": closes_threshold if closes_threshold is not None else defaults["closes_threshold"],
+        "unlock_pct": unlock_pct if unlock_pct is not None else defaults["unlock_pct"],
+        "approach_pct": approach_pct if approach_pct is not None else defaults["approach_pct"],
+        "extended_pct": extended_pct if extended_pct is not None else defaults["extended_pct"],
+    }
+
+
+def save_position_ma_settings(conn, symbol, mode, ma_period, closes_threshold, unlock_pct, approach_pct, extended_pct):
+    """
+    Saves this position's MA Stop Rule mode and any per-position
+    overrides - each of ma_period/closes_threshold/unlock_pct/
+    approach_pct/extended_pct can be None to mean "use the global
+    default instead" (see get_position_ma_settings()). Creates the
+    position_stops row if it doesn't exist yet (e.g. no dollar
+    stop-loss has ever been set for this symbol) - stop_loss is left
+    untouched either way (not part of this INSERT/UPDATE at all), so
+    this never affects whatever dollar stop is separately set via
+    set_stop_loss().
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO position_stops
+            (symbol, ma_stop_mode, ma_period, ma_closes_threshold, ma_unlock_pct, ma_approach_pct, ma_extended_pct, updated_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (symbol) DO UPDATE SET
+            ma_stop_mode = EXCLUDED.ma_stop_mode,
+            ma_period = EXCLUDED.ma_period,
+            ma_closes_threshold = EXCLUDED.ma_closes_threshold,
+            ma_unlock_pct = EXCLUDED.ma_unlock_pct,
+            ma_approach_pct = EXCLUDED.ma_approach_pct,
+            ma_extended_pct = EXCLUDED.ma_extended_pct,
+            updated_at = EXCLUDED.updated_at
+        """,
+        (symbol, mode, ma_period, closes_threshold, unlock_pct, approach_pct, extended_pct, timeutil.now_eastern()),
+    )
     conn.commit()
 
 
