@@ -23,10 +23,13 @@ WHAT'S STORED, IN THREE TABLES (a "table" is just a grid of rows and
 columns, like a spreadsheet sheet, but one a database can search
 through quickly):
 
-  - `transactions`: one row per raw buy or sell straight from the CSV
-    (same shape as `load_transactions()` in analyze_trades.py already
-    produces). Every time you import a CSV, only genuinely new rows
-    get added - see `import_transactions()` below for how that works.
+  - `transactions`: one row per raw buy or sell, either from a
+    Fidelity/Schwab CSV export or pulled automatically from SnapTrade
+    (same normalized shape either way - see `load_transactions()` in
+    analyze_trades.py and `fetch_activities()` in snaptrade_sync.py).
+    Every import, from either source, only adds genuinely new rows -
+    see `_insert_transactions()` below for how that's shared and kept
+    duplicate-safe.
 
   - `trades`: one row per completed (matched buy+sell) trade - the
     result of running FIFO matching (see analyze_trades.py) over
@@ -59,6 +62,7 @@ import psycopg2
 from psycopg2.extras import Json
 import streamlit as st
 
+import snaptrade_sync
 import timeutil
 from analyze_trades import (
     detect_csv_source,
@@ -255,26 +259,25 @@ def init_db(conn):
     conn.commit()
 
 
-def import_transactions(conn, csv_path):
+def _insert_transactions(conn, transactions):
     """
-    Reads every buy/sell (and short-sale) row out of the CSV and adds
-    any that aren't already stored. Auto-detects whether the file is a
-    Fidelity or Schwab export (see analyze_trades.detect_csv_source())
-    and calls the matching parser - you never have to say which one it
-    is, just drop the file in.
+    Adds any of these normalized transaction dicts ({"date", "symbol",
+    "action", "price", "quantity"} - see analyze_trades.load_
+    transactions()) that aren't already stored. Shared by every import
+    path (CSV upload, SnapTrade sync) so there's exactly one place
+    that knows how a transaction gets deduplicated and inserted.
 
     The `UNIQUE` constraint on the transactions table (set up in
     init_db above) means a row that's an exact match - same date,
     symbol, action, price, and quantity - as one already stored gets
     silently skipped instead of stored twice, thanks to
-    "ON CONFLICT DO NOTHING" below. Since each export always contains
-    your FULL history, this is what lets you just re-export and
-    re-import any time without creating duplicates.
+    "ON CONFLICT DO NOTHING" below. Since a CSV export always contains
+    your FULL history, and a SnapTrade sync re-fetches a recent
+    overlapping window every time (see snaptrade_sync.py), this is
+    what lets either one run repeatedly without creating duplicates.
 
     Returns how many new rows were actually added.
     """
-    source = detect_csv_source(csv_path)
-    transactions = load_transactions_schwab(csv_path) if source == "schwab" else load_transactions(csv_path)
     cur = conn.cursor()
 
     new_count = 0
@@ -292,6 +295,37 @@ def import_transactions(conn, csv_path):
 
     conn.commit()
     return new_count
+
+
+def import_transactions(conn, csv_path):
+    """
+    Reads every buy/sell (and short-sale) row out of the CSV and adds
+    any that aren't already stored. Auto-detects whether the file is a
+    Fidelity or Schwab export (see analyze_trades.detect_csv_source())
+    and calls the matching parser - you never have to say which one it
+    is, just drop the file in.
+
+    Returns how many new rows were actually added.
+    """
+    source = detect_csv_source(csv_path)
+    transactions = load_transactions_schwab(csv_path) if source == "schwab" else load_transactions(csv_path)
+    return _insert_transactions(conn, transactions)
+
+
+def import_transactions_snaptrade(conn, start_date, end_date):
+    """
+    Pulls activity from your connected Fidelity account (via
+    snaptrade_sync.py) for the given date range and adds any
+    transactions that aren't already stored - the SnapTrade
+    equivalent of import_transactions() above, sharing the same
+    dedup-safe insert. See pages/0_Import_Trades.py (manual "Sync
+    Now") and snaptrade_daily_sync.py (the automatic daily version)
+    for where this gets called from.
+
+    Returns how many new rows were actually added.
+    """
+    transactions = snaptrade_sync.fetch_activities(start_date, end_date)
+    return _insert_transactions(conn, transactions)
 
 
 def rebuild_trades(conn):

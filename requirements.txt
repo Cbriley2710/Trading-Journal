@@ -7,3 +7,4 @@ yfinance
 kaleido
 fpdf2
 pillow
+snaptrade-python-sdk

@@ -1,0 +1,55 @@
+name: SnapTrade Sync
+
+# Runs snaptrade_daily_sync.py on a schedule, separate from the
+# Nightly Archive workflow - see that script's own notes for why.
+#
+# Fires TWICE a day (20:01 and 21:01 UTC) to bracket 4:01pm US Eastern
+# regardless of Eastern Daylight vs Standard Time (cron itself has no
+# concept of that) - snaptrade_daily_sync.py's own hour check makes
+# sure only the correctly-timed one of the two actually does anything.
+#
+# workflow_dispatch lets you trigger this manually (from the Actions
+# tab on GitHub) any time, instead of waiting for the schedule - useful
+# for testing. A manual run always does the sync, regardless of the
+# current hour, since it calls the script the same way as any other
+# run - only the SCHEDULED firings are expected to often no-op.
+on:
+  schedule:
+    - cron: "1 20 * * *"
+    - cron: "1 21 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run SnapTrade sync
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SNAPTRADE_CLIENT_ID: ${{ secrets.SNAPTRADE_CLIENT_ID }}
+          SNAPTRADE_CONSUMER_KEY: ${{ secrets.SNAPTRADE_CONSUMER_KEY }}
+        run: python snaptrade_daily_sync.py
+
+      # Same script, same repo, but pointed at a second person's own
+      # database and their own separate SnapTrade connection (see
+      # project notes on the friend's separate deployment) - this
+      # leg does nothing today (their SNAPTRADE_* secrets aren't set
+      # up yet) and continue-on-error means that never fails this
+      # workflow; it'll just start working the moment they add their
+      # own secrets, with no code changes needed here.
+      - name: Run SnapTrade sync (friend)
+        continue-on-error: true
+        env:
+          DATABASE_URL: ${{ secrets.FRIEND_DATABASE_URL }}
+          SNAPTRADE_CLIENT_ID: ${{ secrets.FRIEND_SNAPTRADE_CLIENT_ID }}
+          SNAPTRADE_CONSUMER_KEY: ${{ secrets.FRIEND_SNAPTRADE_CONSUMER_KEY }}
+        run: python snaptrade_daily_sync.py
