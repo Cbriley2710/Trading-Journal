@@ -153,7 +153,7 @@ if positions:
         "live signal in the last column."
     )
 
-    COLUMN_WIDTHS = [1.3, 1.0, 0.7, 0.9, 0.9, 1.0, 1.0, 0.35, 0.35, 0.35, 2.2]
+    COLUMN_WIDTHS = [0.7, 0.9, 0.6, 0.8, 0.8, 0.9, 0.9, 0.3, 0.3, 0.3, 3.5]
     header_cols = st.columns(COLUMN_WIDTHS)
     for col, label in zip(header_cols, [
         "Ticker", "Entry Date", "Shares", "Avg Price", "Current Price",
