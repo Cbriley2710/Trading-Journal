@@ -267,14 +267,27 @@ def _insert_transactions(conn, transactions):
     path (CSV upload, SnapTrade sync) so there's exactly one place
     that knows how a transaction gets deduplicated and inserted.
 
-    The `UNIQUE` constraint on the transactions table (set up in
-    init_db above) means a row that's an exact match - same date,
-    symbol, action, price, and quantity - as one already stored gets
-    silently skipped instead of stored twice, thanks to
-    "ON CONFLICT DO NOTHING" below. Since a CSV export always contains
-    your FULL history, and a SnapTrade sync re-fetches a recent
-    overlapping window every time (see snaptrade_sync.py), this is
-    what lets either one run repeatedly without creating duplicates.
+    A row gets skipped as a duplicate two ways:
+      1. The `UNIQUE` constraint on the transactions table (set up in
+         init_db above) catches an EXACT match on date/symbol/action/
+         price/quantity, via "ON CONFLICT DO NOTHING" below.
+      2. The SELECT check just above that: Fidelity/Schwab CSV exports
+         and SnapTrade can both report the same real fill with a
+         slightly different price - e.g. "239.63" from a CSV vs
+         "239.6296" from SnapTrade, probably just different rounding
+         of the same execution - which is close enough to defeat #1's
+         exact match, and would otherwise double-count that trade
+         (inflating a position's share count) every time it shows up
+         from a second source. So a row is also treated as a duplicate
+         whenever an existing one already matches on date/symbol/
+         action/quantity and its price is within a cent (or 0.2%,
+         whichever is bigger, for pricier stocks).
+
+    Since a CSV export always contains your FULL history, and a
+    SnapTrade sync re-fetches a recent overlapping window every time
+    (see snaptrade_sync.py), both of these together are what let
+    either source run repeatedly, or alongside the other, without
+    creating duplicates.
 
     Returns how many new rows were actually added.
     """
@@ -282,6 +295,18 @@ def _insert_transactions(conn, transactions):
 
     new_count = 0
     for t in transactions:
+        cur.execute(
+            """
+            SELECT 1 FROM transactions
+            WHERE date = %s AND symbol = %s AND action = %s AND quantity = %s
+              AND abs(price - %s) <= greatest(0.01, price * 0.002)
+            LIMIT 1
+            """,
+            (t["date"].date(), t["symbol"], t["action"], t["quantity"], t["price"]),
+        )
+        if cur.fetchone():
+            continue
+
         cur.execute(
             """
             INSERT INTO transactions (date, symbol, action, price, quantity)

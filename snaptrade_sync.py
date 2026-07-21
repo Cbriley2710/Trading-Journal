@@ -46,6 +46,18 @@ import timeutil
 # changes once you've registered (see register_user()).
 USER_ID = "primary"
 
+# SnapTrade's security "type.code" values that aren't a real stock (or
+# stock-like, exchange-traded) position - see fetch_activities()'s
+# filter below. Deliberately a denylist, not an allowlist: an unknown
+# or missing type is let through rather than silently dropped, since
+# being overly permissive here just means an odd row shows up (easy to
+# notice), while being overly restrictive would silently hide a real
+# trade. "oef" (open-ended mutual fund) is what a Fidelity cash-sweep
+# fund like SPAXX is categorized as - that's the one this project
+# actually hit in practice; the rest are excluded on the same
+# reasoning (not something you'd hold as a tracked stock position).
+_NON_STOCK_SECURITY_TYPES = {"oef", "bnd", "crypto", "pm", "struct", "rt", "ut", "wi", "wt"}
+
 
 def _get_secret_optional(key):
     """
@@ -208,7 +220,12 @@ def fetch_activities(start_date, end_date):
 
     Option activity is skipped (option_symbol is only set on an option
     trade) - this project tracks stocks only, the same exclusion the
-    CSV importers already apply for symbols starting with "-".
+    CSV importers already apply for symbols starting with "-". Cash
+    sweep / money-market fund activity is skipped too (see
+    _NON_STOCK_SECURITY_TYPES below) - Fidelity automatically moves
+    cash in and out of a settlement fund (e.g. "SPAXX") constantly, and
+    SnapTrade reports every one of those sweeps as its own BUY/SELL,
+    which isn't a real trade or position at all.
 
     Note: SnapTrade's transaction data is cached and refreshed once a
     day, about a day behind - a trade made today typically won't show
@@ -236,6 +253,10 @@ def fetch_activities(start_date, end_date):
                 symbol = row.get("symbol")
                 if not symbol or not symbol.get("symbol"):
                     continue  # no ticker attached - not a trade we can match
+
+                security_type = ((symbol.get("type") or {}).get("code") or "").lower()
+                if security_type in _NON_STOCK_SECURITY_TYPES:
+                    continue  # a money-market fund, bond, etc - not a stock trade
 
                 trade_date = row.get("trade_date")
                 if not trade_date:
