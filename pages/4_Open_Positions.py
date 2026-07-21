@@ -161,26 +161,30 @@ if positions:
     ]):
         col.markdown(f"**{label}**")
 
-    def signal_text(e):
+    def render_signal(col, e):
+        """Colored badges instead of one long string - a glance at the
+        color tells you severity before you even read the text."""
         sig = e["ma_signal"]
         if sig["ma_value"] is None:
-            return "No price data"
+            col.caption("No price data")
+            return
+        col.caption(f"MA ${sig['ma_value']:,.2f}")
+
         threshold = e["ma_settings"]["closes_threshold"]
         if sig["sell_signal"]:
-            return f"\U0001F514 {sig['signal_closes']}/{threshold} closes against trend"
-        if sig["signal_closes"] > 0:
-            return f"{sig['signal_closes']}/{threshold} against trend"
-        return "On trend"
+            col.badge(f"{sig['signal_closes']}/{threshold} against trend", icon="\U0001F514", color="red")
+        elif sig["signal_closes"] > 0:
+            col.badge(f"{sig['signal_closes']}/{threshold} against trend", color="yellow")
+        else:
+            col.badge("On trend", color="green")
 
-    def distance_text(e):
-        sig = e["ma_signal"]
-        if sig["distance_pct"] is None:
-            return "—"
-        if sig["extended"]:
-            return f"{sig['distance_pct']:.1f}% \U0001F680 Extended"
-        if sig["approaching"]:
-            return f"{sig['distance_pct']:.1f}% ⚠️ Approaching"
-        return f"{sig['distance_pct']:.1f}%"
+        if sig["distance_pct"] is not None:
+            if sig["extended"]:
+                col.badge(f"{sig['distance_pct']:.1f}% from MA", icon="\U0001F680", color="orange")
+            elif sig["approaching"]:
+                col.badge(f"{sig['distance_pct']:.1f}% from MA", icon="⚠️", color="yellow")
+            else:
+                col.badge(f"{sig['distance_pct']:.1f}% from MA", color="gray")
 
     for e in enriched:
         symbol = e["symbol"]
@@ -222,8 +226,7 @@ if positions:
                 st.rerun()
 
         if e["ma_signal"] is not None:
-            ma_text = f"MA ${e['ma_signal']['ma_value']:,.2f}" if e["ma_signal"]["ma_value"] is not None else "MA N/A"
-            signal_col.caption(f"{ma_text} · {signal_text(e)} · {distance_text(e)}")
+            render_signal(signal_col, e)
         else:
             signal_col.write("")
 
