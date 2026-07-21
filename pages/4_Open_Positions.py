@@ -185,7 +185,13 @@ if positions:
             "Unrealized P/L": e["unrealized_pl"],
             "Stop Loss": e["stop_loss"] or 0.0,
             "MA Mode": MODE_DISPLAY[e["ma_settings"]["mode"]],
-            "MA Value": e["ma_signal"]["ma_value"] if e["ma_signal"] else None,
+            # Rounded to the cent for display, same reasoning as
+            # apply_auto_stop()'s rounding in ma_strategy.py - the raw
+            # MA value is recomputed fresh every render and can drift
+            # by a fraction of a cent from one page load to the next,
+            # which (even in this read-only column) can make the whole
+            # row look different to the data_editor between reruns.
+            "MA Value": round(e["ma_signal"]["ma_value"], 2) if e["ma_signal"] and e["ma_signal"]["ma_value"] is not None else None,
             "Signal": signal_text(e),
             "vs MA": distance_text(e),
             "_symbol": e["symbol"],

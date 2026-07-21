@@ -136,6 +136,15 @@ def apply_auto_stop(conn, symbol, is_short, ma_value, current_stop):
     else:
         new_stop = max(current_stop, ma_value)
 
-    if new_stop != current_stop:
+    # Rounded to the cent before comparing/writing - ma_value is
+    # recomputed fresh from Yahoo Finance on every page load, and
+    # today's still-forming candle can shift it by a fraction of a
+    # cent between two loads seconds apart. Without this, a position's
+    # Stop Loss (and the whole row it's in, on the Open Positions
+    # table) would never actually stabilize between reruns - besides
+    # being needless database writes, that instability is what made
+    # the MA Mode dropdown on that same row unreliable to change.
+    new_stop = round(new_stop, 2)
+    if current_stop is None or new_stop != round(current_stop, 2):
         database.set_stop_loss(conn, symbol, new_stop)
     return new_stop
