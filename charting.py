@@ -528,7 +528,7 @@ def render_settings_toolbar(container, key_prefix):
 
 
 def build_figure(symbol, history, entry_point, settings, overlay_history=None, entry_label="Entry", interval="1d",
-                  visible_range=None, stop_loss=None, drawings=None):
+                  visible_range=None, stop_loss=None, drawings=None, bake_arrow_traces=True):
     """
     Builds the go.Figure for a price chart: candlestick or line, moving
     averages, an entry marker (plus an exit marker and connecting line if
@@ -557,14 +557,18 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
     open positions have one (see database.get_stop_loss()).
 
     `drawings`, if given, is a symbol's saved line/rect/arrow_up/
-    arrow_down shapes (see database.get_drawings()). Only the line/rect
-    ones are baked in here, as native Plotly shapes - up/down arrow
-    markers are handled entirely client-side by the chart component
-    (see chart_component/index.html), since they aren't a real Plotly
-    shape type. This still matters for the ARCHIVED snapshot image
+    arrow_down shapes (see database.get_drawings()). Line/rect ones are
+    always baked in here, as native Plotly shapes. Up/down arrow
+    markers are baked in too, but ONLY when `bake_arrow_traces` is True
+    (the default) - meant for the ARCHIVED snapshot image
     (build_archive_snapshot(), which has no JS runtime to add anything
-    client-side) - the interactive chart component re-adds its own
-    arrow markers on top of whatever this function draws.
+    client-side). The interactive chart component draws its own arrow
+    markers client-side from the raw `drawings` list (see
+    chart_component/index.html), so its callers pass
+    `bake_arrow_traces=False` - baking them in too would make every
+    single arrow placed/erased change this figure's data, which forces
+    an unnecessary full chart rebuild (and a fresh price-history fetch)
+    on every click instead of just a lightweight client-side redraw.
     """
     entry_date = entry_point["entry_date"]
     buy_price = entry_point["buy_price"]
@@ -654,18 +658,19 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
     # what makes them show up in the non-interactive archived Logbook
     # snapshot (build_archive_snapshot()), which has no JS runtime to
     # draw anything client-side.
-    for arrow_symbol, drawing_type in (("triangle-up", "arrow_up"), ("triangle-down", "arrow_down")):
-        arrows = [d for d in (drawings or []) if d["type"] == drawing_type]
-        if not arrows:
-            continue
-        fig.add_trace(go.Scatter(
-            x=[d["x0"] for d in arrows], y=[d["y0"] for d in arrows], mode="markers",
-            marker=dict(
-                symbol=arrow_symbol, size=[d["width"] * 5 + 6 for d in arrows],
-                color=[d["color"] for d in arrows], opacity=[d["opacity"] for d in arrows],
-            ),
-            showlegend=False, name=f"__{drawing_type}",
-        ), row=1, col=1)
+    if bake_arrow_traces:
+        for arrow_symbol, drawing_type in (("triangle-up", "arrow_up"), ("triangle-down", "arrow_down")):
+            arrows = [d for d in (drawings or []) if d["type"] == drawing_type]
+            if not arrows:
+                continue
+            fig.add_trace(go.Scatter(
+                x=[d["x0"] for d in arrows], y=[d["y0"] for d in arrows], mode="markers",
+                marker=dict(
+                    symbol=arrow_symbol, size=[d["width"] * 5 + 6 for d in arrows],
+                    color=[d["color"] for d in arrows], opacity=[d["opacity"] for d in arrows],
+                ),
+                showlegend=False, name=f"__{drawing_type}",
+            ), row=1, col=1)
 
     fit_payload["price"].append({
         "x": [ts.isoformat() for ts in history.index],

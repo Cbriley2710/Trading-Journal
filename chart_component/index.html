@@ -88,6 +88,7 @@ ported over unchanged - drawing tools are additive, not a replacement.
     var toolColor = "#2375f4", toolWidth = 2, toolOpacity = 0.9;
     var arrowsUp = [], arrowsDown = [];
     var arrowUpIndex = null, arrowDownIndex = null;
+    var arrowTracesReady = null;
 
     function applyToolStyle() {
         Plotly.relayout(gd, {
@@ -228,19 +229,51 @@ ported over unchanged - drawing tools are additive, not a replacement.
         if (range) fitYAxes(new Date(range[0]).getTime(), new Date(range[1]).getTime());
     }
 
-    function redrawArrows() {
-        updateArrowsFitSeries();
-        var toRemove = [];
-        if (arrowUpIndex !== null) toRemove.push(arrowUpIndex);
-        if (arrowDownIndex !== null) toRemove.push(arrowDownIndex);
-        var afterDelete = toRemove.length ? Plotly.deleteTraces(gd, toRemove) : Promise.resolve();
-        return afterDelete.then(function() {
-            arrowUpIndex = null;
-            arrowDownIndex = null;
-            return Plotly.addTraces(gd, [buildArrowTrace(arrowsUp, "triangle-up"), buildArrowTrace(arrowsDown, "triangle-down")]);
-        }).then(function() {
+    // Creates the two arrow traces exactly once per chart instance.
+    // `arrowTracesReady` holds the in-flight/settled promise itself (not
+    // just a boolean) so two overlapping calls - e.g. a second arrow
+    // placed while the first's addTraces() is still resolving - share
+    // the SAME promise instead of each kicking off their own
+    // Plotly.addTraces(), which would otherwise add the pair twice.
+    function ensureArrowTraces() {
+        if (arrowTracesReady) return arrowTracesReady;
+        arrowTracesReady = Plotly.addTraces(
+            gd, [buildArrowTrace([], "triangle-up"), buildArrowTrace([], "triangle-down")]
+        ).then(function() {
             arrowUpIndex = gd.data.length - 2;
             arrowDownIndex = gd.data.length - 1;
+        });
+        return arrowTracesReady;
+    }
+
+    // Updates the two arrow traces IN PLACE with Plotly.restyle() rather
+    // than deleting and re-adding them on every single arrow placed or
+    // erased. Delete+add used to be the approach here, and had two real
+    // problems: (1) it forces Plotly to redraw the entire chart - every
+    // candle/MA/volume trace, not just the two arrow ones - which is
+    // what made drawing feel heavy, and (2) deleteTraces() renumbers
+    // every trace that comes after the ones removed, so if a second
+    // arrow was placed before the first's delete+add had fully
+    // resolved, the second call would delete whatever trace now sat at
+    // its (already stale) remembered index - sometimes an unrelated
+    // trace, sometimes a now-nonexistent one - which is how arrows
+    // could silently fail to show up. restyle() never moves a trace, so
+    // overlapping calls can't step on each other's indices this way.
+    function redrawArrows() {
+        updateArrowsFitSeries();
+        return ensureArrowTraces().then(function() {
+            var up = buildArrowTrace(arrowsUp, "triangle-up");
+            var down = buildArrowTrace(arrowsDown, "triangle-down");
+            return Plotly.restyle(gd, {
+                x: [up.x, down.x],
+                y: [up.y, down.y],
+                text: [up.text, down.text],
+                "marker.size": [up.marker.size, down.marker.size],
+                "marker.color": [up.marker.color, down.marker.color],
+                "marker.opacity": [up.marker.opacity, down.marker.opacity],
+                "hoverlabel.bordercolor": [up.hoverlabel.bordercolor, down.hoverlabel.bordercolor],
+            }, [arrowUpIndex, arrowDownIndex]);
+        }).then(function() {
             refitNow();
         });
     }
@@ -427,6 +460,7 @@ ported over unchanged - drawing tools are additive, not a replacement.
 
             arrowUpIndex = null;
             arrowDownIndex = null;
+            arrowTracesReady = null;
             arrowsUp = drawings.filter(function(d) { return d.type === "arrow_up"; })
                 .map(function(d) { return {x: d.x0, y: d.y0, color: d.color, width: d.width, opacity: d.opacity}; });
             arrowsDown = drawings.filter(function(d) { return d.type === "arrow_down"; })

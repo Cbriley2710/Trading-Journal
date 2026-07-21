@@ -129,7 +129,8 @@ def render_price_chart(symbol, entry_point, entry_label, key_prefix, stop_loss=N
 
     fig, fit_payload = charting.build_figure(
         symbol, history, entry_point, settings, overlay_history, entry_label=entry_label, interval=interval,
-        visible_range=(visible_start, display_end), stop_loss=stop_loss, drawings=saved_drawings)
+        visible_range=(visible_start, display_end), stop_loss=stop_loss, drawings=saved_drawings,
+        bake_arrow_traces=False)
     current_drawings = charting.render_interactive_chart(fig, fit_payload, saved_drawings, key=key_prefix)
 
     # Only writes to the database when the chart component reports

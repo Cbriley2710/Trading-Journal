@@ -177,7 +177,7 @@ saved_drawings = database.get_drawings(conn, trade["symbol"])
 
 fig, fit_payload = charting.build_figure(
     trade["symbol"], history, entry_point, settings, overlay_history, interval=interval,
-    visible_range=(visible_start, visible_end), drawings=saved_drawings)
+    visible_range=(visible_start, visible_end), drawings=saved_drawings, bake_arrow_traces=False)
 current_drawings = charting.render_interactive_chart(fig, fit_payload, saved_drawings, key="trade_analyzer")
 
 # Only writes to the database when something's actually different from
