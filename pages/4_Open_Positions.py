@@ -14,12 +14,12 @@ position once you've set a stop-loss for it in the Positions & Stop-Loss
 table below - there's nowhere else in this app that stop price is
 tracked (see database.get_stop_loss()/set_stop_loss()).
 
-The Positions & Stop-Loss table also has an MA Mode column - an
-opt-in, per-position way to track a trend-following exit against a
-moving average, and optionally have this app trail your stop-loss up
-to it automatically (see ma_strategy.py). The MA period and every
-other threshold it uses are global, set on the Settings page - only
-the mode (Off/Manual/Auto) is chosen per ticker here.
+Right below that table, each position also gets its own MA Mode
+selector (Off/Manual/Auto) - an opt-in way to track a trend-following
+exit against a moving average, and optionally have this app trail
+your stop-loss up to it automatically (see ma_strategy.py). The MA
+period and every other threshold it uses are global, set on the
+Settings page - only the mode is chosen per ticker here.
 """
 
 from datetime import date
@@ -132,30 +132,77 @@ if positions:
 # The one place stop-loss is set or moved - a table instead of a
 # per-ticker input buried in a chart page, so trailing every open
 # position's stop as the day goes is one scroll, not five page visits.
-# MA Mode (see ma_strategy.py) lives right here too, rather than a
-# separate table: "Off" (default) does nothing; "Manual" shows a
-# read-only signal (MA Value/Signal/vs MA) for you to act on
-# yourself; "Auto" also trails Stop Loss up to the moving average once
-# it's cleared cost basis by enough (see the Settings page for the MA
-# period/thresholds this uses - global for every position, not
-# per-ticker).
 if positions:
     st.header("Positions & Stop-Loss")
-    st.caption(
-        "Edit the Stop Loss column directly - 0 (or blank) means no stop "
-        "set. MA Mode: \"Off\" does nothing; \"Manual\" shows the MA "
-        "Value/Signal/vs MA columns as a read-only signal; \"Auto\" also "
-        "trails Stop Loss up to the moving average once unlocked - never "
-        "loosening a tighter stop you've already set by hand."
+    st.caption("Edit the Stop Loss column directly - 0 (or blank) means no stop set.")
+
+    position_rows = [
+        {
+            "Ticker": position_label(e),
+            "Entry Date": e["entry_date"].strftime("%m/%d/%Y"),
+            "Shares": e["quantity"],
+            "Avg Price": e["avg_price"],
+            "Current Price": e["current_price"],
+            "Unrealized P/L": e["unrealized_pl"],
+            "Stop Loss": e["stop_loss"] or 0.0,
+            "_symbol": e["symbol"],
+        }
+        for e in enriched
+    ]
+    edited_rows = st.data_editor(
+        pd.DataFrame(position_rows),
+        column_order=[
+            "Ticker", "Entry Date", "Shares", "Avg Price",
+            "Current Price", "Unrealized P/L", "Stop Loss",
+        ],
+        column_config={
+            "Ticker": st.column_config.TextColumn(disabled=True),
+            "Entry Date": st.column_config.TextColumn(disabled=True),
+            "Shares": st.column_config.NumberColumn(disabled=True, format="%.0f"),
+            "Avg Price": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
+            "Current Price": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
+            "Unrealized P/L": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
+            "Stop Loss": st.column_config.NumberColumn(min_value=0.0, step=0.01, format="$%.2f"),
+        },
+        hide_index=True, width="stretch", key="positions_stop_loss_editor",
     )
 
+    # Only ever writes to the database when a Stop Loss cell actually
+    # changed from what's currently saved - every other column is
+    # disabled (read-only) so there's nothing else here that could
+    # trigger a save. Re-running immediately afterward means the Equity
+    # & Heat numbers below reflect the new stop right away instead of
+    # lagging a rerun behind.
+    stop_loss_changed = False
+    for _, row in edited_rows.iterrows():
+        old_stop = round(stops.get(row["_symbol"]) or 0.0, 2)
+        new_stop = round(row["Stop Loss"] or 0.0, 2)
+        if new_stop != old_stop:
+            if new_stop > 0:
+                database.set_stop_loss(conn, row["_symbol"], new_stop)
+            else:
+                database.delete_stop_loss(conn, row["_symbol"])
+            stop_loss_changed = True
+    if stop_loss_changed:
+        st.rerun()
+
+    # --- MA Mode, per ticker (see ma_strategy.py) --------------------------
+    # A plain st.selectbox per position, not a data_editor column - a
+    # SelectboxColumn inside a data_editor grid turned out to be
+    # unreliable here (the grid's own reconciliation could revert a
+    # just-made selection before it ever reached this script), where a
+    # normal Streamlit widget with its own stable key just works. "Off"
+    # does nothing; "Manual" shows a read-only signal below; "Auto"
+    # also trails Stop Loss (above) up to the moving average once it's
+    # cleared cost basis by enough - never loosening a tighter stop
+    # already set by hand. The MA period and every threshold this uses
+    # are global, set on the Settings page.
     MODE_DISPLAY = {"off": "Off", "manual": "Manual", "auto": "Auto"}
+    MODE_OPTIONS = ["Off", "Manual", "Auto"]
     MODE_INTERNAL = {v: k for k, v in MODE_DISPLAY.items()}
 
     def signal_text(e):
         sig = e["ma_signal"]
-        if sig is None:
-            return "—"
         if sig["ma_value"] is None:
             return "No price data"
         threshold = e["ma_settings"]["closes_threshold"]
@@ -167,7 +214,7 @@ if positions:
 
     def distance_text(e):
         sig = e["ma_signal"]
-        if sig is None or sig["distance_pct"] is None:
+        if sig["distance_pct"] is None:
             return "—"
         if sig["extended"]:
             return f"{sig['distance_pct']:.1f}% \U0001F680 Extended"
@@ -175,84 +222,29 @@ if positions:
             return f"{sig['distance_pct']:.1f}% ⚠️ Approaching"
         return f"{sig['distance_pct']:.1f}%"
 
-    position_rows = [
-        {
-            "Ticker": position_label(e),
-            "Entry Date": e["entry_date"].strftime("%m/%d/%Y"),
-            "Shares": e["quantity"],
-            "Avg Price": e["avg_price"],
-            "Current Price": e["current_price"],
-            "Unrealized P/L": e["unrealized_pl"],
-            "Stop Loss": e["stop_loss"] or 0.0,
-            "MA Mode": MODE_DISPLAY[e["ma_settings"]["mode"]],
-            # Rounded to the cent for display, same reasoning as
-            # apply_auto_stop()'s rounding in ma_strategy.py - the raw
-            # MA value is recomputed fresh every render and can drift
-            # by a fraction of a cent from one page load to the next,
-            # which (even in this read-only column) can make the whole
-            # row look different to the data_editor between reruns.
-            "MA Value": round(e["ma_signal"]["ma_value"], 2) if e["ma_signal"] and e["ma_signal"]["ma_value"] is not None else None,
-            "Signal": signal_text(e),
-            "vs MA": distance_text(e),
-            "_symbol": e["symbol"],
-        }
-        for e in enriched
-    ]
-    edited_rows = st.data_editor(
-        pd.DataFrame(position_rows),
-        column_order=[
-            "Ticker", "Entry Date", "Shares", "Avg Price", "Current Price",
-            "Unrealized P/L", "Stop Loss", "MA Mode", "MA Value", "Signal", "vs MA",
-        ],
-        column_config={
-            "Ticker": st.column_config.TextColumn(disabled=True),
-            "Entry Date": st.column_config.TextColumn(disabled=True),
-            "Shares": st.column_config.NumberColumn(disabled=True, format="%.0f"),
-            "Avg Price": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
-            "Current Price": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
-            "Unrealized P/L": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
-            "Stop Loss": st.column_config.NumberColumn(min_value=0.0, step=0.01, format="$%.2f"),
-            "MA Mode": st.column_config.SelectboxColumn(options=["Off", "Manual", "Auto"]),
-            "MA Value": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
-            "Signal": st.column_config.TextColumn(disabled=True),
-            "vs MA": st.column_config.TextColumn(disabled=True),
-        },
-        hide_index=True, width="stretch", key="positions_stop_loss_editor",
-    )
+    for e in enriched:
+        symbol = e["symbol"]
+        mode_col, value_col, signal_col = st.columns([1, 1, 2])
+        picked_display = mode_col.selectbox(
+            position_label(e), options=MODE_OPTIONS,
+            index=MODE_OPTIONS.index(MODE_DISPLAY[e["ma_settings"]["mode"]]),
+            key=f"ma_mode_{symbol}",
+        )
+        picked_mode = MODE_INTERNAL[picked_display]
+        if picked_mode != e["ma_settings"]["mode"]:
+            # Period/closes/unlock%/approach%/extended% stay None here
+            # on purpose - this control only ever sets Mode, so every
+            # position follows the Settings page's global numbers
+            # rather than a per-ticker override (see database.
+            # get_position_ma_settings()).
+            database.save_position_ma_settings(conn, symbol, picked_mode, None, None, None, None, None)
+            st.rerun()
 
-    # Writes to the database when a Stop Loss cell or the MA Mode
-    # changed from what's currently saved - every other column is
-    # disabled (read-only) so there's nothing else here that could
-    # trigger a save. Re-running immediately afterward means the Equity
-    # & Heat numbers below (and a just-toggled MA signal) reflect the
-    # change right away instead of lagging a rerun behind.
-    anything_changed = False
-    for _, row in edited_rows.iterrows():
-        symbol = row["_symbol"]
-
-        old_stop = round(stops.get(symbol) or 0.0, 2)
-        new_stop = round(row["Stop Loss"] or 0.0, 2)
-        if new_stop != old_stop:
-            if new_stop > 0:
-                database.set_stop_loss(conn, symbol, new_stop)
-            else:
-                database.delete_stop_loss(conn, symbol)
-            anything_changed = True
-
-        existing_mode = next(e["ma_settings"]["mode"] for e in enriched if e["symbol"] == symbol)
-        new_mode = MODE_INTERNAL[row["MA Mode"]]
-        if new_mode != existing_mode:
-            # The other five MA settings (period/closes/unlock%/
-            # approach%/extended%) are left as None here on purpose -
-            # this table only ever sets Mode per ticker, so every
-            # position always follows the Settings page's global
-            # numbers rather than a per-ticker override (see
-            # database.get_position_ma_settings()).
-            database.save_position_ma_settings(conn, symbol, new_mode, None, None, None, None, None)
-            anything_changed = True
-
-    if anything_changed:
-        st.rerun()
+        if e["ma_signal"] is not None:
+            value_col.caption(
+                f"MA: ${e['ma_signal']['ma_value']:,.2f}" if e["ma_signal"]["ma_value"] is not None else "MA: N/A"
+            )
+            signal_col.caption(f"{signal_text(e)} · {distance_text(e)}")
 
     st.divider()
 
