@@ -28,14 +28,13 @@ is primary, the nightly script is the fallback" pattern already used
 for per-ticker chart archiving.
 """
 
-from datetime import date
-
 import streamlit as st
 
 import auth
 import daily_report
 import database
 import nav
+import timeutil
 
 st.set_page_config(page_title="Logbook", layout="wide", initial_sidebar_state="collapsed")
 
@@ -58,7 +57,7 @@ st.caption(
     "that automated run sends it for you as a fallback."
 )
 report_cols = st.columns([1, 2])
-report_date = report_cols[0].date_input("Report date", value=date.today(), key="report_date")
+report_date = report_cols[0].date_input("Report date", value=timeutil.today_eastern(), key="report_date")
 
 already_sent_at = database.get_daily_report_status(conn, report_date)
 if already_sent_at:
@@ -67,7 +66,7 @@ else:
     report_cols[1].caption("Not generated yet for this date.")
 
 if st.button("Generate & Email Report"):
-    is_today = report_date == date.today()
+    is_today = report_date == timeutil.today_eastern()
     spinner_text = (
         "Archiving fresh charts and building/sending the report..." if is_today
         else "Building the PDF and sending it..."

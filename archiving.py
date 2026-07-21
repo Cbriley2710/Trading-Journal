@@ -14,6 +14,7 @@ from datetime import datetime
 
 import charting
 import database
+import timeutil
 
 
 def archive_ticker(conn, symbol, entry_date, buy_price, entry_label, today, as_of, direction="LONG", stop_loss=None):
@@ -26,7 +27,7 @@ def archive_ticker(conn, symbol, entry_date, buy_price, entry_label, today, as_o
         return False
 
     database.upsert_logbook_entry(
-        conn, symbol, today, chart_image=png_bytes, archived_at=datetime.now())
+        conn, symbol, today, chart_image=png_bytes, archived_at=timeutil.now_eastern())
     print(f"  {symbol}: archived ({len(png_bytes)} bytes).")
     return True
 

@@ -25,11 +25,10 @@ has no scheduler of its own. Can also be run manually any time (e.g.
 `python nightly_archive.py`) to archive today's snapshot on demand.
 """
 
-from datetime import date
-
 import archiving
 import daily_report
 import database
+import timeutil
 
 
 def send_daily_report_fallback(conn, today):
@@ -54,7 +53,7 @@ def send_daily_report_fallback(conn, today):
 
 def main():
     conn = database.get_connection()
-    today = date.today()
+    today = timeutil.today_eastern()
 
     archiving.archive_all(conn, today)
     send_daily_report_fallback(conn, today)

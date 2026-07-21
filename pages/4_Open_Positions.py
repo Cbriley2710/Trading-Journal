@@ -25,6 +25,7 @@ import auth
 import charting
 import database
 import nav
+import timeutil
 from ui import stat_tile
 
 st.set_page_config(page_title="Open Positions", layout="wide", initial_sidebar_state="collapsed")
@@ -55,7 +56,7 @@ stops = database.get_all_stop_losses(conn)
 # an actually-maintained account value instead of a stale typed-in one.
 jan1_balance = database.get_account_value(conn)
 deposits = database.get_deposits(conn)
-jan1_date = date(date.today().year, 1, 1)
+jan1_date = date(timeutil.today_eastern().year, 1, 1)
 deposits_this_year = sum(d["amount"] for d in deposits if d["deposit_date"] >= jan1_date)
 realized_pl_this_year = database.get_realized_pl_since(conn, jan1_date)
 account_value = (jan1_balance + deposits_this_year + realized_pl_this_year) if jan1_balance else None

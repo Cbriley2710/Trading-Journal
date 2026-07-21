@@ -37,6 +37,7 @@ import auth
 import charting
 import database
 import nav
+import timeutil
 from ui import stat_tile
 
 # Reusing charting.py's colors (rather than picking new ones here) keeps
@@ -68,7 +69,7 @@ conn = database.get_connection()
 # this page are shown as a % of this calculated value.
 jan1_balance = database.get_account_value(conn)
 deposits = database.get_deposits(conn)
-jan1_date = date(date.today().year, 1, 1)
+jan1_date = date(timeutil.today_eastern().year, 1, 1)
 deposits_this_year = sum(d["amount"] for d in deposits if d["deposit_date"] >= jan1_date)
 realized_pl_this_year = database.get_realized_pl_since(conn, jan1_date)
 
@@ -165,7 +166,7 @@ st.divider()
 # year goes on and systematically understate every period's return.
 st.subheader("Account Performance")
 if jan1_balance:
-    today = pd.Timestamp.now().normalize()
+    today = pd.Timestamp(timeutil.today_eastern())
     periods = [
         ("7 Days", today - pd.Timedelta(days=7)),
         ("30 Days", today - pd.Timedelta(days=30)),
@@ -344,7 +345,7 @@ with st.expander("Account Settings"):
     deposit_cols = st.columns([1, 1, 1])
     deposit_amount = deposit_cols[0].number_input(
         "Amount ($, negative = withdrawal)", step=100.0, format="%.2f", key="deposit_amount_input")
-    deposit_date = deposit_cols[1].date_input("Date", value=date.today(), key="deposit_date_input")
+    deposit_date = deposit_cols[1].date_input("Date", value=timeutil.today_eastern(), key="deposit_date_input")
     deposit_cols[2].write("")  # vertical spacer so the button lines up with the inputs above
     if deposit_cols[2].button("Add"):
         if deposit_amount != 0:

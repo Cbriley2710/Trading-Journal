@@ -59,6 +59,7 @@ import psycopg2
 from psycopg2.extras import Json
 import streamlit as st
 
+import timeutil
 from analyze_trades import (
     detect_csv_source,
     load_transactions,
@@ -548,11 +549,17 @@ def add_to_watchlist(conn, symbol, list_id=1):
     in ONE list at a time - if it's already somewhere (this list or
     another), nothing changes and this returns False so the page can
     say where it already is. Returns True when it was actually added.
+
+    `added_at` is passed explicitly (US Eastern - see timeutil.py)
+    instead of relying on the table's own DEFAULT NOW() - Postgres's
+    NOW() reflects the database server's own timezone (UTC on Neon),
+    which would make a ticker added in the evening show as "added"
+    tomorrow.
     """
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO watchlist (symbol, list_id) VALUES (%s, %s) ON CONFLICT (symbol) DO NOTHING",
-        (symbol, list_id),
+        "INSERT INTO watchlist (symbol, list_id, added_at) VALUES (%s, %s, %s) ON CONFLICT (symbol) DO NOTHING",
+        (symbol, list_id, timeutil.now_eastern()),
     )
     conn.commit()
     return cur.rowcount == 1
@@ -654,17 +661,20 @@ def get_all_stop_losses(conn):
 def set_stop_loss(conn, symbol, stop_loss):
     """Saves (or updates) the stop-loss price for a symbol - overwriting
     whatever was saved before, since a stop is something you move over
-    the life of a trade (e.g. trailing it up as the position works)."""
+    the life of a trade (e.g. trailing it up as the position works).
+    `updated_at` is computed in Python (US Eastern - see timeutil.py)
+    rather than SQL's NOW(), which reflects the database server's own
+    timezone (UTC on Neon), not yours."""
     cur = conn.cursor()
     cur.execute(
         """
         INSERT INTO position_stops (symbol, stop_loss, updated_at)
-        VALUES (%s, %s, NOW())
+        VALUES (%s, %s, %s)
         ON CONFLICT (symbol) DO UPDATE SET
             stop_loss = EXCLUDED.stop_loss,
-            updated_at = NOW()
+            updated_at = EXCLUDED.updated_at
         """,
-        (symbol, stop_loss),
+        (symbol, stop_loss, timeutil.now_eastern()),
     )
     conn.commit()
 
@@ -700,17 +710,20 @@ def set_account_value(conn, account_value):
     """Saves (or updates) the Jan 1 account value baseline - overwriting
     whatever was saved before. Meant to be set once at the start of each
     year, not adjusted day to day (deposits and trading P/L already
-    account for everything since then)."""
+    account for everything since then). `updated_at` is computed in
+    Python (US Eastern - see timeutil.py) rather than SQL's NOW(),
+    which reflects the database server's own timezone (UTC on Neon),
+    not yours."""
     cur = conn.cursor()
     cur.execute(
         """
         INSERT INTO account_settings (id, account_value, updated_at)
-        VALUES (1, %s, NOW())
+        VALUES (1, %s, %s)
         ON CONFLICT (id) DO UPDATE SET
             account_value = EXCLUDED.account_value,
-            updated_at = NOW()
+            updated_at = EXCLUDED.updated_at
         """,
-        (account_value,),
+        (account_value, timeutil.now_eastern()),
     )
     conn.commit()
 
@@ -769,14 +782,19 @@ def mark_daily_report_generated(conn, report_date):
     """Records that the daily report for a date has been generated and
     emailed - overwriting any earlier timestamp, since re-generating on
     purpose (the button can be clicked more than once a day) should
-    always count as the latest "done" marker."""
+    always count as the latest "done" marker. `generated_at` is
+    computed in Python (US Eastern - see timeutil.py) rather than
+    SQL's NOW(), which reflects the database server's own timezone
+    (UTC on Neon) - this value is shown directly on the Logbook page
+    ("generated and emailed... at H:MM AM/PM"), so it needs to be your
+    time, not the server's."""
     cur = conn.cursor()
     cur.execute(
         """
         INSERT INTO daily_reports (report_date, generated_at)
-        VALUES (%s, NOW())
-        ON CONFLICT (report_date) DO UPDATE SET generated_at = NOW()
+        VALUES (%s, %s)
+        ON CONFLICT (report_date) DO UPDATE SET generated_at = EXCLUDED.generated_at
         """,
-        (report_date,),
+        (report_date, timeutil.now_eastern()),
     )
     conn.commit()

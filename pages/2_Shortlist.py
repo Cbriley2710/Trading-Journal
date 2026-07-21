@@ -33,7 +33,7 @@ Stop-loss itself is set/edited on the Open Positions page, not here -
 see database.get_stop_loss()/set_stop_loss().
 """
 
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 
 import streamlit as st
 
@@ -41,6 +41,7 @@ import auth
 import charting
 import database
 import nav
+import timeutil
 import ui
 
 st.set_page_config(page_title="Shortlist", layout="wide", initial_sidebar_state="collapsed")
@@ -86,7 +87,7 @@ def render_price_chart(symbol, entry_point, entry_label, key_prefix, stop_loss=N
     # history instead of hitting an empty edge immediately. There's no
     # future data to extend into on the right, so that side is unchanged.
     visible_start = entry_point["entry_date"] - timedelta(days=padding_days)
-    display_end = datetime.combine(date.today(), datetime.min.time()) + timedelta(days=1)
+    display_end = datetime.combine(timeutil.today_eastern(), datetime.min.time()) + timedelta(days=1)
 
     fetch_padding_days = padding_days * charting.FETCH_BUFFER_MULTIPLIER
     wide_start = entry_point["entry_date"] - timedelta(days=fetch_padding_days)
@@ -143,7 +144,7 @@ def render_journal_box(conn, symbol, key_prefix):
     past one screen. Returns (notes, button_column) - the caller renders
     its own button(s) into button_column.
     """
-    today = date.today()
+    today = timeutil.today_eastern()
     existing_entry = database.get_logbook_entry(conn, symbol, today)
     existing_notes = existing_entry["notes"] if existing_entry else ""
 
@@ -158,7 +159,7 @@ def save_journal_entry(conn, symbol, entry_point, entry_label, notes, stop_loss=
     """Archives today's chart snapshot and saves the journal entry -
     the actual work behind every "Save" button on this page, whether
     it's the plain single-ticker view or a Journal Session step."""
-    today = date.today()
+    today = timeutil.today_eastern()
     with st.spinner("Saving and archiving today's chart..."):
         png_bytes = charting.build_archive_snapshot(
             symbol, entry_point["entry_date"], entry_point["buy_price"], entry_label,
