@@ -153,7 +153,14 @@ if positions:
         "live signal in the last column."
     )
 
-    COLUMN_WIDTHS = [0.7, 0.9, 0.6, 0.8, 0.8, 0.9, 0.9, 0.3, 0.3, 0.3, 3.5]
+    # Relative widths, adjustable on the Settings page (see database.
+    # get_open_positions_column_widths()) rather than fixed here -
+    # "mode" is one shared width applied to all three O/M/A buttons.
+    w = database.get_open_positions_column_widths(conn)
+    COLUMN_WIDTHS = [
+        w["ticker"], w["entry_date"], w["shares"], w["avg_price"], w["current_price"],
+        w["unrealized_pl"], w["stop_loss"], w["mode"], w["mode"], w["mode"], w["ma_signal"],
+    ]
     header_cols = st.columns(COLUMN_WIDTHS)
     for col, label in zip(header_cols, [
         "Ticker", "Entry Date", "Shares", "Avg Price", "Current Price",

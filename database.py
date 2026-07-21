@@ -300,6 +300,18 @@ def init_db(conn):
             CONSTRAINT single_row CHECK (id = 1)
         )
     """)
+    # Adjustable layout preferences - starting with how wide each
+    # column of the Open Positions table is (see get_open_positions_
+    # column_widths() below). One JSONB blob rather than a column per
+    # setting, since this is just relative UI proportions, not
+    # structured data anything else needs to query.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ui_settings (
+            id INTEGER PRIMARY KEY DEFAULT 1,
+            open_positions_column_widths JSONB NOT NULL DEFAULT '{}',
+            CONSTRAINT single_row CHECK (id = 1)
+        )
+    """)
     conn.commit()
 
 
@@ -971,6 +983,46 @@ def save_position_ma_settings(conn, symbol, mode, ma_period, closes_threshold, u
             updated_at = EXCLUDED.updated_at
         """,
         (symbol, mode, ma_period, closes_threshold, unlock_pct, approach_pct, extended_pct, timeutil.now_eastern()),
+    )
+    conn.commit()
+
+
+# Built-in fallback widths (relative proportions, not pixels - same
+# units st.columns() takes) for the Open Positions table, until you've
+# saved your own on the Settings page. "mode" is shared by all three
+# O/M/A buttons - they're always the same width as each other, so
+# there's no reason to adjust them individually.
+_DEFAULT_OPEN_POSITIONS_COLUMN_WIDTHS = {
+    "ticker": 0.7, "entry_date": 0.9, "shares": 0.6, "avg_price": 0.8,
+    "current_price": 0.8, "unrealized_pl": 0.9, "stop_loss": 0.9,
+    "mode": 0.3, "ma_signal": 3.5,
+}
+
+
+def get_open_positions_column_widths(conn):
+    """
+    Returns the saved relative column widths for the Open Positions
+    table (see pages/4_Open_Positions.py) - a dict keyed by column
+    name, merged with _DEFAULT_OPEN_POSITIONS_COLUMN_WIDTHS for
+    anything not yet customized on the Settings page.
+    """
+    cur = conn.cursor()
+    cur.execute("SELECT open_positions_column_widths FROM ui_settings WHERE id = 1")
+    row = cur.fetchone()
+    saved = row[0] if row else {}
+    return {**_DEFAULT_OPEN_POSITIONS_COLUMN_WIDTHS, **saved}
+
+
+def save_open_positions_column_widths(conn, widths):
+    """Saves the Open Positions table's column widths - see get_open_positions_column_widths()."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO ui_settings (id, open_positions_column_widths)
+        VALUES (1, %s)
+        ON CONFLICT (id) DO UPDATE SET open_positions_column_widths = EXCLUDED.open_positions_column_widths
+        """,
+        (Json(widths),),
     )
     conn.commit()
 

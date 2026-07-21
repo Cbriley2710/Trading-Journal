@@ -14,6 +14,13 @@ page only lets you choose Off/Manual/Auto per ticker, not override the
 MA period or thresholds individually (see database.get_position_ma_
 settings(), which still supports a per-position override at the data
 layer if a future UI ever wants to expose one).
+
+Also here: relative column widths for the Open Positions table's
+Positions & Stop-Loss grid (see database.get_open_positions_column_
+widths()) - that table is built from plain st.columns() rows rather
+than a data_editor grid (needed for the O/M/A mode buttons to be real
+buttons), which means there's no native drag-to-resize; this is the
+adjustable alternative.
 """
 
 import streamlit as st
@@ -66,5 +73,35 @@ extended_pct = col5.number_input(
 
 if st.button("Save Defaults"):
     database.save_strategy_settings(conn, ma_period, closes_threshold, unlock_pct, approach_pct, extended_pct)
+    st.success("Saved.")
+    st.rerun()
+
+st.divider()
+
+st.header("Open Positions Column Widths")
+st.caption(
+    "Relative widths for the Positions & Stop-Loss table - not pixels, just "
+    "proportions of the row (e.g. doubling a number doubles that column's "
+    "share of the width). \"Mode Buttons\" applies to all three O/M/A "
+    "buttons at once, since they're always the same width as each other."
+)
+
+widths = database.get_open_positions_column_widths(conn)
+
+width_col1, width_col2, width_col3 = st.columns(3)
+new_widths = {
+    "ticker": width_col1.number_input("Ticker", min_value=0.1, step=0.1, value=widths["ticker"], key="width_ticker"),
+    "entry_date": width_col2.number_input("Entry Date", min_value=0.1, step=0.1, value=widths["entry_date"], key="width_entry_date"),
+    "shares": width_col3.number_input("Shares", min_value=0.1, step=0.1, value=widths["shares"], key="width_shares"),
+    "avg_price": width_col1.number_input("Avg Price", min_value=0.1, step=0.1, value=widths["avg_price"], key="width_avg_price"),
+    "current_price": width_col2.number_input("Current Price", min_value=0.1, step=0.1, value=widths["current_price"], key="width_current_price"),
+    "unrealized_pl": width_col3.number_input("Unrealized P/L", min_value=0.1, step=0.1, value=widths["unrealized_pl"], key="width_unrealized_pl"),
+    "stop_loss": width_col1.number_input("Stop Loss", min_value=0.1, step=0.1, value=widths["stop_loss"], key="width_stop_loss"),
+    "mode": width_col2.number_input("Mode Buttons (O/M/A)", min_value=0.1, step=0.05, value=widths["mode"], key="width_mode"),
+    "ma_signal": width_col3.number_input("MA Signal", min_value=0.1, step=0.1, value=widths["ma_signal"], key="width_ma_signal"),
+}
+
+if st.button("Save Column Widths"):
+    database.save_open_positions_column_widths(conn, new_widths)
     st.success("Saved.")
     st.rerun()
