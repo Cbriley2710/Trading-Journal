@@ -178,9 +178,16 @@ symbol = filtered_summary[selected_index]["symbol"]
 entries = database.get_logbook_entries(conn, symbol)
 entries = [e for e in entries if range_start <= e["entry_date"] <= range_end]
 
-hide_empty = st.checkbox("Hide days with no notes", key="logbook_hide_empty")
+order_col, hide_col = st.columns([1, 3])
+# get_logbook_entries() already returns oldest-first - this just
+# optionally flips that, e.g. to catch up on the most recent days
+# first instead of starting from whatever date/range was picked above.
+reverse_order = order_col.toggle("Newest first", key="logbook_reverse_order")
+hide_empty = hide_col.checkbox("Hide days with no notes", key="logbook_hide_empty")
 if hide_empty:
     entries = [e for e in entries if e["notes"]]
+if reverse_order:
+    entries = list(reversed(entries))
 
 st.caption(f"{len(entries)} day(s) shown for {symbol}.")
 
