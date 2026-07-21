@@ -187,19 +187,17 @@ if positions:
         st.rerun()
 
     # --- MA Mode, per ticker (see ma_strategy.py) --------------------------
-    # A plain st.selectbox per position, not a data_editor column - a
-    # SelectboxColumn inside a data_editor grid turned out to be
-    # unreliable here (the grid's own reconciliation could revert a
-    # just-made selection before it ever reached this script), where a
-    # normal Streamlit widget with its own stable key just works. "Off"
-    # does nothing; "Manual" shows a read-only signal below; "Auto"
-    # also trails Stop Loss (above) up to the moving average once it's
+    # Three small toggle buttons (O/M/A) per position, not a data_editor
+    # column or a selectbox - same active/disabled-button pattern
+    # nav.py's own top nav already uses reliably (the active choice
+    # shown highlighted and disabled, the others plain clickable
+    # buttons that switch to themselves when clicked). "Off" does
+    # nothing; "Manual" shows a read-only signal below; "Auto" also
+    # trails Stop Loss (above) up to the moving average once it's
     # cleared cost basis by enough - never loosening a tighter stop
     # already set by hand. The MA period and every threshold this uses
     # are global, set on the Settings page.
-    MODE_DISPLAY = {"off": "Off", "manual": "Manual", "auto": "Auto"}
-    MODE_OPTIONS = ["Off", "Manual", "Auto"]
-    MODE_INTERNAL = {v: k for k, v in MODE_DISPLAY.items()}
+    st.caption("MA Mode - O(ff) / M(anual) / A(uto): click to switch, the active one is highlighted.")
 
     def signal_text(e):
         sig = e["ma_signal"]
@@ -224,27 +222,28 @@ if positions:
 
     for e in enriched:
         symbol = e["symbol"]
-        mode_col, value_col, signal_col = st.columns([1, 1, 2])
-        picked_display = mode_col.selectbox(
-            position_label(e), options=MODE_OPTIONS,
-            index=MODE_OPTIONS.index(MODE_DISPLAY[e["ma_settings"]["mode"]]),
-            key=f"ma_mode_{symbol}",
-        )
-        picked_mode = MODE_INTERNAL[picked_display]
-        if picked_mode != e["ma_settings"]["mode"]:
-            # Period/closes/unlock%/approach%/extended% stay None here
-            # on purpose - this control only ever sets Mode, so every
-            # position follows the Settings page's global numbers
-            # rather than a per-ticker override (see database.
-            # get_position_ma_settings()).
-            database.save_position_ma_settings(conn, symbol, picked_mode, None, None, None, None, None)
-            st.rerun()
+        current_mode = e["ma_settings"]["mode"]
+
+        label_col, o_col, m_col, a_col, info_col = st.columns([2, 1, 1, 1, 4])
+        label_col.write(position_label(e))
+
+        for mode_col, mode_value, mode_letter in ((o_col, "off", "O"), (m_col, "manual", "M"), (a_col, "auto", "A")):
+            is_active = current_mode == mode_value
+            if mode_col.button(
+                mode_letter, key=f"ma_{mode_value}_{symbol}", width="stretch",
+                disabled=is_active, type="primary" if is_active else "secondary",
+            ):
+                # Period/closes/unlock%/approach%/extended% stay None
+                # here on purpose - these buttons only ever set Mode,
+                # so every position follows the Settings page's global
+                # numbers rather than a per-ticker override (see
+                # database.get_position_ma_settings()).
+                database.save_position_ma_settings(conn, symbol, mode_value, None, None, None, None, None)
+                st.rerun()
 
         if e["ma_signal"] is not None:
-            value_col.caption(
-                f"MA: ${e['ma_signal']['ma_value']:,.2f}" if e["ma_signal"]["ma_value"] is not None else "MA: N/A"
-            )
-            signal_col.caption(f"{signal_text(e)} · {distance_text(e)}")
+            ma_text = f"MA ${e['ma_signal']['ma_value']:,.2f}" if e["ma_signal"]["ma_value"] is not None else "MA N/A"
+            info_col.caption(f"{ma_text} · {signal_text(e)} · {distance_text(e)}")
 
     st.divider()
 
