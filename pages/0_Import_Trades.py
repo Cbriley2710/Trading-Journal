@@ -59,29 +59,49 @@ st.caption(
     "here until tomorrow."
 )
 
-try:
-    connected_accounts = snaptrade_sync.list_connected_accounts()
-except RuntimeError:
-    # Secrets aren't filled in at all - the ONE case where there's truly
-    # nothing useful to do here, so the Connect/Sync buttons below stay
-    # hidden.
-    connected_accounts = None
+if not snaptrade_sync.is_configured():
+    # Stage 1: the app's own SnapTrade API key isn't set up at all yet -
+    # nothing else below can work without it.
     st.info(
         "SnapTrade isn't set up yet - add SNAPTRADE_CLIENT_ID and "
         "SNAPTRADE_CONSUMER_KEY to .streamlit/secrets.toml (see "
         "secrets.toml.example) to enable this."
     )
-except Exception as e:
-    # Secrets ARE configured, but something else went wrong checking
-    # what's connected - most commonly because nothing's been connected
-    # yet at all (a brand new SnapTrade account can error here instead
-    # of just returning an empty list). Treat this as "no accounts",
-    # NOT as "hide everything" - the Connect button below is exactly
-    # what fixes this, so it needs to still show up.
-    connected_accounts = []
-    st.warning(f"Couldn't check connected accounts yet: {e}")
+elif not snaptrade_sync.is_registered():
+    # Stage 2: one-time step, run once ever - see snaptrade_sync.
+    # register_user() for why this is needed even with a Personal API
+    # key. The returned secret is only ever shown this once, so it's
+    # displayed directly here for you to copy - same as any other
+    # "shown once at creation" credential.
+    st.warning("One more one-time step before you can connect Fidelity: register your SnapTrade user.")
+    if st.button("Register with SnapTrade"):
+        try:
+            user_secret = snaptrade_sync.register_user()
+        except Exception as e:
+            st.error(f"Registration failed: {e}")
+        else:
+            st.success("Registered. Copy this value now - SnapTrade will not show it again:")
+            st.code(user_secret)
+            st.caption(
+                "Save it as SNAPTRADE_USER_SECRET alongside your other "
+                "SnapTrade secrets (local .streamlit/secrets.toml, this "
+                "app's Streamlit Cloud secrets, and your GitHub repo "
+                "secrets), then reload this page."
+            )
+else:
+    # Stage 3: fully set up - show what's connected (if anything) and
+    # the Connect/Sync buttons.
+    try:
+        connected_accounts = snaptrade_sync.list_connected_accounts()
+    except Exception as e:
+        # Most commonly because nothing's been connected yet at all (a
+        # brand new SnapTrade account can error here instead of just
+        # returning an empty list). Treat this as "no accounts", NOT as
+        # "hide everything" - the Connect button below is exactly what
+        # fixes this, so it needs to still show up.
+        connected_accounts = []
+        st.warning(f"Couldn't check connected accounts yet: {e}")
 
-if connected_accounts is not None:
     if connected_accounts:
         account_labels = ", ".join(
             f"{a.get('institution_name') or 'Brokerage'} ({a.get('name') or a.get('number') or a['id']})"
