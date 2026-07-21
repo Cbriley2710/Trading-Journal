@@ -12,13 +12,17 @@ see database.get_logbook_entries(). A day with no notes or no archived
 image yet (e.g. today, before tonight's archive run) still shows up,
 just with whichever piece is missing left blank.
 
-The ticker picker itself is filterable - by date range, by which
-list(s)/open-position status a symbol is CURRENTLY in (see
-database.get_logbook_summary() for the underlying per-symbol summary
-this is built from), and by a keyword search across every symbol's
-notes. The date range also trims which days show once you've picked a
-ticker, and a "Hide days with no notes" toggle skips days that only
-ever got an auto-archived chart with nothing written.
+The ticker picker itself is filterable - by date range (or, via
+"Start from a date instead", a single date through today - for
+picking up where you left off rather than setting both ends of a
+range every time), by which list(s)/open-position status a symbol is
+CURRENTLY in (see database.get_logbook_summary() for the underlying
+per-symbol summary this is built from), and by a keyword search across
+every symbol's notes. Either date filter also trims which days show
+once you've picked a ticker (oldest first, so the date you picked - or
+the closest logged day after it - is what you see first), and a "Hide
+days with no notes" toggle skips days that only ever got an
+auto-archived chart with nothing written.
 
 This page also has a "Daily Report" section - one PDF covering every
 list, emailed to a mailing list. See daily_report.py. If you don't
@@ -117,7 +121,7 @@ def symbol_tags(symbol):
 overall_min = min(s["first_entry"] for s in summary)
 overall_max = max(s["last_entry"] for s in summary)
 
-filter_cols = st.columns([2, 2, 2])
+filter_cols = st.columns([2, 2, 2, 2])
 date_range = filter_cols[0].date_input(
     "Date range", value=(overall_min, overall_max),
     min_value=overall_min, max_value=overall_max, key="logbook_date_range",
@@ -127,11 +131,24 @@ selected_lists = filter_cols[1].multiselect(
 )
 keyword = filter_cols[2].text_input("Search notes for", key="logbook_keyword")
 
+# An alternative to the Date range picker above, for "catch up from
+# where I left off" browsing - pick one date and see everything from
+# there through today, instead of having to set both ends of a range
+# every time. Overrides the Date range widget while checked.
+use_start_date = filter_cols[3].checkbox("Start from a date instead", key="logbook_use_start_date")
+if use_start_date:
+    start_date = filter_cols[3].date_input(
+        "Start date (through today)", value=overall_min,
+        min_value=overall_min, max_value=timeutil.today_eastern(), key="logbook_start_date",
+    )
+
 # date_input in range mode returns a single date until both ends have
 # been picked - only filter once there's a real (start, end) pair, same
 # pattern as Trade Analyzer's own entry-date filter.
 range_start, range_end = (overall_min, overall_max)
-if isinstance(date_range, tuple) and len(date_range) == 2:
+if use_start_date:
+    range_start, range_end = start_date, timeutil.today_eastern()
+elif isinstance(date_range, tuple) and len(date_range) == 2:
     range_start, range_end = date_range
 
 matching_keyword = database.search_logbook_notes(conn, keyword.strip()) if keyword.strip() else None
