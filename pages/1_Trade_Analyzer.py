@@ -171,7 +171,17 @@ entry_point = {
     "exit_date": trade["date"], "sell_price": trade["sell_price"],
     "direction": trade["direction"],
 }
+
+conn = database.get_connection()
+saved_drawings = database.get_drawings(conn, trade["symbol"])
+
 fig, fit_payload = charting.build_figure(
     trade["symbol"], history, entry_point, settings, overlay_history, interval=interval,
-    visible_range=(visible_start, visible_end))
-charting.render_interactive_chart(fig, fit_payload)
+    visible_range=(visible_start, visible_end), drawings=saved_drawings)
+current_drawings = charting.render_interactive_chart(fig, fit_payload, saved_drawings, key="trade_analyzer")
+
+# Only writes to the database when something's actually different from
+# what's saved - see pages/2_Shortlist.py's own render_price_chart()
+# for the same pattern.
+if current_drawings != saved_drawings:
+    database.save_drawings(conn, trade["symbol"], current_drawings)

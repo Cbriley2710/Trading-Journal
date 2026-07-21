@@ -238,6 +238,20 @@ def init_db(conn):
             amount DOUBLE PRECISION NOT NULL
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS chart_drawings (
+            id SERIAL PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            shape_type TEXT NOT NULL,
+            x0 TEXT NOT NULL,
+            y0 DOUBLE PRECISION NOT NULL,
+            x1 TEXT,
+            y1 DOUBLE PRECISION,
+            color TEXT NOT NULL,
+            width DOUBLE PRECISION NOT NULL,
+            opacity DOUBLE PRECISION NOT NULL
+        )
+    """)
     conn.commit()
 
 
@@ -637,6 +651,55 @@ def save_chart_preferences(conn, ma_text, ma_colors):
         """,
         (ma_text, Json({str(k): v for k, v in ma_colors.items()})),
     )
+    conn.commit()
+
+
+def get_drawings(conn, symbol):
+    """
+    Returns every saved drawing (line/rect/arrow_up/arrow_down) for a
+    symbol's chart - see charting.render_interactive_chart(). Keyed by
+    symbol only, not by which page or trade you happened to be looking
+    at when you drew it, since a support/resistance line drawn on a
+    ticker's chart is just as relevant wherever else that ticker's
+    chart shows up (Shortlist, Trade Analyzer, an archived snapshot).
+    """
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT shape_type, x0, y0, x1, y1, color, width, opacity FROM chart_drawings WHERE symbol = %s",
+        (symbol,),
+    )
+    return [
+        {
+            "type": row[0], "x0": row[1], "y0": row[2], "x1": row[3], "y1": row[4],
+            "color": row[5], "width": row[6], "opacity": row[7],
+        }
+        for row in cur.fetchall()
+    ]
+
+
+def save_drawings(conn, symbol, drawings):
+    """
+    Replaces every saved drawing for a symbol with `drawings` - the
+    chart component's current full list, sent back whenever something
+    is added, moved, resized, or erased. Simplest to just wipe and
+    rewrite the whole set rather than track individual edits, the same
+    "recalculate from scratch" pattern already used for the trades
+    table (see rebuild_trades()).
+    """
+    cur = conn.cursor()
+    cur.execute("DELETE FROM chart_drawings WHERE symbol = %s", (symbol,))
+    if drawings:
+        cur.executemany(
+            """
+            INSERT INTO chart_drawings (symbol, shape_type, x0, y0, x1, y1, color, width, opacity)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            [
+                (symbol, d["type"], d["x0"], d["y0"], d.get("x1"), d.get("y1"),
+                 d["color"], d["width"], d["opacity"])
+                for d in drawings
+            ],
+        )
     conn.commit()
 
 

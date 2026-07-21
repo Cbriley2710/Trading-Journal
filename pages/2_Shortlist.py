@@ -124,10 +124,20 @@ def render_price_chart(symbol, entry_point, entry_label, key_prefix, stop_loss=N
     # (The OHLC summary line now lives inside the chart component itself,
     # where it updates live as the crosshair moves - see charting.py.)
 
+    conn = database.get_connection()
+    saved_drawings = database.get_drawings(conn, symbol)
+
     fig, fit_payload = charting.build_figure(
         symbol, history, entry_point, settings, overlay_history, entry_label=entry_label, interval=interval,
-        visible_range=(visible_start, display_end), stop_loss=stop_loss)
-    charting.render_interactive_chart(fig, fit_payload)
+        visible_range=(visible_start, display_end), stop_loss=stop_loss, drawings=saved_drawings)
+    current_drawings = charting.render_interactive_chart(fig, fit_payload, saved_drawings, key=key_prefix)
+
+    # Only writes to the database when the chart component reports
+    # something actually different from what's saved - every pan/zoom
+    # or tool-only interaction reports the same list back, so this
+    # doesn't fire on those.
+    if current_drawings != saved_drawings:
+        database.save_drawings(conn, symbol, current_drawings)
 
     return entry_point
 

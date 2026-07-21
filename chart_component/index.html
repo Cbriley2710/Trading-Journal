@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<!--
+Trading Journal chart component
+=====================
+The interactive price chart, now as a real bidirectional Streamlit
+custom component (declared in charting.py via
+streamlit.components.v1.declare_component) instead of a plain
+st.iframe embed. A plain iframe can only receive data FROM Python - it
+has no way to send anything back. Drawing tools need the opposite too
+(what did you draw, so it can be saved), which is only possible
+through Streamlit's real component protocol - see the hand-rolled
+postMessage calls below (componentReady / setFrameHeight /
+setComponentValue). This file is served as-is (a static path, not a
+Python-templated string like the old iframe version), so dark-theme
+colors are hardcoded here rather than substituted in - keep them in
+sync with charting.py's own CHART_BACKGROUND/CHART_TEXT_COLOR/etc. if
+those ever change.
+
+Everything the old chart had (crosshair, the OHLC summary line, the
+scroll/pan y-axis auto-fit, the entry/exit marker repositioning) is
+ported over unchanged - drawing tools are additive, not a replacement.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+    html, body {
+        margin: 0; padding: 0; overflow: hidden;
+        background: #111214; color: #d1d4dc; font-family: sans-serif;
+    }
+    #toolbar {
+        display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+        padding: 6px 10px; border-bottom: 1px solid #23262b;
+    }
+    .tool-btn {
+        background: #1c1e22; color: #d1d4dc; border: 1px solid #23262b;
+        border-radius: 4px; padding: 4px 10px; font-size: 0.8rem; cursor: pointer;
+    }
+    .tool-btn:hover { background: #26292e; }
+    .tool-btn.active { background: #2375f4; border-color: #2375f4; color: #fff; }
+    .tool-sep { width: 1px; height: 20px; background: #23262b; margin: 0 4px; }
+    #toolbar label {
+        font-size: 0.75rem; color: #9199a3; display: flex; align-items: center; gap: 4px;
+    }
+    #summary {
+        font-size: 0.85rem; font-weight: 600; padding: 6px 10px 0 10px; white-space: nowrap;
+    }
+    #plotly-chart { width: 100%; }
+    #plotly-chart .nsewdrag { cursor: crosshair !important; }
+</style>
+</head>
+<body>
+<div id="toolbar">
+    <button class="tool-btn active" data-tool="pan">Pan</button>
+    <button class="tool-btn" data-tool="drawline">Line</button>
+    <button class="tool-btn" data-tool="drawrect">Box</button>
+    <button class="tool-btn" data-tool="arrow_up">&#9650; Up</button>
+    <button class="tool-btn" data-tool="arrow_down">&#9660; Down</button>
+    <button class="tool-btn" data-tool="erase">Erase</button>
+    <div class="tool-sep"></div>
+    <label>Color <input type="color" id="tool-color" value="#2375f4"></label>
+    <label>Weight <input type="range" id="tool-width" min="1" max="6" step="1" value="2"><span id="tool-width-val">2</span></label>
+    <label>Opacity <input type="range" id="tool-opacity" min="0.2" max="1" step="0.1" value="0.9"><span id="tool-opacity-val">0.9</span></label>
+    <div class="tool-sep"></div>
+    <button class="tool-btn" id="clear-all-btn">Clear All</button>
+</div>
+<div id="summary">&nbsp;</div>
+<div id="plotly-chart"></div>
+<script src="https://cdn.plot.ly/plotly-2.35.3.min.js"></script>
+<script>
+(function() {
+    var gd = document.getElementById("plotly-chart");
+    var config = {scrollZoom: true, displayModeBar: false, responsive: true};
+
+    // ---- Streamlit component protocol - see this file's own header ----
+    function sendToStreamlit(type, extra) {
+        window.parent.postMessage(Object.assign({isStreamlitMessage: true, type: type}, extra || {}), "*");
+    }
+    function setFrameHeight(px) {
+        sendToStreamlit("streamlit:setFrameHeight", {height: px});
+    }
+
+    var figure = null, fitPayload = null, drawings = [];
+    var lastSignature = null;
+
+    // ---- Drawing tool state ----
+    var currentTool = "pan";
+    var toolColor = "#2375f4", toolWidth = 2, toolOpacity = 0.9;
+    var arrowsUp = [], arrowsDown = [];
+    var arrowUpIndex = null, arrowDownIndex = null;
+
+    function applyToolStyle() {
+        Plotly.relayout(gd, {
+            "newshape.line.color": toolColor,
+            "newshape.line.width": toolWidth,
+            "newshape.fillcolor": toolColor,
+            "newshape.opacity": toolOpacity,
+        });
+    }
+
+    function selectTool(tool) {
+        currentTool = tool;
+        document.querySelectorAll(".tool-btn[data-tool]").forEach(function(btn) {
+            btn.classList.toggle("active", btn.getAttribute("data-tool") === tool);
+        });
+        var dragmode = "pan";
+        if (tool === "drawline") dragmode = "drawline";
+        else if (tool === "drawrect") dragmode = "drawrect";
+        else if (tool === "erase") dragmode = "eraseshape";
+        // arrow_up/arrow_down stay on "pan" - a plain click (no drag)
+        // still fires plotly_click either way, which is what places one.
+        Plotly.relayout(gd, {dragmode: dragmode});
+    }
+
+    document.querySelectorAll(".tool-btn[data-tool]").forEach(function(btn) {
+        btn.addEventListener("click", function() { selectTool(btn.getAttribute("data-tool")); });
+    });
+    document.getElementById("tool-color").addEventListener("input", function(e) {
+        toolColor = e.target.value;
+        applyToolStyle();
+    });
+    document.getElementById("tool-width").addEventListener("input", function(e) {
+        toolWidth = parseInt(e.target.value, 10);
+        document.getElementById("tool-width-val").innerText = toolWidth;
+        applyToolStyle();
+    });
+    document.getElementById("tool-opacity").addEventListener("input", function(e) {
+        toolOpacity = parseFloat(e.target.value);
+        document.getElementById("tool-opacity-val").innerText = toolOpacity.toFixed(1);
+        applyToolStyle();
+    });
+    document.getElementById("clear-all-btn").addEventListener("click", function() {
+        arrowsUp = [];
+        arrowsDown = [];
+        Plotly.relayout(gd, {shapes: []}).then(function() {
+            return redrawArrows();
+        }).then(reportDrawings);
+    });
+
+    // ---- Reporting drawings back to Python (debounced - a shape drag
+    // fires many relayout events per second while it's in progress;
+    // sending a value on every one of them would flood Streamlit with
+    // reruns and make dragging feel laggy) ----
+    var reportPending = null;
+    function reportDrawings() {
+        if (reportPending) { clearTimeout(reportPending); reportPending = null; }
+        sendToStreamlit("streamlit:setComponentValue", {value: currentDrawingsList(), dataType: "json"});
+    }
+    function reportDrawingsDebounced() {
+        if (reportPending) clearTimeout(reportPending);
+        reportPending = setTimeout(reportDrawings, 400);
+    }
+
+    function currentDrawingsList() {
+        var shapeDrawings = (gd.layout.shapes || []).map(function(s) {
+            return {
+                type: s.type === "rect" ? "rect" : "line",
+                x0: String(s.x0), y0: s.y0, x1: String(s.x1), y1: s.y1,
+                color: (s.line && s.line.color) || toolColor,
+                width: (s.line && s.line.width) || toolWidth,
+                opacity: s.opacity != null ? s.opacity : toolOpacity,
+            };
+        });
+        var arrowDrawings = arrowsUp.map(function(a) {
+            return {type: "arrow_up", x0: String(a.x), y0: a.y, x1: null, y1: null,
+                     color: a.color, width: a.width, opacity: a.opacity};
+        }).concat(arrowsDown.map(function(a) {
+            return {type: "arrow_down", x0: String(a.x), y0: a.y, x1: null, y1: null,
+                     color: a.color, width: a.width, opacity: a.opacity};
+        }));
+        return shapeDrawings.concat(arrowDrawings);
+    }
+
+    // ---- Up/down arrow markers - Plotly has no native "draw an arrow"
+    // tool (only line/rect/circle/path), so these are handled entirely
+    // here as a pair of Scatter marker traces (the same triangle-up/
+    // triangle-down symbols already used for entry/exit markers
+    // elsewhere in this app), not as Plotly "shapes". Always kept as
+    // the LAST two traces so their indices stay predictable. ----
+    function buildArrowTrace(list, symbol) {
+        return {
+            x: list.map(function(a) { return a.x; }),
+            y: list.map(function(a) { return a.y; }),
+            mode: "markers",
+            marker: {
+                symbol: symbol,
+                size: list.map(function(a) { return (a.width || 2) * 5 + 6; }),
+                color: list.map(function(a) { return a.color; }),
+                opacity: list.map(function(a) { return a.opacity; }),
+            },
+            text: list.map(function() { return symbol === "triangle-up" ? "Up marker" : "Down marker"; }),
+            hovertemplate: "%{text}<extra></extra>",
+            showlegend: false,
+            name: symbol === "triangle-up" ? "__arrows_up" : "__arrows_down",
+        };
+    }
+
+    // A dedicated entry in fitPayload.price for wherever the arrows
+    // currently are, kept up to date by updateArrowsFitSeries() below -
+    // without this, an arrow near the top/bottom edge of whatever's
+    // currently visible could render OUTSIDE the fitted y-axis range
+    // (invisible, scrolled off the plot) the same way entry/exit
+    // markers used to before they were excluded from the fit and
+    // dynamically repositioned instead - arrows are different: they're
+    // meant to sit right at a real price point, not a fixed decorative
+    // band, so including them in the fit (like a real candle) is the
+    // right fix here rather than repositioning them after the fact.
+    var arrowsFitSeries = {x: [], lo: [], hi: []};
+
+    function updateArrowsFitSeries() {
+        var all = arrowsUp.concat(arrowsDown);
+        arrowsFitSeries.x = all.map(function(a) { return a.x; });
+        arrowsFitSeries.lo = all.map(function(a) { return a.y; });
+        arrowsFitSeries.hi = all.map(function(a) { return a.y; });
+    }
+
+    // Re-fits the y-axis using whatever's CURRENTLY visible (not the
+    // whole fetched history) - called right after an arrow is added/
+    // removed so it shows up immediately instead of only after the
+    // next pan/zoom happens to trigger fitYAxes() on its own.
+    function refitNow() {
+        var range = gd.layout.xaxis && gd.layout.xaxis.range;
+        if (range) fitYAxes(new Date(range[0]).getTime(), new Date(range[1]).getTime());
+    }
+
+    function redrawArrows() {
+        updateArrowsFitSeries();
+        var toRemove = [];
+        if (arrowUpIndex !== null) toRemove.push(arrowUpIndex);
+        if (arrowDownIndex !== null) toRemove.push(arrowDownIndex);
+        var afterDelete = toRemove.length ? Plotly.deleteTraces(gd, toRemove) : Promise.resolve();
+        return afterDelete.then(function() {
+            arrowUpIndex = null;
+            arrowDownIndex = null;
+            return Plotly.addTraces(gd, [buildArrowTrace(arrowsUp, "triangle-up"), buildArrowTrace(arrowsDown, "triangle-down")]);
+        }).then(function() {
+            arrowUpIndex = gd.data.length - 2;
+            arrowDownIndex = gd.data.length - 1;
+            refitNow();
+        });
+    }
+
+    // Erases an arrow only if it sits on EXACTLY the clicked bar - not
+    // just whichever arrow happens to be nearest on the whole chart.
+    // `xIso` is already one of fitPayload.daily.x's own values (the
+    // clicked bar's real x), so an exact string match is enough; a
+    // "nearest by distance" version was tried first and was a real
+    // bug - erasing a line/rect shape near some unrelated candle could
+    // also delete a totally distant arrow, since nothing capped how
+    // far away "nearest" was allowed to be.
+    function removeArrowAt(xIso) {
+        var idx = arrowsUp.findIndex(function(a) { return a.x === xIso; });
+        if (idx !== -1) {
+            arrowsUp.splice(idx, 1);
+            redrawArrows().then(reportDrawings);
+            return;
+        }
+        idx = arrowsDown.findIndex(function(a) { return a.x === xIso; });
+        if (idx !== -1) {
+            arrowsDown.splice(idx, 1);
+            redrawArrows().then(reportDrawings);
+        }
+    }
+
+    // ---- The rest of this is the same chart behavior the old iframe
+    // version had (crosshair, OHLC summary line, y-axis auto-fit,
+    // entry/exit marker repositioning) - see charting.py's
+    // build_figure()/fit_payload for what feeds it. ----
+
+    function seriesExtent(series, xmin, xmax) {
+        var lo = Infinity, hi = -Infinity;
+        for (var i = 0; i < series.x.length; i++) {
+            var t = new Date(series.x[i]).getTime();
+            if (t < xmin || t > xmax) continue;
+            var a = series.lo[i], b = series.hi[i];
+            if (a !== null && a !== undefined && !isNaN(a) && a < lo) lo = a;
+            if (b !== null && b !== undefined && !isNaN(b) && b > hi) hi = b;
+        }
+        if (lo === Infinity) return null;
+        return [lo, hi];
+    }
+
+    function fitYAxes(xmin, xmax) {
+        var relayout = {};
+        var priceRange = null;
+        [["price", "yaxis"], ["volume", "yaxis3"], ["overlay", "yaxis2"]].forEach(function(pair) {
+            var seriesList = fitPayload[pair[0]];
+            if (!seriesList || !seriesList.length) return;
+            var lo = Infinity, hi = -Infinity;
+            seriesList.forEach(function(series) {
+                var ext = seriesExtent(series, xmin, xmax);
+                if (!ext) return;
+                if (ext[0] < lo) lo = ext[0];
+                if (ext[1] > hi) hi = ext[1];
+            });
+            if (lo === Infinity) return;
+            var pad = (hi - lo) * 0.08 || Math.abs(hi) * 0.08 || 1;
+            relayout[pair[1] + ".range"] = [lo - pad, hi + pad];
+            relayout[pair[1] + ".autorange"] = false;
+            if (pair[0] === "price") priceRange = [lo - pad, hi + pad];
+        });
+        if (Object.keys(relayout).length) Plotly.relayout(gd, relayout);
+        if (priceRange) repositionMarkers(priceRange);
+    }
+
+    function repositionMarkers(priceRange) {
+        var lo = priceRange[0], hi = priceRange[1];
+        var markerY = lo + (hi - lo) * 0.03;
+        var indices = [];
+        gd.data.forEach(function(trace, i) {
+            if (trace.meta === "entry_exit_marker") indices.push(i);
+        });
+        if (!indices.length) return;
+        var newYs = indices.map(function(i) { return gd.data[i].y.map(function() { return markerY; }); });
+        Plotly.restyle(gd, {y: newYs}, indices);
+    }
+
+    function barKey(x) {
+        var s = String(x).replace("T", " ");
+        if (s.length === 10) s += " 00:00";
+        return s.slice(0, 16);
+    }
+
+    var dailyByKey = {}, lastIndex = null;
+    var monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+    function formatDate(iso) {
+        var s = String(iso);
+        var month = parseInt(s.slice(5, 7), 10);
+        var day = parseInt(s.slice(8, 10), 10);
+        return monthNames[month - 1] + " " + day + ", " + s.slice(0, 4);
+    }
+    function formatPrice(v) {
+        if (v === null || v === undefined) return "N/A";
+        return v.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    }
+    function formatVolume(v) {
+        if (v === null || v === undefined) return "N/A";
+        if (v >= 1e9) return (v / 1e9).toFixed(1) + "B";
+        if (v >= 1e6) return (v / 1e6).toFixed(1) + "M";
+        if (v >= 1e3) return (v / 1e3).toFixed(1) + "K";
+        return Math.round(v).toLocaleString();
+    }
+
+    function showDailyInfo(index, markerText) {
+        var el = document.getElementById("summary");
+        if (index === null || index === undefined) {
+            el.innerHTML = "&nbsp;";
+            return;
+        }
+        var d = fitPayload.daily;
+        var meta = fitPayload.meta || {symbol: "", interval_label: ""};
+        var parts = [
+            meta.symbol + " · " + meta.interval_label,
+            formatDate(d.x[index]),
+            "O " + formatPrice(d.open[index]),
+            "H " + formatPrice(d.high[index]),
+            "L " + formatPrice(d.low[index]),
+            "C " + formatPrice(d.close[index]),
+            "V " + formatVolume(d.volume[index]),
+        ];
+        var html = parts.join("&nbsp;&nbsp; ");
+        var chg = d.chg[index], pct = d.pct[index];
+        if (chg !== null && chg !== undefined && pct !== null && pct !== undefined) {
+            var sign = chg >= 0 ? "+" : "";
+            var color = chg >= 0 ? "#0ca30c" : "#d03b3b";
+            html += "&nbsp;&nbsp; <span style='color:" + color + ";'>"
+                + "Chg " + sign + formatPrice(chg)
+                + "&nbsp;&nbsp; Chg% " + sign + pct.toFixed(2) + "%</span>";
+        }
+        if (markerText) html += "<br>" + markerText;
+        el.innerHTML = html;
+    }
+
+    function initChart() {
+        // initChart() can run more than once on the SAME iframe (e.g.
+        // switching Timeframe or a Chart Settings change on an
+        // otherwise-unchanged ticker - see this file's chart_signature
+        // comparison below). Plotly.newPlot() alone would redraw the
+        // chart but NOT remove the plotly_hover/plotly_click/
+        // plotly_relayout listeners this function registers below,
+        // which would otherwise stack up (every event firing its
+        // handler twice, three times, ...) a little more each time.
+        // purge() fully resets the div first, listeners included.
+        Plotly.purge(gd);
+
+        // fitPayload is a brand new object every time (freshly parsed
+        // from this render's args), so arrowsFitSeries - which needs to
+        // be PART of fitPayload.price for fitYAxes() to see it - has to
+        // be re-registered into it here rather than once globally.
+        arrowsFitSeries = {x: [], lo: [], hi: []};
+        fitPayload.price = fitPayload.price || [];
+        fitPayload.price.push(arrowsFitSeries);
+
+        // build_figure() (Python) also bakes arrow_up/arrow_down
+        // drawings into the figure as their own traces, named
+        // "__arrow_up"/"__arrow_down" - that's only meant for the
+        // non-interactive archived snapshot image, which has no JS to
+        // draw anything itself. This component draws its OWN arrow
+        // traces from the raw `drawings` list below (redrawArrows()),
+        // so any Python-baked ones need to be stripped out first or
+        // every saved arrow would show up twice.
+        figure.data = figure.data.filter(function(t) {
+            return !t.name || t.name.indexOf("__arrow") !== 0;
+        });
+
+        dailyByKey = {};
+        lastIndex = null;
+        if (fitPayload.daily) {
+            fitPayload.daily.x.forEach(function(iso, i) {
+                dailyByKey[barKey(iso)] = i;
+                lastIndex = i;
+            });
+        }
+
+        Plotly.newPlot(gd, figure.data, figure.layout, config).then(function() {
+            showDailyInfo(lastIndex);
+
+            var initialRange = gd.layout.xaxis && gd.layout.xaxis.range;
+            if (initialRange && initialRange.length === 2) {
+                fitYAxes(new Date(initialRange[0]).getTime(), new Date(initialRange[1]).getTime());
+            }
+
+            arrowUpIndex = null;
+            arrowDownIndex = null;
+            arrowsUp = drawings.filter(function(d) { return d.type === "arrow_up"; })
+                .map(function(d) { return {x: d.x0, y: d.y0, color: d.color, width: d.width, opacity: d.opacity}; });
+            arrowsDown = drawings.filter(function(d) { return d.type === "arrow_down"; })
+                .map(function(d) { return {x: d.x0, y: d.y0, color: d.color, width: d.width, opacity: d.opacity}; });
+            return redrawArrows();
+        }).then(function() {
+            applyToolStyle();
+            // Fixed, not measured from the DOM (e.g. scrollHeight) -
+            // a measured height fed back into another setFrameHeight
+            // call is exactly the kind of feedback loop that made an
+            // early prototype of this component's iframe grow to
+            // over a million pixels tall. +40 for the OHLC summary
+            // line, +90 for the toolbar (a bit more than it usually
+            // needs, in case its buttons wrap to a second row in a
+            // narrower window).
+            setFrameHeight((figure.layout.height || 500) + 40 + 90);
+
+            gd.on("plotly_hover", function(eventData) {
+                if (!eventData.points || !eventData.points.length) return;
+                var key = barKey(eventData.points[0].x);
+                // hovermode "x" (see build_figure()) fires one point per
+                // trace sharing that x - candlestick/MA/volume traces
+                // never set "text", so the first point that HAS one is
+                // whichever marker (entry/exit or a drawn arrow) is at
+                // this bar, if any.
+                var markerText = null;
+                for (var i = 0; i < eventData.points.length; i++) {
+                    if (eventData.points[i].text) {
+                        markerText = eventData.points[i].text;
+                        break;
+                    }
+                }
+                if (dailyByKey.hasOwnProperty(key)) showDailyInfo(dailyByKey[key], markerText);
+            });
+
+            gd.on("plotly_unhover", function() { showDailyInfo(lastIndex); });
+
+            gd.on("plotly_click", function(eventData) {
+                if (!eventData.points || !eventData.points.length) return;
+                if (currentTool !== "arrow_up" && currentTool !== "arrow_down" && currentTool !== "erase") return;
+                var key = barKey(eventData.points[0].x);
+                if (!dailyByKey.hasOwnProperty(key)) return;
+                var idx = dailyByKey[key];
+                var x = fitPayload.daily.x[idx];
+
+                if (currentTool === "erase") {
+                    removeArrowAt(x);
+                    return;
+                }
+
+                var range = (fitPayload.daily.high[idx] - fitPayload.daily.low[idx])
+                    || (fitPayload.daily.low[idx] * 0.01) || 1;
+                var margin = range * 0.6;
+                var point = {
+                    x: x,
+                    y: currentTool === "arrow_up" ? fitPayload.daily.low[idx] - margin : fitPayload.daily.high[idx] + margin,
+                    color: toolColor, width: toolWidth, opacity: toolOpacity,
+                };
+                (currentTool === "arrow_up" ? arrowsUp : arrowsDown).push(point);
+                redrawArrows().then(reportDrawings);
+            });
+
+            var pending = null;
+            gd.on("plotly_relayout", function(eventData) {
+                if (eventData["xaxis.range[0]"] !== undefined && eventData["xaxis.range[1]"] !== undefined) {
+                    var xmin = new Date(eventData["xaxis.range[0]"]).getTime();
+                    var xmax = new Date(eventData["xaxis.range[1]"]).getTime();
+                    if (pending) clearTimeout(pending);
+                    pending = setTimeout(function() { fitYAxes(xmin, xmax); }, 120);
+                } else if (eventData["xaxis.autorange"]) {
+                    if (pending) clearTimeout(pending);
+                    var update = {"yaxis.autorange": true};
+                    if (gd.layout.yaxis2) update["yaxis2.autorange"] = true;
+                    if (gd.layout.yaxis3) update["yaxis3.autorange"] = true;
+                    Plotly.relayout(gd, update).then(function() {
+                        var range = gd.layout.yaxis && gd.layout.yaxis.range;
+                        if (range) repositionMarkers(range);
+                    });
+                }
+
+                var shapeChanged = Object.keys(eventData).some(function(k) { return k.indexOf("shapes") === 0; });
+                if (shapeChanged) reportDrawingsDebounced();
+            });
+        });
+    }
+
+    // ---- Wire up to Streamlit last, so everything above is ready
+    // before any render event can arrive. ----
+    window.addEventListener("message", function(event) {
+        var data = event.data;
+        if (!data || data.type !== "streamlit:render") return;
+        var args = data.args;
+        // Only rebuild the whole chart when something OTHER than
+        // drawings changed (new symbol, timeframe, chart settings) -
+        // charting.py computes chart_signature from everything except
+        // the drawings themselves, specifically so that saving a
+        // drawing (which triggers a normal Streamlit rerun, which
+        // re-invokes this component) doesn't reset your current pan/
+        // zoom position or which tool is selected.
+        if (args.chart_signature === lastSignature) return;
+        lastSignature = args.chart_signature;
+        figure = JSON.parse(args.fig_json);
+        fitPayload = JSON.parse(args.fit_json);
+        drawings = args.drawings || [];
+        initChart();
+    });
+    sendToStreamlit("streamlit:componentReady", {apiVersion: 1});
+})();
+</script>
+</body>
+</html>

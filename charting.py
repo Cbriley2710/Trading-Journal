@@ -22,17 +22,31 @@ nightly archive script pass entry-only dicts (exit_date/sell_price = None),
 since those positions haven't been sold yet.
 """
 
+import hashlib
+import json
 import re
 from datetime import timedelta
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 import yfinance as yf
 from yfinance.exceptions import YFRateLimitError
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 import database
+
+# A real bidirectional custom component (see chart_component/index.html) -
+# not a plain st.iframe embed, which can only receive data FROM Python.
+# Drawing tools need the opposite direction too (what did you draw, so it
+# can be saved), which only a properly declared component supports.
+# `path` serves that folder's files as-is (no separate dev server or
+# build step needed - just static files), so it works the same locally
+# and once deployed.
+_CHART_COMPONENT_DIR = Path(__file__).parent / "chart_component"
+_chart_component = components.declare_component("trading_journal_chart", path=str(_CHART_COMPONENT_DIR))
 
 # These stay separate from the chart's own candle colors below - they're
 # used for *trade outcome* meaning elsewhere (win/loss stat tiles,
@@ -362,11 +376,14 @@ def build_archive_snapshot(symbol, entry_date, buy_price, entry_label, as_of, di
     what you've actually configured. `direction` ("LONG" or "SHORT")
     decides which way the entry marker points - see build_figure().
     `stop_loss`, if given, draws the same thin grey stop line the
-    interactive chart shows. Returns PNG bytes, or None if no price
-    data was found.
+    interactive chart shows. Also includes this symbol's saved
+    drawings (see database.get_drawings()), the same as the
+    interactive chart. Returns PNG bytes, or None if no price data
+    was found.
     """
     conn = database.get_connection()
     saved_prefs = database.get_chart_preferences(conn)
+    drawings = database.get_drawings(conn, symbol)
     ma_periods = parse_ma_periods(saved_prefs["ma_text"])
     ma_colors = {
         period: saved_prefs["ma_colors"].get(str(period), CATEGORICAL_PALETTE[i % len(CATEGORICAL_PALETTE)])
@@ -394,7 +411,7 @@ def build_archive_snapshot(symbol, entry_date, buy_price, entry_label, as_of, di
 
     fig, _fit_payload = build_figure(
         symbol, history, entry_point, settings, entry_label=entry_label, visible_range=visible_range,
-        stop_loss=stop_loss)
+        stop_loss=stop_loss, drawings=drawings)
     return render_png(fig)
 
 
@@ -511,7 +528,7 @@ def render_settings_toolbar(container, key_prefix):
 
 
 def build_figure(symbol, history, entry_point, settings, overlay_history=None, entry_label="Entry", interval="1d",
-                  visible_range=None, stop_loss=None):
+                  visible_range=None, stop_loss=None, drawings=None):
     """
     Builds the go.Figure for a price chart: candlestick or line, moving
     averages, an entry marker (plus an exit marker and connecting line if
@@ -538,6 +555,16 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
     scroll/zoom into on either side without an immediate empty edge.
     `stop_loss`, if given, draws a thin grey line at that price - only
     open positions have one (see database.get_stop_loss()).
+
+    `drawings`, if given, is a symbol's saved line/rect/arrow_up/
+    arrow_down shapes (see database.get_drawings()). Only the line/rect
+    ones are baked in here, as native Plotly shapes - up/down arrow
+    markers are handled entirely client-side by the chart component
+    (see chart_component/index.html), since they aren't a real Plotly
+    shape type. This still matters for the ARCHIVED snapshot image
+    (build_archive_snapshot(), which has no JS runtime to add anything
+    client-side) - the interactive chart component re-adds its own
+    arrow markers on top of whatever this function draws.
     """
     entry_date = entry_point["entry_date"]
     buy_price = entry_point["buy_price"]
@@ -606,6 +633,39 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
         row_heights=[0.75, 0.25], vertical_spacing=0.03,
         specs=[[{"secondary_y": True}], [{}]],
     )
+
+    for drawing in (drawings or []):
+        if drawing["type"] not in ("line", "rect"):
+            continue  # arrow_up/arrow_down are handled separately below - not a real Plotly shape type
+        shape_kwargs = dict(
+            type=drawing["type"], x0=drawing["x0"], y0=drawing["y0"], x1=drawing["x1"], y1=drawing["y1"],
+            line=dict(color=drawing["color"], width=drawing["width"]), opacity=drawing["opacity"],
+        )
+        if drawing["type"] == "rect":
+            shape_kwargs["fillcolor"] = drawing["color"]
+        fig.add_shape(row=1, col=1, **shape_kwargs)
+
+    # Up/down arrow markers aren't a real Plotly shape type (only
+    # line/rect/circle/path are), so they're plotted the same way as
+    # the entry/exit markers elsewhere in this file: a Scatter trace
+    # using triangle-up/triangle-down marker symbols. The interactive
+    # chart component re-draws these itself as you add/move/erase them
+    # (see chart_component/index.html) - rendering them here too is
+    # what makes them show up in the non-interactive archived Logbook
+    # snapshot (build_archive_snapshot()), which has no JS runtime to
+    # draw anything client-side.
+    for arrow_symbol, drawing_type in (("triangle-up", "arrow_up"), ("triangle-down", "arrow_down")):
+        arrows = [d for d in (drawings or []) if d["type"] == drawing_type]
+        if not arrows:
+            continue
+        fig.add_trace(go.Scatter(
+            x=[d["x0"] for d in arrows], y=[d["y0"] for d in arrows], mode="markers",
+            marker=dict(
+                symbol=arrow_symbol, size=[d["width"] * 5 + 6 for d in arrows],
+                color=[d["color"] for d in arrows], opacity=[d["opacity"] for d in arrows],
+            ),
+            showlegend=False, name=f"__{drawing_type}",
+        ), row=1, col=1)
 
     fit_payload["price"].append({
         "x": [ts.isoformat() for ts in history.index],
@@ -866,319 +926,54 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
     return fig, fit_payload
 
 
-_INTERACTIVE_CHART_HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<style>
-    /* Without this reset, the browser's default body margin makes the
-       page a few pixels taller/wider than the iframe box around it,
-       which triggers unwanted scrollbars - and the horizontal one then
-       overlaps the bottom of the chart, right where the x-axis date
-       labels are. */
-    html, body { margin: 0; padding: 0; overflow: hidden; background: __CHART_BACKGROUND__; }
-    /* Plotly's own drag-catching layer defaults to a plain arrow/grab
-       cursor since dragmode is "pan" - forcing it to a crosshair matches
-       the crosshair spike lines already drawn on hover, without changing
-       the actual pan/scroll behavior underneath. */
-    #__DIV_ID__ .nsewdrag { cursor: crosshair !important; }
-</style>
-</head>
-<body>
-<!-- The live OHLC summary line - same format as the old static caption
-     ("MU - Daily  O ... H ... L ... C ... V ... Chg ... Chg% ..."), but
-     it now lives INSIDE this component so the hover script below can
-     update it to whichever bar the crosshair is over. -->
-<div id="__DIV_ID__-summary" style="font-family:sans-serif; font-size:0.85rem; font-weight:600;
-     color:__CHART_TEXT_COLOR__; padding:6px 10px 0 10px; white-space:nowrap;">&nbsp;</div>
-<div id="__DIV_ID__" style="width:100%;"></div>
-<script src="https://cdn.plot.ly/plotly-2.35.3.min.js"></script>
-<script>
-(function() {
-    var figure = __FIG_JSON__;
-    // A separate, plain-JSON record of the real price/volume data (not
-    // parsed back out of Plotly's own figure JSON, which uses a compact
-    // binary array encoding that isn't reliably indexable from here) -
-    // see build_figure()'s fit_payload for how this is built.
-    var fitPayload = __FIT_JSON__;
-    var config = {scrollZoom: true, displayModeBar: false, responsive: true};
-
-    // The min/max of one series actually within [xmin, xmax], or null if
-    // nothing in it falls in that window.
-    function seriesExtent(series, xmin, xmax) {
-        var lo = Infinity, hi = -Infinity;
-        for (var i = 0; i < series.x.length; i++) {
-            var t = new Date(series.x[i]).getTime();
-            if (t < xmin || t > xmax) continue;
-            var a = series.lo[i], b = series.hi[i];
-            if (a !== null && a !== undefined && !isNaN(a) && a < lo) lo = a;
-            if (b !== null && b !== undefined && !isNaN(b) && b > hi) hi = b;
-        }
-        if (lo === Infinity) return null;
-        return [lo, hi];
-    }
-
-    // Recomputes the price axis (and the volume axis, separately) to
-    // fit exactly what's visible in [xmin, xmax] - this is the part
-    // Plotly's own scroll-zoom doesn't do on its own.
-    function fitYAxes(gd, xmin, xmax) {
-        var relayout = {};
-        var priceRange = null;
-        // Plotly names axes in creation order, not visual/logical order -
-        // make_subplots(specs=[[{secondary_y:true}], [{}]]) creates the
-        // row-1 secondary axis (the overlay ticker's own scale) BEFORE
-        // row 2's own axis (volume), so volume ends up "yaxis3" and the
-        // overlay ends up "yaxis2" - the reverse of what the names might
-        // suggest at a glance.
-        [["price", "yaxis"], ["volume", "yaxis3"], ["overlay", "yaxis2"]].forEach(function(pair) {
-            var seriesList = fitPayload[pair[0]];
-            if (!seriesList || !seriesList.length) return;
-            var lo = Infinity, hi = -Infinity;
-            seriesList.forEach(function(series) {
-                var ext = seriesExtent(series, xmin, xmax);
-                if (!ext) return;
-                if (ext[0] < lo) lo = ext[0];
-                if (ext[1] > hi) hi = ext[1];
-            });
-            if (lo === Infinity) return;
-            var pad = (hi - lo) * 0.08 || Math.abs(hi) * 0.08 || 1;
-            relayout[pair[1] + ".range"] = [lo - pad, hi + pad];
-            relayout[pair[1] + ".autorange"] = false;
-            if (pair[0] === "price") priceRange = [lo - pad, hi + pad];
-        });
-        if (Object.keys(relayout).length) {
-            Plotly.relayout(gd, relayout);
-        }
-        // Deliberately AFTER computing the price range above, not part
-        // of it - see repositionMarkers()'s own comment for why an
-        // entry/exit/"Added" marker's fake, off-price position must
-        // never feed into that calculation itself.
-        if (priceRange) {
-            repositionMarkers(gd, priceRange);
-        }
-    }
-
-    // Keeps any entry/exit/"Added" marker trace (tagged via trace.meta
-    // === "entry_exit_marker", set in build_figure()) sitting just
-    // above the bottom of whatever the price axis's range actually is
-    // right now. This is deliberately NOT part of fitYAxes()'s own fit
-    // calculation - a marker's position here is a fixed decorative
-    // "just above the volume panel" spot, not a real price, so feeding
-    // it into that calculation would drag the axis down to include it,
-    // squashing the real candles into a thin band at the top instead of
-    // using the chart's full height (a real bug this replaced).
-    function repositionMarkers(gd, priceRange) {
-        var lo = priceRange[0], hi = priceRange[1];
-        var markerY = lo + (hi - lo) * 0.03;
-        var indices = [];
-        gd.data.forEach(function(trace, i) {
-            if (trace.meta === "entry_exit_marker") indices.push(i);
-        });
-        if (!indices.length) return;
-        var newYs = indices.map(function(i) {
-            return gd.data[i].y.map(function() { return markerY; });
-        });
-        Plotly.restyle(gd, {y: newYs}, indices);
-    }
-
-    // Turns any timestamp string into one canonical "YYYY-MM-DD HH:MM"
-    // key by pure text manipulation - deliberately NOT via new Date(),
-    // because JavaScript parses a date-only string ("2026-07-17", how
-    // Plotly reports a daily bar's x in its hover event) as UTC but a
-    // datetime string ("2026-07-17T00:00:00", how fitPayload's ISO
-    // strings look) as LOCAL time, so the two never produce the same
-    // epoch value even though they describe the same bar - which is
-    // exactly the mismatch that kept the summary line from updating.
-    function barKey(x) {
-        var s = String(x).replace("T", " ");
-        if (s.length === 10) s += " 00:00";
-        return s.slice(0, 16);
-    }
-
-    // Maps each bar's canonical key to its index in fitPayload.daily,
-    // so the summary line can look up the bar under the cursor.
-    var dailyByKey = {};
-    var lastIndex = null;
-    if (fitPayload.daily) {
-        fitPayload.daily.x.forEach(function(iso, i) {
-            dailyByKey[barKey(iso)] = i;
-            lastIndex = i;
-        });
-    }
-
-    var monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                       "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-
-    // Reads the date parts straight out of the ISO string (again, no
-    // new Date() - see barKey above for why parsing is a trap here).
-    function formatDate(iso) {
-        var s = String(iso);
-        var month = parseInt(s.slice(5, 7), 10);
-        var day = parseInt(s.slice(8, 10), 10);
-        return monthNames[month - 1] + " " + day + ", " + s.slice(0, 4);
-    }
-
-    function formatPrice(v) {
-        if (v === null || v === undefined) return "N/A";
-        return v.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
-    }
-
-    function formatVolume(v) {
-        if (v === null || v === undefined) return "N/A";
-        if (v >= 1e9) return (v / 1e9).toFixed(1) + "B";
-        if (v >= 1e6) return (v / 1e6).toFixed(1) + "M";
-        if (v >= 1e3) return (v / 1e3).toFixed(1) + "K";
-        return Math.round(v).toLocaleString();
-    }
-
-    // Rewrites the summary line above the chart for one bar's data -
-    // the date plus O/H/L/C/V, and Chg/Chg% colored green or red.
-    // `markerText` (optional) is an entry/exit/"Added" marker's own
-    // hover text - see the plotly_hover handler below for where it
-    // comes from - appended on its own line when the crosshair is
-    // lined up with one, since Plotly's own native hover popup is
-    // turned off everywhere on this chart (see build_figure() in
-    // charting.py) in favor of this single summary line.
-    function showDailyInfo(index, markerText) {
-        var el = document.getElementById("__DIV_ID__-summary");
-        if (index === null || index === undefined) {
-            el.innerHTML = "&nbsp;";
-            return;
-        }
-        var d = fitPayload.daily;
-        var meta = fitPayload.meta || {symbol: "", interval_label: ""};
-        var parts = [
-            meta.symbol + " · " + meta.interval_label,
-            formatDate(d.x[index]),
-            "O " + formatPrice(d.open[index]),
-            "H " + formatPrice(d.high[index]),
-            "L " + formatPrice(d.low[index]),
-            "C " + formatPrice(d.close[index]),
-            "V " + formatVolume(d.volume[index]),
-        ];
-        var html = parts.join("&nbsp;&nbsp; ");
-        var chg = d.chg[index], pct = d.pct[index];
-        if (chg !== null && chg !== undefined && pct !== null && pct !== undefined) {
-            var sign = chg >= 0 ? "+" : "";
-            var color = chg >= 0 ? "__GOOD_COLOR__" : "__CRITICAL_COLOR__";
-            html += "&nbsp;&nbsp; <span style='color:" + color + ";'>"
-                + "Chg " + sign + formatPrice(chg)
-                + "&nbsp;&nbsp; Chg% " + sign + pct.toFixed(2) + "%</span>";
-        }
-        if (markerText) {
-            html += "<br>" + markerText;
-        }
-        el.innerHTML = html;
-    }
-
-    Plotly.newPlot("__DIV_ID__", figure.data, figure.layout, config).then(function(gd) {
-        // Starts on the most recent bar until you actually hover.
-        showDailyInfo(lastIndex);
-
-        // Fits the y-axis to the initial visible window right away -
-        // without this, the price/volume scale stayed sized to the
-        // FULL fetched history (including all the extra data fetched
-        // outside the visible window - see FETCH_BUFFER_MULTIPLIER)
-        // until the first scroll/pan triggered the plotly_relayout
-        // handler below, which is the only other place this ran.
-        var initialRange = gd.layout.xaxis && gd.layout.xaxis.range;
-        if (initialRange && initialRange.length === 2) {
-            fitYAxes(gd, new Date(initialRange[0]).getTime(), new Date(initialRange[1]).getTime());
-        }
-
-        gd.on("plotly_hover", function(eventData) {
-            if (!eventData.points || !eventData.points.length) return;
-            var key = barKey(eventData.points[0].x);
-            // hovermode "x" (see build_figure()) fires one point per
-            // trace sharing that x - an entry/exit/"Added" marker is
-            // the only trace on this chart with its own "text" set, so
-            // its presence here is what flags "the crosshair is lined
-            // up with a marker, not just a bar."
-            var markerText = null;
-            for (var i = 0; i < eventData.points.length; i++) {
-                if (eventData.points[i].text) { markerText = eventData.points[i].text; break; }
-            }
-            if (dailyByKey.hasOwnProperty(key)) {
-                showDailyInfo(dailyByKey[key], markerText);
-            }
-        });
-
-        gd.on("plotly_unhover", function() {
-            showDailyInfo(lastIndex);
-        });
-
-        // Debounced: calling Plotly.relayout() synchronously on every
-        // single scroll-wheel tick fights with Plotly's own in-progress
-        // zoom/pan handling (a rapid sequence of scroll events each
-        // triggering another relayout mid-gesture), which is what made
-        // scrolling/panning feel stuck instead of smooth. Waiting for a
-        // brief pause in the events avoids interrupting the gesture.
-        var pending = null;
-        gd.on("plotly_relayout", function(eventData) {
-            if (eventData["xaxis.range[0]"] !== undefined && eventData["xaxis.range[1]"] !== undefined) {
-                var xmin = new Date(eventData["xaxis.range[0]"]).getTime();
-                var xmax = new Date(eventData["xaxis.range[1]"]).getTime();
-                if (pending) clearTimeout(pending);
-                pending = setTimeout(function() {
-                    fitYAxes(gd, xmin, xmax);
-                }, 120);
-            } else if (eventData["xaxis.autorange"]) {
-                if (pending) clearTimeout(pending);
-                var update = {"yaxis.autorange": true};
-                if (gd.layout.yaxis2) { update["yaxis2.autorange"] = true; }
-                if (gd.layout.yaxis3) { update["yaxis3.autorange"] = true; }
-                Plotly.relayout(gd, update).then(function() {
-                    // Only after the relayout promise resolves does
-                    // gd.layout.yaxis.range hold the actual numbers
-                    // Plotly's own autorange landed on (the request
-                    // above only says "autorange", not what to) - same
-                    // reasoning as fitYAxes() above for why markers are
-                    // repositioned from the result, not computed as
-                    // part of it.
-                    var range = gd.layout.yaxis && gd.layout.yaxis.range;
-                    if (range) repositionMarkers(gd, range);
-                });
-            }
-        });
-    });
-})();
-</script>
-</body>
-</html>
-"""
-
-
-def render_interactive_chart(fig, fit_payload):
+def _chart_signature(fig):
     """
-    Renders a chart via a small embedded Plotly.js component instead of
-    st.plotly_chart, so a custom zoom/pan handler can refit the price
-    (and volume) axis to whatever's actually visible - something
-    Plotly's built-in scroll-zoom doesn't do on its own (it only
-    rescales the existing range proportionally; it doesn't recompute a
-    fresh min/max from the currently-visible data). The y-axes are
-    already fixedrange (see build_figure()) so direct mouse/scroll
-    interaction can't move them on its own - only this script's own
-    computed relayout calls do, whenever the visible time window changes.
+    A stable fingerprint of a figure's DATA - everything except its
+    drawn shapes (line/rect annotations - see build_figure()'s
+    `drawings` parameter). render_interactive_chart() below uses this
+    to tell the chart component "this is still fundamentally the same
+    chart" versus "this is a genuinely different chart now" (a new
+    symbol, timeframe, or Chart Settings change).
 
-    `fit_payload` is the second value build_figure() returns alongside
-    the figure itself.
+    That distinction matters because saving a drawing triggers a normal
+    Streamlit rerun (like any widget), which re-invokes the component
+    with fresh args - without this signature, the component couldn't
+    tell that apart from an actual chart change, and would rebuild the
+    whole chart on every single drawing edit, resetting your current
+    pan/zoom position and selected tool every time.
     """
-    import json
-    import uuid
+    fig_dict = fig.to_dict()
+    fig_dict["layout"] = {k: v for k, v in fig_dict["layout"].items() if k != "shapes"}
+    return hashlib.md5(json.dumps(fig_dict, sort_keys=True, default=str).encode()).hexdigest()
 
-    div_id = f"chart-{uuid.uuid4().hex[:8]}"
-    # +40 leaves room for the live OHLC summary line above the chart.
-    height = (fig.layout.height or 500) + 40
 
-    html = (
-        _INTERACTIVE_CHART_HTML
-        .replace("__CHART_BACKGROUND__", CHART_BACKGROUND)
-        .replace("__CHART_TEXT_COLOR__", CHART_TEXT_COLOR)
-        .replace("__GOOD_COLOR__", GOOD_COLOR)
-        .replace("__CRITICAL_COLOR__", CRITICAL_COLOR)
-        .replace("__DIV_ID__", div_id)
-        .replace("__FIG_JSON__", fig.to_json())
-        .replace("__FIT_JSON__", json.dumps(fit_payload))
+def render_interactive_chart(fig, fit_payload, drawings, key):
+    """
+    Renders the chart via the trading_journal_chart custom component
+    (see chart_component/index.html and this module's own
+    _chart_component declaration up top) - a real bidirectional
+    Streamlit component, not a plain st.iframe embed, since drawing
+    tools need to send data back to Python (what you drew), which a
+    plain iframe has no way to do.
+
+    `drawings` is this symbol's current saved shapes (see
+    database.get_drawings()) - baked into the chart on load via
+    build_figure()'s own `drawings` parameter, and editable from there
+    (move/resize/erase existing ones, or add new). Returns the drawings
+    list reflecting whatever's on the chart right now; it's the
+    CALLER's job to compare that against what's saved and call
+    database.save_drawings() if it's different - this function only
+    renders and reports, it doesn't decide when to persist anything.
+
+    `key` must be unique per chart on the page, same rules as any other
+    Streamlit widget key.
+    """
+    result = _chart_component(
+        fig_json=fig.to_json(),
+        fit_json=json.dumps(fit_payload),
+        drawings=drawings,
+        chart_signature=_chart_signature(fig),
+        key=key,
+        default=drawings,
     )
-    st.iframe(html, height=height)
+    return result
