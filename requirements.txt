@@ -7,4 +7,4 @@ yfinance
 kaleido
 fpdf2
 pillow
-snaptrade-python-sdk
+snaptrade-python-sdk==12.0.0

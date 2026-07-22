@@ -37,6 +37,7 @@ from datetime import datetime
 
 import streamlit as st
 from snaptrade_client import SnapTrade
+from snaptrade_client.auth import SnapTradeAuth
 
 import timeutil
 
@@ -119,18 +120,30 @@ def _get_client():
     query parameter to a request AT ALL if this was supplied when the
     client was built (see snaptrade_client/configuration.py's
     auth_settings()); leaving it out doesn't raise an error, it just
-    silently sends every request without it. That went unnoticed for a
-    while because SnapTrade's server was apparently lenient about a
-    missing timestamp - until it started rejecting requests outright
-    with a bare "Authentication credentials were not provided" 401,
-    despite nothing changing on this app's end. A fresh timestamp is
+    silently sends every request without it. A fresh timestamp is
     generated every time this function runs (every API call rebuilds
     its own client - see every other function below), which is exactly
     what a timestamp-based check is meant to have anyway.
+
+    `auth=SnapTradeAuth.personal_api_key(...)` is required too, for a
+    similarly silent reason: requirements.txt pins no SDK version, so
+    a routine redeploy quietly picked up SDK v12, which added a new
+    "auth mode" concept - without an explicit `auth=` telling it which
+    mode this is, v12 skips computing the "Signature" header on every
+    request entirely (v11 always computed it, no `auth=` needed - see
+    snaptrade_client/auth.py and request_after_hook.py for the v12
+    change). That's the second SnapTrade secret this project's code
+    has had silently stop being sent - both times manifesting as the
+    exact same bare "Authentication credentials were not provided" 401
+    with no error on this app's own end. "personal_api_key" (not
+    "commercial_api_key") because this account uses a Personal API
+    key, per register_user()'s docstring above.
     """
     return SnapTrade(
-        client_id=_get_secret("SNAPTRADE_CLIENT_ID"),
-        consumer_key=_get_secret("SNAPTRADE_CONSUMER_KEY"),
+        auth=SnapTradeAuth.personal_api_key(
+            consumer_key=_get_secret("SNAPTRADE_CONSUMER_KEY"),
+            client_id=_get_secret("SNAPTRADE_CLIENT_ID"),
+        ),
         timestamp=str(int(time.time())),
     )
 
