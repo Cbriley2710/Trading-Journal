@@ -32,6 +32,7 @@ WHERE CREDENTIALS LIVE, IN TWO STAGES:
 """
 
 import os
+import time
 from datetime import datetime
 
 import streamlit as st
@@ -109,10 +110,28 @@ def is_registered():
 
 
 def _get_client():
-    """Builds the SnapTrade API client from your secrets."""
+    """
+    Builds the SnapTrade API client from your secrets.
+
+    `timestamp` (the current time, as a string) is required here even
+    though it looks optional in the SDK's own signature - the
+    underlying Configuration object only attaches the "timestamp"
+    query parameter to a request AT ALL if this was supplied when the
+    client was built (see snaptrade_client/configuration.py's
+    auth_settings()); leaving it out doesn't raise an error, it just
+    silently sends every request without it. That went unnoticed for a
+    while because SnapTrade's server was apparently lenient about a
+    missing timestamp - until it started rejecting requests outright
+    with a bare "Authentication credentials were not provided" 401,
+    despite nothing changing on this app's end. A fresh timestamp is
+    generated every time this function runs (every API call rebuilds
+    its own client - see every other function below), which is exactly
+    what a timestamp-based check is meant to have anyway.
+    """
     return SnapTrade(
         client_id=_get_secret("SNAPTRADE_CLIENT_ID"),
         consumer_key=_get_secret("SNAPTRADE_CONSUMER_KEY"),
+        timestamp=str(int(time.time())),
     )
 
 
