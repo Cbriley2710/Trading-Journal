@@ -73,11 +73,17 @@ trades_sorted = sorted(trades, key=lambda t: t["date"], reverse=True)
 
 entry_dates = [t["entry_date"].date() for t in trades_sorted]
 min_entry_date, max_entry_date = min(entry_dates), max(entry_dates)
+all_symbols = sorted({t["symbol"] for t in trades_sorted})
 
-date_range = st.date_input(
+filter_cols = st.columns([2, 2])
+date_range = filter_cols[0].date_input(
     "Filter by entry date", value=(min_entry_date, max_entry_date),
     min_value=min_entry_date, max_value=max_entry_date,
 )
+selected_symbols = filter_cols[1].multiselect(
+    "Filter by ticker", options=all_symbols, default=all_symbols, key="trade_analyzer_ticker_filter",
+)
+
 # date_input in range mode returns a single date until both ends have
 # been picked - only filter once we actually have a (start, end) pair,
 # so the list doesn't collapse to nothing while a user is mid-pick.
@@ -85,8 +91,10 @@ if isinstance(date_range, tuple) and len(date_range) == 2:
     range_start, range_end = date_range
     trades_sorted = [t for t in trades_sorted if range_start <= t["entry_date"].date() <= range_end]
 
+trades_sorted = [t for t in trades_sorted if t["symbol"] in selected_symbols]
+
 if not trades_sorted:
-    st.info("No trades with an entry date in this range.")
+    st.info("No trades match these filters.")
     st.stop()
 
 selected_index = st.selectbox(
