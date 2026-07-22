@@ -281,6 +281,74 @@ def fetch_latest_price(symbol):
     return recent["Close"].iloc[-1]
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_daily_closes(symbol, start, end):
+    """
+    Returns a daily closing-price Series for `symbol` from `start` to `end`
+    (inclusive), reindexed onto every single calendar day and forward-filled
+    - so a weekend or holiday carries the prior trading day's close instead
+    of leaving a gap. Used to mark a position to market day-by-day for the
+    Dashboard's equity curve (see build_mark_to_market_curve() there),
+    rather than crediting a trade's entire gain to the single day it was
+    sold. Empty Series if Yahoo Finance has no data for this symbol/range.
+
+    Cached for an hour: the Dashboard's equity curve window selector
+    (1M/3M/6M/etc.) reruns this whole page on every click, and price
+    history for any day that's already passed never changes - only
+    today's still-moving price does, so an hour-old cache is a fine
+    tradeoff against re-fetching the same symbol's history from Yahoo
+    Finance on every single widget interaction.
+    """
+    try:
+        history = yf.Ticker(symbol).history(start=start, end=end + timedelta(days=1))
+    except Exception:
+        return pd.Series(dtype=float)
+    if history.empty:
+        return pd.Series(dtype=float)
+    history.index = history.index.tz_localize(None)
+    daily_index = pd.date_range(start=start, end=end, freq="D")
+    return history["Close"].reindex(daily_index).ffill()
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def split_adjustment_factor(symbol, since):
+    """
+    Returns the cumulative stock-split ratio for every split `symbol` has
+    had strictly after `since`, up through today - 1.0 if there weren't
+    any, so callers can always multiply by this unconditionally.
+
+    Needed because yf.Ticker(...).history() always returns prices
+    restated in TODAY's post-split share terms (Yahoo rewrites its whole
+    price history so a chart never shows a fake jump right on the split
+    date) - a real trade price recorded on `since` reflects the share
+    count that existed THEN, not today's. SQQQ (a leveraged ETF prone to
+    periodic reverse splits from value decay) is what surfaced this: a
+    trade from before one of its reverse splits showed an almost
+    100,000% one-day "gain" in the equity curve, purely from comparing a
+    real, un-adjusted historical entry price against yfinance's already
+    split-adjusted daily closes - not a real price move at all. Dividing
+    a stored entry price by this factor (and multiplying quantity by it)
+    converts it into the same today's-share-terms convention
+    fetch_daily_closes() already returns, before the two get compared.
+
+    Cached for a day (splits are rare, announced well in advance, and
+    won't change mid-session) rather than an hour like
+    fetch_daily_closes() - there's no "still-moving" value here to
+    justify checking more often.
+    """
+    try:
+        splits = yf.Ticker(symbol).splits
+    except Exception:
+        return 1.0
+    if splits.empty:
+        return 1.0
+    since_ts = pd.Timestamp(since)
+    if since_ts.tzinfo is None and splits.index.tz is not None:
+        since_ts = since_ts.tz_localize(splits.index.tz)
+    later_splits = splits[splits.index > since_ts]
+    return float(later_splits.prod()) if not later_splits.empty else 1.0
+
+
 def style_simple_chart(fig, value_axis_title, height=350, horizontal=False):
     """
     Applies this app's shared dark look to a plain bar/line figure -

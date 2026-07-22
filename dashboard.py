@@ -186,15 +186,95 @@ else:
 
 st.divider()
 
+def build_mark_to_market_curve(trades_records, open_positions, daily_index):
+    """
+    Builds a day-by-day account P/L series across every day in
+    `daily_index` - a real, mark-to-market equity curve, not just "credit
+    the whole gain to the day a position was sold." A CLOSED trade
+    contributes its actual day-by-day paper gain/loss (from real daily
+    closing prices - see charting.fetch_daily_closes()) for every day it
+    was open, then its real realized profit_loss (not a price estimate)
+    from its exit day onward. A currently OPEN position contributes that
+    same day-by-day paper gain/loss all the way through to today.
+
+    Without this, a position held for two months but sold in one big win
+    showed up as a single vertical jump on the day it was sold - real,
+    accurate P/L, but visually misleading, since none of the gain was
+    actually "made" that one day; it built up gradually while the
+    position was open. This spreads it back out across the days it
+    actually happened.
+
+    `trades_records`/`open_positions` are plain dict records (from
+    DataFrame.to_dict("records") / database.get_open_positions()) rather
+    than DataFrames, since this loops row by row anyway.
+    """
+    total = pd.Series(0.0, index=daily_index)
+
+    for trade in trades_records:
+        entry = pd.Timestamp(trade["entry_date"])
+        exit_ = pd.Timestamp(trade["date"])
+        is_short = trade["direction"] == "SHORT"
+        entry_price = trade["sell_price"] if is_short else trade["buy_price"]
+
+        closes = charting.fetch_daily_closes(trade["symbol"], entry, exit_)
+        if closes.empty:
+            # No price history for this stretch - fall back to crediting
+            # the whole gain on the exit day rather than losing it entirely.
+            contribution = pd.Series(0.0, index=daily_index)
+            contribution.loc[contribution.index >= exit_] = trade["profit_loss"]
+            total += contribution
+            continue
+
+        # Converts the real, un-adjusted price/quantity from the actual
+        # trade into the SAME "today's share count" terms fetch_daily_
+        # closes() already returns - see split_adjustment_factor()'s own
+        # docstring for why comparing them directly (without this) can
+        # show a fake, enormous one-day "gain" for a stock that later
+        # did a split (SQQQ's reverse splits are what surfaced this).
+        factor = charting.split_adjustment_factor(trade["symbol"], entry)
+        adjusted_entry_price = entry_price / factor
+        adjusted_quantity = trade["quantity"] * factor
+
+        paper_pl = (closes - adjusted_entry_price) * adjusted_quantity * (-1 if is_short else 1)
+        # The exit day's own estimate (from that day's closing price) is
+        # replaced with the REAL booked profit_loss - a real fill price
+        # during the day can differ slightly from that day's close, and
+        # this is the one number we actually know for certain. Reindexing
+        # onto the full daily_index and forward-filling then carries that
+        # real number forward through every day after (today included).
+        paper_pl.loc[exit_] = trade["profit_loss"]
+        contribution = paper_pl.reindex(daily_index).ffill().fillna(0)
+        total += contribution
+
+    for position in open_positions:
+        entry = pd.Timestamp(position["entry_date"])
+        is_short = position["direction"] == "SHORT"
+
+        closes = charting.fetch_daily_closes(position["symbol"], entry, daily_index.max())
+        if closes.empty:
+            continue
+
+        factor = charting.split_adjustment_factor(position["symbol"], entry)
+        adjusted_entry_price = position["avg_price"] / factor
+        adjusted_quantity = position["quantity"] * factor
+
+        paper_pl = (closes - adjusted_entry_price) * adjusted_quantity * (-1 if is_short else 1)
+        total += paper_pl.reindex(daily_index).ffill().fillna(0)
+
+    return total
+
+
 # --- Equity curve ---------------------------------------------------------
 # Shown as % gain, not $ - so it lines up with the Account Performance
 # tiles above, which use the same convention: every % is against the
 # Jan 1 baseline specifically, not a real point-in-time account value
-# (we don't have historical account-value snapshots to build a true
+# (we don't have historical account-VALUE snapshots to build a true
 # equity curve from - see Account Performance's own comment above for
-# why). Each window re-starts its cumulative total at 0% at the start
-# of that window, so "1 Year" shows the gain made DURING the last
-# year, not the whole account's history compressed into one window.
+# why - but we DO have real daily PRICE history, which is what
+# build_mark_to_market_curve() above uses). Each window re-starts its
+# cumulative total at 0% at the start of that window, so "1 Year" shows
+# the gain made DURING the last year, not the whole account's history
+# compressed into one window.
 st.subheader("Equity Curve")
 
 if not jan1_balance:
@@ -202,6 +282,8 @@ if not jan1_balance:
         "Set your account value as of Jan 1 (Account Settings below) "
         "to see the equity curve as a % gain."
     )
+elif filtered.empty:
+    st.warning("No trades match the current filters.")
 else:
     window_labels = ["1M", "3M", "6M", "1Y", "3Y", "All Time"]
     equity_window = st.radio(
@@ -217,43 +299,38 @@ else:
         "All Time": None,
     }
     cutoff = window_cutoffs[equity_window]
-    window_trades = filtered if cutoff is None else filtered[filtered["date"] >= cutoff]
 
-    if window_trades.empty:
-        st.warning("No trades in this window.")
-    else:
-        equity = window_trades.copy()
-        equity["cumulative_pl"] = equity["profit_loss"].cumsum()
+    # The FULL mark-to-market curve (every day since this account's very
+    # first trade) is built once, regardless of which window is
+    # selected, then just sliced/re-based per window below - the
+    # expensive part (fetching each symbol's price history) is cached in
+    # charting.fetch_daily_closes(), so switching windows doesn't
+    # re-fetch anything, it just re-slices numbers already in hand.
+    full_start = filtered["entry_date"].min()
+    full_daily_index = pd.date_range(start=full_start, end=today, freq="D")
+    open_positions_for_curve = [
+        p for p in database.get_open_positions(conn) if p["symbol"] in selected_symbols
+    ]
 
-        # Plotting one point per TRADE (rather than per day) is what
-        # made this look jagged - a straight diagonal line was drawn
-        # connecting whichever two trades happened to close next to
-        # each other, even if that was two months apart, instead of
-        # showing the account sitting flat in between. Reindexing onto
-        # every single day (forward-filling the last known cumulative
-        # total between trade-close days) turns that into a proper
-        # day-by-day line: flat where nothing closed, stepping only on
-        # a day something actually did. `window_start` is the fixed
-        # calendar cutoff for a sized window (so "1Y" always spans a
-        # full year back, flat at 0% before whatever the first trade
-        # in that window happened to be) - only "All Time" falls back
-        # to the first trade's own date, since it has no fixed edge.
-        window_start = cutoff if cutoff is not None else equity["date"].min()
-        daily_index = pd.date_range(start=window_start, end=today, freq="D")
-        daily_pl = equity.groupby(equity["date"].dt.normalize())["cumulative_pl"].last()
-        daily_pl = daily_pl.reindex(daily_index).ffill().fillna(0)
-        daily_pct = daily_pl / jan1_balance * 100
+    with st.spinner("Fetching price history for the equity curve..."):
+        full_curve_pl = build_mark_to_market_curve(
+            filtered.to_dict("records"), open_positions_for_curve, full_daily_index)
 
-        equity_chart = go.Figure()
-        equity_chart.add_hline(y=0, line_color=BASELINE_COLOR, line_width=1)
-        equity_chart.add_trace(go.Scatter(
-            x=daily_index,
-            y=daily_pct,
-            mode="lines",
-            line=dict(color=LINE_COLOR, width=2),
-            hovertemplate="%{x|%b %d, %Y}<br>Cumulative: %{y:+.2f}%<extra></extra>",
-        ))
-        st.plotly_chart(charting.style_simple_chart(equity_chart, "% Gain"), theme=None)
+    window_start = max(cutoff, full_daily_index.min()) if cutoff is not None else full_daily_index.min()
+    baseline = full_curve_pl.asof(window_start)
+    window_curve = full_curve_pl.loc[window_start:] - baseline
+    window_pct = window_curve / jan1_balance * 100
+
+    equity_chart = go.Figure()
+    equity_chart.add_hline(y=0, line_color=BASELINE_COLOR, line_width=1)
+    equity_chart.add_trace(go.Scatter(
+        x=window_pct.index,
+        y=window_pct.values,
+        mode="lines",
+        line=dict(color=LINE_COLOR, width=2),
+        hovertemplate="%{x|%b %d, %Y}<br>Cumulative: %{y:+.2f}%<extra></extra>",
+    ))
+    st.plotly_chart(charting.style_simple_chart(equity_chart, "% Gain"), theme=None)
 
 # --- Holding period vs. return scatter -------------------------------------
 # One dot per trade: how many days it was held (x) against how much it
