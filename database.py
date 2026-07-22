@@ -317,6 +317,24 @@ def init_db(conn):
             CONSTRAINT single_row CHECK (id = 1)
         )
     """)
+    # The guided Journal Session's progress (see pages/2_Shortlist.py's
+    # render_journal_session()) - which tickers were in the queue and how
+    # far you'd gotten - saved here (not just st.session_state) so
+    # closing the tab, or Streamlit Cloud putting the app to sleep from
+    # inactivity, doesn't lose your place partway through a session.
+    # `queue` stores plain {"symbol", "source"} pairs, not the full
+    # entry_point/position data - that's always re-derived fresh from
+    # the live positions/watchlist on resume (see
+    # pages/2_Shortlist.py's build_journal_queue()).
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS journal_session_progress (
+            id INTEGER PRIMARY KEY DEFAULT 1,
+            queue JSONB NOT NULL,
+            current_index INTEGER NOT NULL,
+            started_at TIMESTAMP NOT NULL DEFAULT NOW(),
+            CONSTRAINT single_row CHECK (id = 1)
+        )
+    """)
     conn.commit()
 
 
@@ -776,6 +794,54 @@ def save_chart_preferences(conn, ma_text, ma_colors, ma_type):
         """,
         (ma_text, Json({str(k): v for k, v in ma_colors.items()}), ma_type),
     )
+    conn.commit()
+
+
+def save_journal_session_progress(conn, queue_symbols, current_index):
+    """
+    Persists the guided Journal Session's progress: `queue_symbols` is a
+    list of {"symbol": ..., "source": "position"/"watchlist"} pairs (the
+    order the session is working through), `current_index` is how far
+    into it you'd gotten. Overwrites whatever was saved before - there's
+    only ever one in-progress session. Called every time the session
+    advances (Save & Next, or Skip), not just at the start, so a lost
+    connection partway through still resumes from the last ticker you
+    actually finished, not the first one.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO journal_session_progress (id, queue, current_index)
+        VALUES (1, %s, %s)
+        ON CONFLICT (id) DO UPDATE SET
+            queue = EXCLUDED.queue,
+            current_index = EXCLUDED.current_index
+        """,
+        (Json(queue_symbols), current_index),
+    )
+    conn.commit()
+
+
+def get_journal_session_progress(conn):
+    """
+    Returns the saved Journal Session progress as
+    {"queue": [{"symbol", "source"}, ...], "current_index": N}, or None
+    if there's no session in progress right now.
+    """
+    cur = conn.cursor()
+    cur.execute("SELECT queue, current_index FROM journal_session_progress WHERE id = 1")
+    row = cur.fetchone()
+    if row is None:
+        return None
+    return {"queue": row[0], "current_index": row[1]}
+
+
+def clear_journal_session_progress(conn):
+    """Deletes the saved Journal Session progress - called once a
+    session finishes normally (every ticker in it got journaled or
+    skipped), since there's nothing left to offer to resume."""
+    cur = conn.cursor()
+    cur.execute("DELETE FROM journal_session_progress WHERE id = 1")
     conn.commit()
 
 
