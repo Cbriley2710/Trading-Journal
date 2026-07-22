@@ -45,7 +45,7 @@ from ui import stat_tile
 # used everywhere else in the app - Trade Analyzer, Shortlist, Logbook.
 GOOD_COLOR = charting.GOOD_COLOR
 CRITICAL_COLOR = charting.CRITICAL_COLOR
-LINE_COLOR = charting.CATEGORICAL_PALETTE[0]  # the single line in the cumulative P/L chart
+LINE_COLOR = charting.CATEGORICAL_PALETTE[0]  # the single line in the equity curve chart
 MUTED_COLOR = charting.MUTED_COLOR  # neutral labels (stat tile captions) and the zero-line on charts
 BASELINE_COLOR = charting.MUTED_COLOR
 
@@ -186,26 +186,90 @@ else:
 
 st.divider()
 
-# --- Cumulative P/L chart ------------------------------------------------
-# Labeled "Cumulative P/L," not "Equity," since we don't have a real
-# starting account balance to build a true equity curve from yet.
-st.subheader("Cumulative Profit/Loss Over Time")
+# --- Equity curve ---------------------------------------------------------
+# Shown as % gain, not $ - so it lines up with the Account Performance
+# tiles above, which use the same convention: every % is against the
+# Jan 1 baseline specifically, not a real point-in-time account value
+# (we don't have historical account-value snapshots to build a true
+# equity curve from - see Account Performance's own comment above for
+# why). Each window re-starts its cumulative total at 0% at the start
+# of that window, so "1 Year" shows the gain made DURING the last
+# year, not the whole account's history compressed into one window.
+st.subheader("Equity Curve")
 
-running = filtered.copy()
-running["cumulative_pl"] = running["profit_loss"].cumsum()
+if not jan1_balance:
+    st.info(
+        "Set your account value as of Jan 1 (Account Settings below) "
+        "to see the equity curve as a % gain."
+    )
+else:
+    window_labels = ["1M", "3M", "6M", "1Y", "3Y", "All Time"]
+    equity_window = st.radio(
+        "Window", window_labels, index=5, horizontal=True, key="equity_window")
 
-cum_chart = go.Figure()
-cum_chart.add_hline(y=0, line_color=BASELINE_COLOR, line_width=1)
-cum_chart.add_trace(go.Scatter(
-    x=running["date"],
-    y=running["cumulative_pl"],
-    mode="lines",
-    line=dict(color=LINE_COLOR, width=2),
-    customdata=running[["symbol", "profit_loss"]],
-    hovertemplate="%{x|%b %d, %Y}<br>%{customdata[0]}: $%{customdata[1]:,.2f}"
-                  "<br>Cumulative: $%{y:,.2f}<extra></extra>",
+    today = pd.Timestamp(timeutil.today_eastern())
+    window_cutoffs = {
+        "1M": today - pd.DateOffset(months=1),
+        "3M": today - pd.DateOffset(months=3),
+        "6M": today - pd.DateOffset(months=6),
+        "1Y": today - pd.DateOffset(years=1),
+        "3Y": today - pd.DateOffset(years=3),
+        "All Time": None,
+    }
+    cutoff = window_cutoffs[equity_window]
+    window_trades = filtered if cutoff is None else filtered[filtered["date"] >= cutoff]
+
+    if window_trades.empty:
+        st.warning("No trades in this window.")
+    else:
+        equity = window_trades.copy()
+        equity["cumulative_pl"] = equity["profit_loss"].cumsum()
+        equity["pct_gain"] = equity["cumulative_pl"] / jan1_balance * 100
+
+        equity_chart = go.Figure()
+        equity_chart.add_hline(y=0, line_color=BASELINE_COLOR, line_width=1)
+        equity_chart.add_trace(go.Scatter(
+            x=equity["date"],
+            y=equity["pct_gain"],
+            mode="lines",
+            line=dict(color=LINE_COLOR, width=2),
+            customdata=equity[["symbol", "profit_loss"]],
+            hovertemplate="%{x|%b %d, %Y}<br>%{customdata[0]}: $%{customdata[1]:,.2f}"
+                          "<br>Cumulative: %{y:+.2f}%<extra></extra>",
+        ))
+        st.plotly_chart(charting.style_simple_chart(equity_chart, "% Gain"), theme=None)
+
+# --- Holding period vs. return scatter -------------------------------------
+# One dot per trade: how many days it was held (x) against how much it
+# returned as a % of what was actually put into it (y) - a quick way to
+# see whether trades held longer tend to do better or worse, at a
+# glance, instead of reading it out of the trade table row by row.
+st.subheader("Holding Period vs. Return")
+
+scatter_data = filtered.copy()
+scatter_data["holding_days"] = (scatter_data["date"] - scatter_data["entry_date"]).dt.days
+# Same entry-price convention as the trade table below: for a SHORT
+# trade, the stored buy_price is the cover (exit) and sell_price is
+# the short sale (entry) - the opposite pairing from a LONG trade.
+is_short = scatter_data["direction"] == "SHORT"
+entry_price = scatter_data["buy_price"].where(~is_short, scatter_data["sell_price"])
+scatter_data["return_pct"] = scatter_data["profit_loss"] / (entry_price * scatter_data["quantity"]) * 100
+scatter_colors = [GOOD_COLOR if v >= 0 else CRITICAL_COLOR for v in scatter_data["profit_loss"]]
+
+scatter_chart = go.Figure()
+scatter_chart.add_hline(y=0, line_color=BASELINE_COLOR, line_width=1)
+scatter_chart.add_trace(go.Scatter(
+    x=scatter_data["holding_days"],
+    y=scatter_data["return_pct"],
+    mode="markers",
+    marker=dict(color=scatter_colors, size=8, opacity=0.8),
+    customdata=scatter_data[["symbol", "profit_loss"]],
+    hovertemplate="%{customdata[0]}<br>Held %{x} day(s)<br>Return: %{y:+.1f}%"
+                  "<br>P/L: $%{customdata[1]:,.2f}<extra></extra>",
 ))
-st.plotly_chart(charting.style_simple_chart(cum_chart, "Cumulative P/L ($)"), theme=None)
+scatter_fig = charting.style_simple_chart(scatter_chart, "Return (%)")
+scatter_fig.update_layout(xaxis_title="Holding Period (Days)")
+st.plotly_chart(scatter_fig, theme=None)
 
 # --- P/L by symbol chart -------------------------------------------------
 st.subheader("Profit/Loss by Symbol")
