@@ -3,16 +3,18 @@ name: SnapTrade Sync
 # Runs snaptrade_daily_sync.py on a schedule, separate from the
 # Nightly Archive workflow - see that script's own notes for why.
 #
-# Fires TWICE a day (20:01 and 21:01 UTC) to bracket 4:01pm US Eastern
-# regardless of Eastern Daylight vs Standard Time (cron itself has no
-# concept of that) - snaptrade_daily_sync.py's own hour check makes
-# sure only the correctly-timed one of the two actually does anything.
+# Fires TWICE a day (20:01 and 21:01 UTC, roughly bracketing 4:01pm US
+# Eastern across both EST and EDT) purely for redundancy against
+# GitHub's own scheduling delays - confirmed in practice to run
+# scheduled triggers HOURS late during busy periods, so two attempts
+# a day (rather than one) improve the odds at least one lands
+# reasonably soon after market close. snaptrade_daily_sync.py itself
+# has no timing logic at all - every firing just does the sync, safe
+# to repeat since the underlying insert is dedup-safe.
 #
 # workflow_dispatch lets you trigger this manually (from the Actions
 # tab on GitHub) any time, instead of waiting for the schedule - useful
-# for testing. A manual run always does the sync, regardless of the
-# current hour, since it calls the script the same way as any other
-# run - only the SCHEDULED firings are expected to often no-op.
+# for testing.
 on:
   schedule:
     - cron: "1 20 * * *"
