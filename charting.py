@@ -130,6 +130,7 @@ DEFAULT_SETTINGS = {
     "line_color": None,
     "ma_periods": [20, 50],
     "ma_colors": {20: CATEGORICAL_PALETTE[0], 50: CATEGORICAL_PALETTE[1]},
+    "ma_type": "SMA",
     "overlay_symbol": None,
     "overlay_color": None,
 }
@@ -162,7 +163,7 @@ def parse_ma_periods(text):
     return sorted(periods)
 
 
-def fetch_history(symbol, fetch_start, display_start, display_end, interval, ma_periods):
+def fetch_history(symbol, fetch_start, display_start, display_end, interval, ma_periods, ma_type="SMA"):
     """
     Fetches price history from `fetch_start` (which includes extra lookback
     for moving averages) through `display_end`, computes any requested
@@ -174,6 +175,12 @@ def fetch_history(symbol, fetch_start, display_start, display_end, interval, ma_
     a rate limit specifically, `.attrs["error"] = "rate_limited"` is set on
     it, so history_error_message() below can explain that accurately
     instead of implying the symbol itself is bad.
+
+    `ma_type` is "SMA" (a plain rolling average - the default, and what
+    ma_strategy.py's MA Stop Rule always asks for regardless of this
+    app's chart display preference) or "EMA" (an exponential moving
+    average, which weights recent closes more heavily instead of
+    treating every day in the window equally).
     """
     try:
         history = yf.Ticker(symbol).history(start=fetch_start, end=display_end, interval=interval)
@@ -192,7 +199,16 @@ def fetch_history(symbol, fetch_start, display_start, display_end, interval, ma_
     history.index = history.index.tz_localize(None)
 
     for period in ma_periods:
-        history[f"MA{period}"] = history["Close"].rolling(period).mean()
+        if ma_type == "EMA":
+            # adjust=False matches how every other charting platform
+            # computes an EMA (a simple recursive weighted average) -
+            # adjust=True (pandas' own default) instead re-weights the
+            # whole series every time using all history since the start
+            # of the fetched data, which shifts the EMA's values
+            # depending on how far back `fetch_start` happened to reach.
+            history[f"MA{period}"] = history["Close"].ewm(span=period, adjust=False).mean()
+        else:
+            history[f"MA{period}"] = history["Close"].rolling(period).mean()
 
     return history[history.index >= display_start]
 
@@ -457,7 +473,10 @@ def build_archive_snapshot(symbol, entry_date, buy_price, entry_label, as_of, di
         period: saved_prefs["ma_colors"].get(str(period), CATEGORICAL_PALETTE[i % len(CATEGORICAL_PALETTE)])
         for i, period in enumerate(ma_periods)
     }
-    settings = {**DEFAULT_SETTINGS, "ma_periods": ma_periods, "ma_colors": ma_colors}
+    settings = {
+        **DEFAULT_SETTINGS, "ma_periods": ma_periods, "ma_colors": ma_colors,
+        "ma_type": saved_prefs["ma_type"],
+    }
 
     visible_days = ARCHIVE_VISIBLE_TRADING_DAYS * LOOKBACK_DAYS_PER_PERIOD["1d"]
     display_start = as_of - timedelta(days=visible_days)
@@ -467,7 +486,8 @@ def build_archive_snapshot(symbol, entry_date, buy_price, entry_label, as_of, di
     lookback_days = max_ma_period * LOOKBACK_DAYS_PER_PERIOD["1d"]
     fetch_start = display_start - timedelta(days=lookback_days)
 
-    history = fetch_history(symbol, fetch_start, display_start, display_end, "1d", settings["ma_periods"])
+    history = fetch_history(
+        symbol, fetch_start, display_start, display_end, "1d", settings["ma_periods"], settings["ma_type"])
     if history.empty:
         return None
 
@@ -526,10 +546,11 @@ def render_settings_toolbar(container, key_prefix):
 
     Moving averages are the one setting that's saved permanently (see
     database.get_chart_preferences()/save_chart_preferences()) - typing
-    in a new set of periods, or changing a color, saves it right away,
-    so it's still there next time the app is opened, on any device,
-    until it's changed again. Everything else here (chart type, candle
-    colors, price scale, overlay ticker) stays session-only, as before.
+    in a new set of periods, changing a color, or switching SMA/EMA
+    saves it right away, so it's still there next time the app is
+    opened, on any device, until it's changed again. Everything else
+    here (chart type, candle colors, price scale, overlay ticker) stays
+    session-only, as before.
     """
     conn = database.get_connection()
     saved_prefs = database.get_chart_preferences(conn)
@@ -555,6 +576,12 @@ def render_settings_toolbar(container, key_prefix):
         )
         ma_periods = parse_ma_periods(ma_text)
 
+        ma_type = st.radio(
+            "Moving Average Type", ["SMA", "EMA"],
+            index=["SMA", "EMA"].index(saved_prefs["ma_type"]),
+            horizontal=True, key=f"{key_prefix}_ma_type",
+        )
+
         ma_colors = {}
         if ma_periods:
             ma_color_cols = st.columns(len(ma_periods))
@@ -565,8 +592,9 @@ def render_settings_toolbar(container, key_prefix):
                     ma_color_cols[i], f"{period}-period", default_color, f"{key_prefix}_ma_color_{period}")
 
         current_colors = {str(period): color for period, color in ma_colors.items()}
-        if ma_text != saved_prefs["ma_text"] or current_colors != saved_prefs["ma_colors"]:
-            database.save_chart_preferences(conn, ma_text, ma_colors)
+        if (ma_text != saved_prefs["ma_text"] or current_colors != saved_prefs["ma_colors"]
+                or ma_type != saved_prefs["ma_type"]):
+            database.save_chart_preferences(conn, ma_text, ma_colors, ma_type)
 
         overlay_symbol = st.text_input(
             "Overlay Ticker (optional)", value="", placeholder="e.g. SPY, QQQ",
@@ -590,6 +618,7 @@ def render_settings_toolbar(container, key_prefix):
         "line_color": line_color,
         "ma_periods": ma_periods,
         "ma_colors": ma_colors,
+        "ma_type": ma_type,
         "overlay_symbol": overlay_symbol,
         "overlay_color": overlay_color,
     }

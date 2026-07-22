@@ -98,7 +98,7 @@ def render_price_chart(symbol, entry_point, entry_label, key_prefix, stop_loss=N
 
     with st.spinner(f"Fetching {timeframe_label.lower()} price history for {symbol}..."):
         history = charting.fetch_history(
-            symbol, fetch_start, wide_start, display_end, interval, settings["ma_periods"])
+            symbol, fetch_start, wide_start, display_end, interval, settings["ma_periods"], settings["ma_type"])
 
     if history.empty:
         st.warning(charting.history_error_message(history, symbol))

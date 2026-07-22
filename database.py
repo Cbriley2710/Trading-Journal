@@ -214,6 +214,11 @@ def init_db(conn):
             CONSTRAINT single_row CHECK (id = 1)
         )
     """)
+    # `chart_preferences` predates the SMA/EMA toggle - existing rows all
+    # get 'SMA' (correct, since a plain rolling average is what every
+    # moving average on this app's charts was before this existed).
+    if not _column_exists(cur, "chart_preferences", "ma_type"):
+        cur.execute("ALTER TABLE chart_preferences ADD COLUMN ma_type TEXT NOT NULL DEFAULT 'SMA'")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS position_stops (
             symbol TEXT PRIMARY KEY,
@@ -737,34 +742,39 @@ def get_chart_preferences(conn):
     """
     Returns the saved moving-average preference (there's only ever one,
     since this app has a single user): {"ma_text": "20,50", "ma_colors":
-    {"20": "#2375f4"}}. Defaults to no moving averages if nothing has
-    been saved yet.
+    {"20": "#2375f4"}, "ma_type": "SMA"}. Defaults to no moving averages
+    (plain SMA) if nothing has been saved yet. `ma_type` is "SMA" (a
+    plain rolling average) or "EMA" (an exponential moving average,
+    which weights recent closes more heavily) - one global choice
+    applied to every moving average on every chart, not a per-period
+    setting, matching how ma_colors already works.
     """
     cur = conn.cursor()
-    cur.execute("SELECT ma_periods, ma_colors FROM chart_preferences WHERE id = 1")
+    cur.execute("SELECT ma_periods, ma_colors, ma_type FROM chart_preferences WHERE id = 1")
     row = cur.fetchone()
     if row is None:
-        return {"ma_text": "", "ma_colors": {}}
-    return {"ma_text": row[0], "ma_colors": row[1]}
+        return {"ma_text": "", "ma_colors": {}, "ma_type": "SMA"}
+    return {"ma_text": row[0], "ma_colors": row[1], "ma_type": row[2]}
 
 
-def save_chart_preferences(conn, ma_text, ma_colors):
+def save_chart_preferences(conn, ma_text, ma_colors, ma_type):
     """
-    Saves the moving-average text (e.g. "20,50") and each period's color
-    as the one persistent chart preference - overwriting whatever was
-    saved before, so the chart looks the same next time you open the
-    app, on any device, until you change it again.
+    Saves the moving-average text (e.g. "20,50"), each period's color,
+    and the SMA/EMA type as the one persistent chart preference -
+    overwriting whatever was saved before, so the chart looks the same
+    next time you open the app, on any device, until you change it again.
     """
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT INTO chart_preferences (id, ma_periods, ma_colors)
-        VALUES (1, %s, %s)
+        INSERT INTO chart_preferences (id, ma_periods, ma_colors, ma_type)
+        VALUES (1, %s, %s, %s)
         ON CONFLICT (id) DO UPDATE SET
             ma_periods = EXCLUDED.ma_periods,
-            ma_colors = EXCLUDED.ma_colors
+            ma_colors = EXCLUDED.ma_colors,
+            ma_type = EXCLUDED.ma_type
         """,
-        (ma_text, Json({str(k): v for k, v in ma_colors.items()})),
+        (ma_text, Json({str(k): v for k, v in ma_colors.items()}), ma_type),
     )
     conn.commit()
 

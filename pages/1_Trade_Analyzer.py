@@ -153,7 +153,7 @@ fetch_start = wide_start - timedelta(days=lookback_days)
 
 with st.spinner(f"Fetching {timeframe_label.lower()} price history for {trade['symbol']}..."):
     history = charting.fetch_history(
-        trade["symbol"], fetch_start, wide_start, wide_end, interval, settings["ma_periods"])
+        trade["symbol"], fetch_start, wide_start, wide_end, interval, settings["ma_periods"], settings["ma_type"])
 
 if history.empty:
     st.warning(charting.history_error_message(history, trade["symbol"]))
