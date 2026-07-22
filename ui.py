@@ -9,6 +9,8 @@ had already started to drift (two pages used a slightly bigger font
 than the other two).
 """
 
+import time
+
 import streamlit.components.v1 as components
 
 import charting
@@ -30,12 +32,38 @@ def scroll_to_anchor(anchor_id):
     <script> tags at all - only a real component iframe does.
     window.parent is what reaches back out into the actual page from
     inside that iframe.
+
+    Two things a naive version of this gets wrong, both fixed here:
+
+    1. Saving the SAME ticker's journal twice in a row sends this exact
+       same HTML both times - Streamlit/React can (and does) decide the
+       component's content hasn't changed and skip actually reloading
+       the iframe, so the <script> only ever ran the FIRST time. The
+       `_nonce` timestamp, embedded somewhere the browser has to parse
+       but that has no visible effect, makes every call's HTML
+       byte-different, forcing a real reload every time.
+    2. The anchor div is rendered by an ordinary st.markdown call
+       earlier in the same script run, but Streamlit's frontend patches
+       the page asynchronously - there's no guarantee the anchor has
+       actually been mounted into the DOM by the moment this iframe's
+       script starts running. A single immediate getElementById can
+       fire a beat too early and find nothing. Retrying for up to ~2
+       seconds (40 tries, 50ms apart) instead of trying exactly once
+       covers that gap without any visible delay in the normal case,
+       where the element is usually already there.
     """
     components.html(
         f"""
+        <!-- _nonce: {time.time()} -->
         <script>
-            const el = window.parent.document.getElementById("{anchor_id}");
-            if (el) {{ el.scrollIntoView({{behavior: "instant", block: "start"}}); }}
+            (function attempt(triesLeft) {{
+                const el = window.parent.document.getElementById("{anchor_id}");
+                if (el) {{
+                    el.scrollIntoView({{behavior: "instant", block: "start"}});
+                }} else if (triesLeft > 0) {{
+                    setTimeout(function() {{ attempt(triesLeft - 1); }}, 50);
+                }}
+            }})(40);
         </script>
         """,
         height=0,
