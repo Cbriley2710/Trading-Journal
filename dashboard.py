@@ -224,18 +224,34 @@ else:
     else:
         equity = window_trades.copy()
         equity["cumulative_pl"] = equity["profit_loss"].cumsum()
-        equity["pct_gain"] = equity["cumulative_pl"] / jan1_balance * 100
+
+        # Plotting one point per TRADE (rather than per day) is what
+        # made this look jagged - a straight diagonal line was drawn
+        # connecting whichever two trades happened to close next to
+        # each other, even if that was two months apart, instead of
+        # showing the account sitting flat in between. Reindexing onto
+        # every single day (forward-filling the last known cumulative
+        # total between trade-close days) turns that into a proper
+        # day-by-day line: flat where nothing closed, stepping only on
+        # a day something actually did. `window_start` is the fixed
+        # calendar cutoff for a sized window (so "1Y" always spans a
+        # full year back, flat at 0% before whatever the first trade
+        # in that window happened to be) - only "All Time" falls back
+        # to the first trade's own date, since it has no fixed edge.
+        window_start = cutoff if cutoff is not None else equity["date"].min()
+        daily_index = pd.date_range(start=window_start, end=today, freq="D")
+        daily_pl = equity.groupby(equity["date"].dt.normalize())["cumulative_pl"].last()
+        daily_pl = daily_pl.reindex(daily_index).ffill().fillna(0)
+        daily_pct = daily_pl / jan1_balance * 100
 
         equity_chart = go.Figure()
         equity_chart.add_hline(y=0, line_color=BASELINE_COLOR, line_width=1)
         equity_chart.add_trace(go.Scatter(
-            x=equity["date"],
-            y=equity["pct_gain"],
+            x=daily_index,
+            y=daily_pct,
             mode="lines",
             line=dict(color=LINE_COLOR, width=2),
-            customdata=equity[["symbol", "profit_loss"]],
-            hovertemplate="%{x|%b %d, %Y}<br>%{customdata[0]}: $%{customdata[1]:,.2f}"
-                          "<br>Cumulative: %{y:+.2f}%<extra></extra>",
+            hovertemplate="%{x|%b %d, %Y}<br>Cumulative: %{y:+.2f}%<extra></extra>",
         ))
         st.plotly_chart(charting.style_simple_chart(equity_chart, "% Gain"), theme=None)
 
