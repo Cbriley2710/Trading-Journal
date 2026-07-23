@@ -163,6 +163,7 @@ def parse_ma_periods(text):
     return sorted(periods)
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_history(symbol, fetch_start, display_start, display_end, interval, ma_periods, ma_type="SMA"):
     """
     Fetches price history from `fetch_start` (which includes extra lookback
@@ -181,6 +182,17 @@ def fetch_history(symbol, fetch_start, display_start, display_end, interval, ma_
     app's chart display preference) or "EMA" (an exponential moving
     average, which weights recent closes more heavily instead of
     treating every day in the window equally).
+
+    Cached for an hour (matching fetch_daily_closes()'s own reasoning):
+    the fetched range is almost entirely PAST days, which never change,
+    plus one still-moving "today" candle. Without this, every rerun of
+    a page showing a chart - not just switching tickers, but ANY
+    interaction on the same one (a drawing, a Chart Settings tweak, even
+    just the Journal Session's own internal reruns) - re-fetched the
+    exact same data from Yahoo Finance from scratch. That's what made
+    stepping through a guided Journal Session feel slow: every single
+    ticker paid a full live fetch, one at a time, with nothing reused
+    even for a ticker you'd just been looking at seconds before.
     """
     try:
         history = yf.Ticker(symbol).history(start=fetch_start, end=display_end, interval=interval)
@@ -275,6 +287,7 @@ def price_near_date(history, target_date):
     return history["Close"].iloc[-1]
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def fetch_latest_price(symbol):
     """
     Returns the most recent closing price for a symbol (a plain, current
@@ -287,6 +300,12 @@ def fetch_latest_price(symbol):
     Yahoo rate-limiting, etc.) - every caller already handles None as
     "no price available right now," which beats crashing a whole page
     over one symbol's failed lookup.
+
+    Cached for just a minute, not the hour fetch_history() uses - this
+    IS the still-moving "right now" price, so it needs to stay fresh.
+    Even a minute is enough to stop the Journal Session's Skip/Save &
+    Next from re-fetching a position's current price on every unrelated
+    rerun while you're still looking at the same ticker.
     """
     try:
         recent = yf.Ticker(symbol).history(period="5d")
