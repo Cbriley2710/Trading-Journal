@@ -323,6 +323,18 @@ def init_db(conn):
     # until the Dashboard's own Filters sidebar is actually used.
     if not _column_exists(cur, "ui_settings", "dashboard_visible_sections"):
         cur.execute("ALTER TABLE ui_settings ADD COLUMN dashboard_visible_sections JSONB")
+    # A custom app-wide background image, uploaded on the Settings page
+    # (see get_background_image()/save_background_image() below) and
+    # applied via CSS injected in nav.render_top_nav() - which every
+    # page calls - so this shows up everywhere, not just Settings.
+    # `background_image_mime` (e.g. "image/png") is what was actually
+    # uploaded, needed to build a correct data: URI - guessing wrong
+    # here still often displays fine (browsers are lenient), but there's
+    # no reason to guess when the upload already told us.
+    if not _column_exists(cur, "ui_settings", "background_image"):
+        cur.execute("ALTER TABLE ui_settings ADD COLUMN background_image BYTEA")
+    if not _column_exists(cur, "ui_settings", "background_image_mime"):
+        cur.execute("ALTER TABLE ui_settings ADD COLUMN background_image_mime TEXT")
     # The guided Journal Session's progress (see pages/2_Shortlist.py's
     # render_journal_session()) - which tickers were in the queue and how
     # far you'd gotten - saved here (not just st.session_state) so
@@ -1214,6 +1226,46 @@ def save_dashboard_visible_sections(conn, visible_sections):
         ON CONFLICT (id) DO UPDATE SET dashboard_visible_sections = EXCLUDED.dashboard_visible_sections
         """,
         (Json(visible_sections),),
+    )
+    conn.commit()
+
+
+def get_background_image(conn):
+    """
+    Returns the saved custom background image as {"bytes": ..., "mime":
+    "image/png"}, or None if nothing's been uploaded (the default look
+    applies). See nav.render_top_nav() for where this actually gets
+    applied - every page calls that, so this shows up everywhere.
+    """
+    cur = conn.cursor()
+    cur.execute("SELECT background_image, background_image_mime FROM ui_settings WHERE id = 1")
+    row = cur.fetchone()
+    if row is None or row[0] is None:
+        return None
+    return {"bytes": bytes(row[0]), "mime": row[1]}
+
+
+def save_background_image(conn, image_bytes, mime_type):
+    """Saves a custom background image - see get_background_image()."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO ui_settings (id, background_image, background_image_mime)
+        VALUES (1, %s, %s)
+        ON CONFLICT (id) DO UPDATE SET
+            background_image = EXCLUDED.background_image,
+            background_image_mime = EXCLUDED.background_image_mime
+        """,
+        (image_bytes, mime_type),
+    )
+    conn.commit()
+
+
+def clear_background_image(conn):
+    """Removes the custom background image, reverting to the default look."""
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE ui_settings SET background_image = NULL, background_image_mime = NULL WHERE id = 1"
     )
     conn.commit()
 

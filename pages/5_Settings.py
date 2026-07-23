@@ -105,3 +105,35 @@ if st.button("Save Column Widths"):
     database.save_open_positions_column_widths(conn, new_widths)
     st.success("Saved.")
     st.rerun()
+
+st.divider()
+
+st.header("Background Image")
+st.caption(
+    "Upload a picture to use as the app's background, on every page - "
+    "see nav.render_top_nav(), which every page already calls. A dark "
+    "overlay is applied on top of it automatically, since every chart, "
+    "table, and block of text on this app assumes a dark background "
+    "underneath it - without that, a bright photo would make plenty of "
+    "existing text unreadable no matter what the picture shows."
+)
+
+current_background = database.get_background_image(conn)
+if current_background:
+    st.image(current_background["bytes"], caption="Current background", width=300)
+
+uploaded_background = st.file_uploader(
+    "Upload a background image", type=["png", "jpg", "jpeg"], key="background_upload")
+
+background_cols = st.columns(2)
+if background_cols[0].button("Save Background", disabled=uploaded_background is None):
+    database.save_background_image(conn, uploaded_background.getvalue(), uploaded_background.type)
+    nav.clear_background_cache()
+    st.success("Background saved.")
+    st.rerun()
+
+if background_cols[1].button("Remove Background", disabled=not current_background):
+    database.clear_background_image(conn)
+    nav.clear_background_cache()
+    st.success("Background removed - back to the default look.")
+    st.rerun()
