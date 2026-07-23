@@ -155,47 +155,6 @@ stat_tile(cols[6], "Worst Trade", f"{worst['symbol']} ${worst['profit_loss']:,.2
 
 st.divider()
 
-# --- Expectancy -----------------------------------------------------------
-# The average $ result of a single trade - mathematically identical to
-# filtered["profit_loss"].mean(), just split into the two halves that
-# combine to make it up: how much winning trades contribute (win rate ×
-# average win) and how much losing trades take back (loss rate × average
-# loss, already negative). Splitting it out this way is what makes an
-# expectancy chart useful rather than just another number - the same net
-# result can come from winning often but small, or rarely but big, and
-# those call for very different adjustments to a trading approach.
-st.subheader("Expectancy")
-
-win_rate_frac = len(wins) / len(filtered)
-loss_rate_pct = len(losses) / len(filtered) * 100
-win_contribution = win_rate_frac * avg_win
-loss_contribution = (len(losses) / len(filtered)) * avg_loss
-expectancy = win_contribution + loss_contribution
-
-st.caption(
-    f"On average, every trade nets **${expectancy:,.2f}** - "
-    f"a {win_rate:.1f}% win rate × ${avg_win:,.2f} average win, "
-    f"offset by a {loss_rate_pct:.1f}% loss rate × ${avg_loss:,.2f} average loss."
-)
-
-expectancy_labels = ["Win Contribution", "Loss Contribution", "Expectancy (Net)"]
-expectancy_values = [win_contribution, loss_contribution, expectancy]
-expectancy_colors = [GOOD_COLOR if v >= 0 else CRITICAL_COLOR for v in expectancy_values]
-
-expectancy_chart = go.Figure()
-expectancy_chart.add_hline(y=0, line_color=BASELINE_COLOR, line_width=1)
-expectancy_chart.add_trace(go.Bar(
-    x=expectancy_labels,
-    y=expectancy_values,
-    marker_color=expectancy_colors,
-    text=[f"${v:,.2f}" for v in expectancy_values],
-    textposition="outside",
-    hovertemplate="%{x}: $%{y:,.2f}<extra></extra>",
-))
-st.plotly_chart(charting.style_simple_chart(expectancy_chart, "$ per Trade"), theme=None)
-
-st.divider()
-
 # --- Account performance by time period ----------------------------------
 # Uses trades_df (every closed trade), not `filtered` - this is meant to
 # answer "how has my whole account actually done," not whatever narrower
@@ -474,6 +433,97 @@ else:
                 hovertemplate="%{x}: %{y:.1f}% of account<extra></extra>",
             ))
             st.plotly_chart(charting.style_simple_chart(alloc_chart, "% of Account"), theme=None)
+
+st.divider()
+
+# --- Expectancy -----------------------------------------------------------
+# The average $ result of a single trade - mathematically identical to
+# filtered["profit_loss"].mean(), just split into the two halves that
+# combine to make it up: how much winning trades contribute (win rate ×
+# average win) and how much losing trades take back (loss rate × average
+# loss, already negative). Splitting it out this way is what makes an
+# expectancy chart useful rather than just another number - the same net
+# result can come from winning often but small, or rarely but big, and
+# those call for very different adjustments to a trading approach.
+st.subheader("Expectancy")
+
+win_rate_frac = len(wins) / len(filtered)
+loss_rate_pct = len(losses) / len(filtered) * 100
+win_contribution = win_rate_frac * avg_win
+loss_contribution = (len(losses) / len(filtered)) * avg_loss
+expectancy = win_contribution + loss_contribution
+
+st.caption(
+    f"On average, every trade nets **${expectancy:,.2f}** - "
+    f"a {win_rate:.1f}% win rate × ${avg_win:,.2f} average win, "
+    f"offset by a {loss_rate_pct:.1f}% loss rate × ${avg_loss:,.2f} average loss."
+)
+
+expectancy_labels = ["Win Contribution", "Loss Contribution", "Expectancy (Net)"]
+expectancy_values = [win_contribution, loss_contribution, expectancy]
+expectancy_colors = [GOOD_COLOR if v >= 0 else CRITICAL_COLOR for v in expectancy_values]
+
+expectancy_chart = go.Figure()
+expectancy_chart.add_hline(y=0, line_color=BASELINE_COLOR, line_width=1)
+expectancy_chart.add_trace(go.Bar(
+    x=expectancy_labels,
+    y=expectancy_values,
+    marker_color=expectancy_colors,
+    text=[f"${v:,.2f}" for v in expectancy_values],
+    textposition="outside",
+    hovertemplate="%{x}: $%{y:,.2f}<extra></extra>",
+))
+st.plotly_chart(charting.style_simple_chart(expectancy_chart, "$ per Trade"), theme=None)
+
+# --- Theoretical account projection ---------------------------------------
+# A simple, linear "if this exact expectancy keeps up" projection - your
+# current calculated account value plus (expectancy x however many MORE
+# trades) - not a guarantee or even a realistic forecast, just a way to see
+# what a small per-trade edge (or drag) turns into at scale. Deliberately
+# NOT compounded (scaling each future trade's $ size up with a growing
+# account) - this project's own Account Performance section already avoids
+# that kind of self-inflating math, for the same reason (see its comment
+# above): it would overstate the projection more and more the further out
+# it goes, exactly like dividing by a growing balance did there.
+st.subheader("Theoretical Account Projection")
+if not account_value:
+    st.info("Set your account value above (Account Settings below) to see a theoretical account projection.")
+else:
+    milestones = [20, 50, 100, 200]
+    projected_values = [account_value + expectancy * n for n in milestones]
+
+    st.caption(
+        f"Starting from your current calculated account value of ${account_value:,.2f}, "
+        f"assuming your ${expectancy:,.2f} average expectancy per trade holds up over "
+        "more trades - not a guarantee, just a straight-line extension of your current edge (or drag)."
+    )
+
+    milestone_cols = st.columns(len(milestones))
+    for col, n, value in zip(milestone_cols, milestones, projected_values):
+        gain_pct = (value - account_value) / account_value * 100
+        stat_tile(col, f"After {n} Trades", f"${value:,.2f} ({gain_pct:+.1f}%)",
+                  GOOD_COLOR if gain_pct >= 0 else CRITICAL_COLOR)
+
+    # A real numeric x-axis (0/20/50/100/200), not evenly-spaced category
+    # labels - milestones aren't evenly spaced in trade-count terms (+20,
+    # then +30, +50, +100), so treating them as equal-width categories
+    # would visually bend an actually-straight line into something that
+    # looks like it's accelerating, purely from the mismatched spacing.
+    projection_chart = go.Figure()
+    projection_chart.add_trace(go.Scatter(
+        x=[0] + milestones,
+        y=[account_value] + projected_values,
+        mode="lines+markers",
+        line=dict(color=LINE_COLOR, width=2),
+        marker=dict(size=8),
+        hovertemplate="%{x} trade(s) from now: $%{y:,.2f}<extra></extra>",
+    ))
+    projection_fig = charting.style_simple_chart(projection_chart, "Theoretical Account Value ($)")
+    projection_fig.update_xaxes(
+        title_text="Trades From Now", tickmode="array", tickvals=[0] + milestones,
+        ticktext=["Now"] + [str(n) for n in milestones],
+    )
+    st.plotly_chart(projection_fig, theme=None)
 
 st.divider()
 
