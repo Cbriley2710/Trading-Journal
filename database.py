@@ -335,6 +335,24 @@ def init_db(conn):
             CONSTRAINT single_row CHECK (id = 1)
         )
     """)
+    # A persistent (not just st.cache_data - see charting.fetch_history())
+    # cache of each tracked symbol's daily price history, one row per
+    # symbol. Warmed shortly after market close by warm_price_cache.py
+    # (a scheduled job, separate from and earlier than nightly_archive.py's
+    # own near-midnight run - see that script's own docstring for why) and
+    # immediately whenever a new ticker is added to a watchlist (see
+    # pages/2_Shortlist.py) - so the FIRST time a ticker's chart is
+    # actually opened each day, often during a Journal Session, doesn't
+    # pay for a live Yahoo Finance fetch. `history` stores parallel
+    # arrays (dates/open/high/low/close/volume), not a DataFrame directly -
+    # trivial to rebuild one from, and keeps this a plain JSON blob.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS price_cache (
+            symbol TEXT PRIMARY KEY,
+            history JSONB NOT NULL,
+            fetched_for_date DATE NOT NULL
+        )
+    """)
     conn.commit()
 
 
@@ -842,6 +860,68 @@ def clear_journal_session_progress(conn):
     skipped), since there's nothing left to offer to resume."""
     cur = conn.cursor()
     cur.execute("DELETE FROM journal_session_progress WHERE id = 1")
+    conn.commit()
+
+
+def get_tracked_symbols(conn):
+    """
+    Every symbol currently worth pre-warming a price cache for: every
+    open position plus every watchlist ticker, deduplicated - the same
+    universe archiving.archive_all() already iterates for the nightly
+    Logbook snapshot, just symbols only (no entry dates/directions,
+    which warming a plain price cache doesn't need).
+    """
+    positions = {p["symbol"] for p in get_open_positions(conn)}
+    watchlist = {w["symbol"] for w in get_watchlist(conn)}
+    return positions | watchlist
+
+
+def get_cached_price_history(conn, symbol):
+    """
+    Returns {"history": {...parallel arrays...}, "fetched_for_date": date}
+    for `symbol` from the persistent price cache (see
+    charting.warm_price_cache_for_symbol()/fetch_history()), or None if
+    nothing's cached for it yet.
+    """
+    cur = conn.cursor()
+    cur.execute("SELECT history, fetched_for_date FROM price_cache WHERE symbol = %s", (symbol,))
+    row = cur.fetchone()
+    if row is None:
+        return None
+    return {"history": row[0], "fetched_for_date": row[1]}
+
+
+def save_cached_price_history(conn, symbol, history_dict, fetched_for_date):
+    """Saves (or overwrites) `symbol`'s cached daily price history -
+    called by the after-close warming job and by the "add to watchlist"
+    action, never by an interactive chart view itself."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO price_cache (symbol, history, fetched_for_date)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (symbol) DO UPDATE SET
+            history = EXCLUDED.history,
+            fetched_for_date = EXCLUDED.fetched_for_date
+        """,
+        (symbol, Json(history_dict), fetched_for_date),
+    )
+    conn.commit()
+
+
+def clear_stale_price_cache(conn, today):
+    """
+    Deletes any cached price history not refreshed today - called by
+    nightly_archive.py once its own (near-midnight) archiving is done,
+    which is the "discard after midnight" half of the price cache's
+    lifecycle. Covers both an ordinary day's now-stale cache AND a
+    symbol that's no longer tracked at all (removed from every
+    watchlist, position closed) - either way, nothing refreshed it
+    today, so it's safe to drop; a symbol that IS still tracked just
+    gets a fresh row again at the next warming run.
+    """
+    cur = conn.cursor()
+    cur.execute("DELETE FROM price_cache WHERE fetched_for_date != %s", (today,))
     conn.commit()
 
 

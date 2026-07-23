@@ -37,6 +37,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 import database
+import timeutil
 
 # A real bidirectional custom component (see chart_component/index.html) -
 # not a plain st.iframe embed, which can only receive data FROM Python.
@@ -163,6 +164,88 @@ def parse_ma_periods(text):
     return sorted(periods)
 
 
+def warm_price_cache_for_symbol(symbol):
+    """
+    Fetches 5 years of daily history for `symbol` and stores it in the
+    persistent price_cache table (see database.save_cached_price_history()),
+    tagged with today's date. Called by warm_price_cache.py (a scheduled
+    job, shortly after market close) for every tracked symbol, and
+    immediately when a new ticker is added to a watchlist (see
+    pages/2_Shortlist.py) - either way, the point is that by the time a
+    chart actually gets opened, fetch_history() can serve it from here
+    instead of a live Yahoo Finance call.
+
+    5 years is comfortably wider than any realistic entry date this
+    project's account history would have, so fetch_history()'s own
+    `fetch_start` (which reaches further back than what's visible, for
+    scroll buffer) is virtually always covered. If some rarer case ever
+    needs further back than that, fetch_history() just falls back to a
+    live fetch for that one case, same as before this cache existed.
+
+    Returns True if it was cached, False if Yahoo Finance had no data
+    for this symbol (delisted, bad ticker, etc.) or the fetch failed -
+    callers print/skip accordingly rather than treating it as fatal.
+    """
+    try:
+        history = yf.Ticker(symbol).history(period="5y", interval="1d")
+    except Exception:
+        return False
+    if history.empty:
+        return False
+
+    history.index = history.index.tz_localize(None)
+    history_dict = {
+        "dates": [d.date().isoformat() for d in history.index],
+        "open": history["Open"].tolist(),
+        "high": history["High"].tolist(),
+        "low": history["Low"].tolist(),
+        "close": history["Close"].tolist(),
+        "volume": history["Volume"].tolist(),
+    }
+    conn = database.get_connection()
+    database.save_cached_price_history(conn, symbol, history_dict, timeutil.today_eastern())
+    return True
+
+
+def _daily_history_from_cache(symbol, needed_start):
+    """
+    Returns a daily-interval DataFrame (Open/High/Low/Close/Volume,
+    shaped exactly like a live yfinance fetch) from the persistent
+    price_cache table, or None if there's nothing usable there - no
+    cached row at all, it wasn't refreshed today, or it doesn't reach
+    back as far as `needed_start` (fetch_history()'s own `fetch_start`).
+    A None return means "fall back to a live fetch," same as if this
+    cache didn't exist.
+
+    Deliberately does NOT also require the cache to already include
+    TODAY's own candle - Yahoo Finance doesn't always have a trading
+    day's close published the instant the warming job runs, and
+    demanding that would mean any such lag forces a live fetch for
+    EVERY chart that whole day, defeating the point. `fetched_for_date
+    == today` is already the freshness guarantee: whatever Yahoo had at
+    fetch time is what's here, same as a live fetch would have gotten
+    at that same moment.
+    """
+    conn = database.get_connection()
+    cached = database.get_cached_price_history(conn, symbol)
+    if cached is None or cached["fetched_for_date"] != timeutil.today_eastern():
+        return None
+
+    hist = cached["history"]
+    if not hist["dates"]:
+        return None
+
+    df = pd.DataFrame({
+        "Open": hist["open"], "High": hist["high"], "Low": hist["low"],
+        "Close": hist["close"], "Volume": hist["volume"],
+    }, index=pd.to_datetime(hist["dates"]))
+
+    if df.index.min() > pd.Timestamp(needed_start):
+        return None  # doesn't reach back far enough
+
+    return df
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_history(symbol, fetch_start, display_start, display_end, interval, ma_periods, ma_type="SMA"):
     """
@@ -193,22 +276,44 @@ def fetch_history(symbol, fetch_start, display_start, display_end, interval, ma_
     stepping through a guided Journal Session feel slow: every single
     ticker paid a full live fetch, one at a time, with nothing reused
     even for a ticker you'd just been looking at seconds before.
+
+    For the Daily interval specifically, this ALSO checks the
+    persistent price_cache table (see warm_price_cache_for_symbol())
+    before ever calling Yahoo Finance - warmed shortly after market
+    close and whenever a new ticker is added to a watchlist, so even
+    the very FIRST time this hour's st.cache_data is empty for a given
+    symbol (e.g. the first chart you open in an evening Journal
+    Session), there's still a good chance this doesn't hit the network
+    at all. Hourly/Weekly/Monthly aren't pre-warmed - Daily is the
+    default view (see TIMEFRAMES), so it covers the common case without
+    the warming job needing to fetch four times as much per symbol.
     """
-    try:
-        history = yf.Ticker(symbol).history(start=fetch_start, end=display_end, interval=interval)
-    except YFRateLimitError:
-        empty = pd.DataFrame()
-        empty.attrs["error"] = "rate_limited"
-        return empty
-    except Exception:
-        return pd.DataFrame()
+    history = None
+    if interval == "1d":
+        history = _daily_history_from_cache(symbol, fetch_start)
 
-    if history.empty:
-        return history
+    if history is None:
+        try:
+            history = yf.Ticker(symbol).history(start=fetch_start, end=display_end, interval=interval)
+        except YFRateLimitError:
+            empty = pd.DataFrame()
+            empty.attrs["error"] = "rate_limited"
+            return empty
+        except Exception:
+            return pd.DataFrame()
 
-    # yfinance returns timezone-aware dates; the rest of this project's
-    # dates are plain (timezone-less), so this lines them up.
-    history.index = history.index.tz_localize(None)
+        if history.empty:
+            return history
+
+        # yfinance returns timezone-aware dates; the rest of this project's
+        # dates are plain (timezone-less), so this lines them up.
+        history.index = history.index.tz_localize(None)
+    else:
+        # From the persistent cache, which always runs through today -
+        # trim the top end down to what THIS call actually asked for
+        # (display_end can be earlier, e.g. mid-history for a closed
+        # trade in Trade Analyzer).
+        history = history[history.index <= display_end]
 
     for period in ma_periods:
         if ma_type == "EMA":

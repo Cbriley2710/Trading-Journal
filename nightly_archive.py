@@ -58,6 +58,12 @@ def main():
     archiving.archive_all(conn, today)
     send_daily_report_fallback(conn, today)
 
+    # The "discard after midnight" half of the price cache's lifecycle
+    # (see database.clear_stale_price_cache() and warm_price_cache.py) -
+    # run last, once today's real archiving work is done, so a problem
+    # here never affects that.
+    database.clear_stale_price_cache(conn, today)
+
     print("Done.")
 
 

@@ -394,11 +394,24 @@ def render_lists_section():
             if add_clicked and add_text.strip():
                 already_elsewhere = []
                 added_count = 0
+                newly_added = []
                 for sym in parse_ticker_input(add_text):
                     if database.add_to_watchlist(conn, sym, list_id):
                         added_count += 1
+                        newly_added.append(sym)
                     else:
                         already_elsewhere.append(sym)
+                if newly_added:
+                    # Warms the persistent price cache (see charting.
+                    # warm_price_cache_for_symbol()) for a ticker right
+                    # when it's added, instead of waiting for tonight's
+                    # after-close warming job - a brief delay here
+                    # (proportional to how many tickers were just
+                    # pasted in) instead of a slow first chart load
+                    # later.
+                    with st.spinner(f"Warming price cache for {', '.join(newly_added)}..."):
+                        for sym in newly_added:
+                            charting.warm_price_cache_for_symbol(sym)
                 parts = []
                 if added_count:
                     parts.append(f"Added {added_count} ticker(s) to {new_name}.")

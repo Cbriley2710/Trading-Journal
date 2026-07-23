@@ -1,0 +1,54 @@
+name: Warm Price Cache
+
+# Runs warm_price_cache.py shortly after market close, so the FIRST
+# time a ticker's chart gets opened each day - often during an evening
+# Journal Session - doesn't pay for a live Yahoo Finance fetch. Separate
+# from, and earlier than, Nightly Archive: that job runs near midnight
+# (see its own workflow's comment), which is often already well past a
+# typical evening session. This one is also much lighter - no chart
+# image rendering, no emailing, just fetching and caching raw price
+# data - so no Chromium install step is needed here.
+#
+# "30 21 * * 1-5" is ~4:30pm Eastern Standard Time (21:30 UTC), Monday
+# through Friday only (no point warming on a weekend when nothing
+# traded). Cron doesn't adjust for daylight saving, so during Eastern
+# Daylight Time this actually fires around 5:30pm instead - the same
+# known, accepted limitation as Nightly Archive's own schedule.
+#
+# workflow_dispatch lets you trigger this manually (from the Actions
+# tab on GitHub) any time, instead of waiting for the schedule - useful
+# for testing, or for warming the cache on demand after a big watchlist
+# change.
+on:
+  schedule:
+    - cron: "30 21 * * 1-5"
+  workflow_dispatch: {}
+
+jobs:
+  warm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Warm price cache
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python warm_price_cache.py
+
+      # Same script, same repo, but pointed at a second person's own
+      # database via their own repository secret (prefixed FRIEND_) -
+      # same dual-deployment pattern Nightly Archive already uses.
+      # continue-on-error so a problem here never marks the run that
+      # already warmed your own cache as failed.
+      - name: Warm price cache (friend)
+        continue-on-error: true
+        env:
+          DATABASE_URL: ${{ secrets.FRIEND_DATABASE_URL }}
+        run: python warm_price_cache.py
