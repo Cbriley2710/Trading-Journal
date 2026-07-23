@@ -335,6 +335,18 @@ def init_db(conn):
         cur.execute("ALTER TABLE ui_settings ADD COLUMN background_image BYTEA")
     if not _column_exists(cur, "ui_settings", "background_image_mime"):
         cur.execute("ALTER TABLE ui_settings ADD COLUMN background_image_mime TEXT")
+    # One general, not-tied-to-any-ticker journal entry per day - shown
+    # as the first step of the guided Journal Session (see
+    # pages/2_Shortlist.py's render_journal_session()) before it moves
+    # into reviewing individual tickers, and again on the Daily Report's
+    # cover page (see daily_report.py's build_report_pdf()) under
+    # "Today's Thoughts."
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS daily_journal_notes (
+            entry_date DATE PRIMARY KEY,
+            notes TEXT NOT NULL
+        )
+    """)
     # The guided Journal Session's progress (see pages/2_Shortlist.py's
     # render_journal_session()) - which tickers were in the queue and how
     # far you'd gotten - saved here (not just st.session_state) so
@@ -657,6 +669,35 @@ def get_logbook_entry(conn, symbol, entry_date):
         "chart_image": bytes(row[1]) if row[1] is not None else None,
         "archived_at": row[2],
     }
+
+
+def get_daily_journal_note(conn, entry_date):
+    """
+    Returns the general "Today's Thoughts" journal entry for `entry_date`
+    (see daily_journal_notes' own docstring in init_db()), or None if
+    nothing's been written for that day yet. An empty string (submitted
+    on purpose, with nothing typed) is NOT the same as None - it still
+    counts as "handled today," so render_journal_session() won't prompt
+    for it again for the rest of that day.
+    """
+    cur = conn.cursor()
+    cur.execute("SELECT notes FROM daily_journal_notes WHERE entry_date = %s", (entry_date,))
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def save_daily_journal_note(conn, entry_date, notes):
+    """Saves (or overwrites) the general journal entry for `entry_date` - see get_daily_journal_note()."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO daily_journal_notes (entry_date, notes)
+        VALUES (%s, %s)
+        ON CONFLICT (entry_date) DO UPDATE SET notes = EXCLUDED.notes
+        """,
+        (entry_date, notes),
+    )
+    conn.commit()
 
 
 def get_logbook_entries(conn, symbol):

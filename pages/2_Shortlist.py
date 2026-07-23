@@ -611,15 +611,64 @@ def _archive_pending_snapshots(conn, session):
     session["pending_archives"] = []
 
 
+def _render_todays_thoughts_step(conn, today):
+    """
+    The Journal Session's first step, shown once per day before it
+    moves into reviewing individual tickers: a general note that isn't
+    tied to any one symbol - overall market read, how you're feeling,
+    anything else worth remembering about today as a whole. Saved via
+    database.save_daily_journal_note() and also shown on the Daily
+    Report's cover page (see daily_report.py's build_report_pdf()).
+
+    Returns True once today's entry has been submitted (even
+    submitted blank on purpose - see database.get_daily_journal_note()'s
+    own docstring on why that still counts), so the caller knows to
+    move on to the ticker queue instead of showing this again. Checking
+    the database directly (not a session_state flag) means this is
+    skipped automatically on any later resume the same day, even one
+    started fresh after the tab was closed.
+    """
+    if database.get_daily_journal_note(conn, today) is not None:
+        return True
+
+    anchor_id = "todays_thoughts_anchor"
+    st.markdown(f'<div id="{anchor_id}"></div>', unsafe_allow_html=True)
+    if st.session_state.pop("_scroll_to_session_anchor", False):
+        ui.scroll_to_anchor(anchor_id)
+
+    st.subheader("Today's Thoughts")
+    st.caption(
+        "A general note for today - overall market read, how you're "
+        "feeling, anything not tied to one specific ticker. Shown on "
+        "the Daily Report's cover page."
+    )
+    with st.form(key="todays_thoughts_form", border=False):
+        thoughts = st.text_area(
+            "Today's Thoughts", label_visibility="collapsed", height=120, key="todays_thoughts_input")
+        submitted = st.form_submit_button("Continue →", type="primary")
+
+    if submitted:
+        database.save_daily_journal_note(conn, today, thoughts)
+        st.session_state["_scroll_to_session_anchor"] = True
+        st.rerun()
+
+    return False
+
+
 def render_journal_session(conn):
     """
     The guided Journal Session: walks through every ticker in the queue
     one at a time, full-screen, so journaling all of them in one sitting
     is click-write-Save & Next instead of scrolling back up to the
-    watchlists to pick the next ticker every time.
+    watchlists to pick the next ticker every time. Starts with a
+    once-a-day general note (see _render_todays_thoughts_step()) before
+    getting into individual tickers.
     """
     session = st.session_state["journal_session"]
     queue, index = session["queue"], session["index"]
+
+    if not _render_todays_thoughts_step(conn, timeutil.today_eastern()):
+        return
 
     if index >= len(queue):
         _archive_pending_snapshots(conn, session)

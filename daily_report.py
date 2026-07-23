@@ -186,6 +186,21 @@ def build_report_pdf(conn, report_date):
     pdf.set_font("Helvetica", style="B", size=24)
     pdf.cell(0, 16, _safe_text(f"Daily Report - {report_date:%B %d, %Y}"), new_x="LMARGIN", new_y="NEXT")
 
+    # The general, not-tied-to-any-ticker note from the guided Journal
+    # Session's first step (see pages/2_Shortlist.py's
+    # _render_todays_thoughts_step()) - shown on the cover page only if
+    # something was actually written; a day journaled without ever
+    # opening a session (or one where it was submitted blank) has
+    # nothing to show here, so this is skipped rather than printing an
+    # empty heading.
+    thoughts = database.get_daily_journal_note(conn, report_date)
+    if thoughts and thoughts.strip():
+        pdf.ln(4)
+        pdf.set_font("Helvetica", style="B", size=13)
+        pdf.cell(0, 8, "Today's Thoughts", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", size=11)
+        pdf.multi_cell(0, 6, _safe_text(thoughts.strip()))
+
     for list_id in range(1, 5):
         symbols = [w["symbol"] for w in watchlist if w["list_id"] == list_id]
         for symbol in symbols:
