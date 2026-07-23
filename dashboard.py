@@ -155,6 +155,47 @@ stat_tile(cols[6], "Worst Trade", f"{worst['symbol']} ${worst['profit_loss']:,.2
 
 st.divider()
 
+# --- Expectancy -----------------------------------------------------------
+# The average $ result of a single trade - mathematically identical to
+# filtered["profit_loss"].mean(), just split into the two halves that
+# combine to make it up: how much winning trades contribute (win rate ×
+# average win) and how much losing trades take back (loss rate × average
+# loss, already negative). Splitting it out this way is what makes an
+# expectancy chart useful rather than just another number - the same net
+# result can come from winning often but small, or rarely but big, and
+# those call for very different adjustments to a trading approach.
+st.subheader("Expectancy")
+
+win_rate_frac = len(wins) / len(filtered)
+loss_rate_pct = len(losses) / len(filtered) * 100
+win_contribution = win_rate_frac * avg_win
+loss_contribution = (len(losses) / len(filtered)) * avg_loss
+expectancy = win_contribution + loss_contribution
+
+st.caption(
+    f"On average, every trade nets **${expectancy:,.2f}** - "
+    f"a {win_rate:.1f}% win rate × ${avg_win:,.2f} average win, "
+    f"offset by a {loss_rate_pct:.1f}% loss rate × ${avg_loss:,.2f} average loss."
+)
+
+expectancy_labels = ["Win Contribution", "Loss Contribution", "Expectancy (Net)"]
+expectancy_values = [win_contribution, loss_contribution, expectancy]
+expectancy_colors = [GOOD_COLOR if v >= 0 else CRITICAL_COLOR for v in expectancy_values]
+
+expectancy_chart = go.Figure()
+expectancy_chart.add_hline(y=0, line_color=BASELINE_COLOR, line_width=1)
+expectancy_chart.add_trace(go.Bar(
+    x=expectancy_labels,
+    y=expectancy_values,
+    marker_color=expectancy_colors,
+    text=[f"${v:,.2f}" for v in expectancy_values],
+    textposition="outside",
+    hovertemplate="%{x}: $%{y:,.2f}<extra></extra>",
+))
+st.plotly_chart(charting.style_simple_chart(expectancy_chart, "$ per Trade"), theme=None)
+
+st.divider()
+
 # --- Account performance by time period ----------------------------------
 # Uses trades_df (every closed trade), not `filtered` - this is meant to
 # answer "how has my whole account actually done," not whatever narrower
