@@ -313,15 +313,16 @@ if "Equity Curve" in visible_sections:
     elif filtered.empty:
         st.warning("No trades match the current filters.")
     else:
-        window_labels = ["1M", "3M", "6M", "1Y", "3Y", "All Time"]
+        window_labels = ["1M", "3M", "6M", "YTD", "1Y", "3Y", "All Time"]
         equity_window = st.radio(
-            "Window", window_labels, index=5, horizontal=True, key="equity_window")
+            "Window", window_labels, index=3, horizontal=True, key="equity_window")
 
         today = pd.Timestamp(timeutil.today_eastern())
         window_cutoffs = {
             "1M": today - pd.DateOffset(months=1),
             "3M": today - pd.DateOffset(months=3),
             "6M": today - pd.DateOffset(months=6),
+            "YTD": pd.Timestamp(year=today.year, month=1, day=1),
             "1Y": today - pd.DateOffset(years=1),
             "3Y": today - pd.DateOffset(years=3),
             "All Time": None,
