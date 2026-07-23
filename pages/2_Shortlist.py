@@ -37,6 +37,7 @@ from datetime import datetime, timedelta
 
 import streamlit as st
 
+import archiving
 import auth
 import charting
 import database
@@ -572,6 +573,44 @@ def _advance_session(conn, session, queue):
     st.rerun()
 
 
+def _archive_pending_snapshots(conn, session):
+    """
+    Builds and archives the actual Logbook chart image for every ticker
+    Save & Next was used on this session - deferred here, all at once,
+    rather than paying for a snapshot render (see charting.render_png()'s
+    own docstring on why that's slow: several seconds of fixed kaleido/
+    Chromium startup cost, regardless of image size) on every single
+    step of the session. Notes themselves were already saved instantly
+    at the time (see render_journal_session() below) - this only fills
+    in the chart image half, reusing archiving.archive_ticker() (the
+    same function the nightly job's fallback uses) so there's one place
+    that does this, not two.
+
+    `session["pending_archives"]` is plain in-memory state, not
+    persisted to the database like the queue/index are - if the tab
+    gets closed mid-session with some notes saved but not yet archived
+    this way, tonight's nightly job just archives those tickers as its
+    normal fallback instead. Nothing is lost, only the "instant, same-
+    session" part of it.
+    """
+    pending = session.get("pending_archives", [])
+    if not pending:
+        return
+
+    today = timeutil.today_eastern()
+    as_of = datetime.combine(today, datetime.min.time())
+    progress = st.progress(0.0, text=f"Archiving chart 1 of {len(pending)}...")
+    for i, entry in enumerate(pending):
+        progress.progress(i / len(pending), text=f"Archiving chart {i + 1} of {len(pending)}: {entry['symbol']}...")
+        archiving.archive_ticker(
+            conn, entry["symbol"], entry["entry_point"]["entry_date"], entry["entry_point"].get("buy_price"),
+            entry["entry_label"], today, as_of,
+            direction=entry["entry_point"].get("direction", "LONG"), stop_loss=entry["stop_loss"],
+        )
+    progress.empty()
+    session["pending_archives"] = []
+
+
 def render_journal_session(conn):
     """
     The guided Journal Session: walks through every ticker in the queue
@@ -583,6 +622,7 @@ def render_journal_session(conn):
     queue, index = session["queue"], session["index"]
 
     if index >= len(queue):
+        _archive_pending_snapshots(conn, session)
         database.clear_journal_session_progress(conn)
         st.success(f"Session complete - journaled {len(queue)} ticker(s) today.")
         if st.button("Back to Shortlist"):
@@ -627,7 +667,16 @@ def render_journal_session(conn):
     clicked, notes = render_journal_box(conn, symbol, key_prefix, submit_labels=("Save & Next →", "Skip"))
 
     if clicked == "Save & Next →":
-        save_journal_entry(conn, symbol, entry_point, item["entry_label"], notes, stop_loss=stop_loss)
+        # Notes save instantly; the chart snapshot itself is deferred to
+        # _archive_pending_snapshots() at the end of the session - see
+        # its own docstring for why (rendering one right now would cost
+        # several seconds per ticker, almost entirely kaleido/Chromium
+        # startup overhead, not anything proportional to the image).
+        database.upsert_logbook_entry(conn, symbol, timeutil.today_eastern(), notes=notes)
+        session.setdefault("pending_archives", []).append({
+            "symbol": symbol, "entry_point": entry_point,
+            "entry_label": item["entry_label"], "stop_loss": stop_loss,
+        })
         _advance_session(conn, session, queue)
     elif clicked == "Skip":
         _advance_session(conn, session, queue)
