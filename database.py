@@ -317,6 +317,12 @@ def init_db(conn):
             CONSTRAINT single_row CHECK (id = 1)
         )
     """)
+    # Which of the Dashboard's chart sections to show - a JSON list of
+    # section names (see get_dashboard_visible_sections() below). NULL
+    # (nothing saved yet) means "show everything," so this stays a no-op
+    # until the Dashboard's own Filters sidebar is actually used.
+    if not _column_exists(cur, "ui_settings", "dashboard_visible_sections"):
+        cur.execute("ALTER TABLE ui_settings ADD COLUMN dashboard_visible_sections JSONB")
     # The guided Journal Session's progress (see pages/2_Shortlist.py's
     # render_journal_session()) - which tickers were in the queue and how
     # far you'd gotten - saved here (not just st.session_state) so
@@ -1179,6 +1185,35 @@ def save_open_positions_column_widths(conn, widths):
         ON CONFLICT (id) DO UPDATE SET open_positions_column_widths = EXCLUDED.open_positions_column_widths
         """,
         (Json(widths),),
+    )
+    conn.commit()
+
+
+def get_dashboard_visible_sections(conn, all_sections):
+    """
+    Returns the saved list of which Dashboard chart sections to show
+    (see the Filters sidebar on dashboard.py), or `all_sections` itself
+    (everything shown) if nothing's been customized yet - so this is a
+    no-op for anyone who's never touched that control.
+    """
+    cur = conn.cursor()
+    cur.execute("SELECT dashboard_visible_sections FROM ui_settings WHERE id = 1")
+    row = cur.fetchone()
+    if row is None or row[0] is None:
+        return list(all_sections)
+    return row[0]
+
+
+def save_dashboard_visible_sections(conn, visible_sections):
+    """Saves which Dashboard chart sections to show - see get_dashboard_visible_sections()."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO ui_settings (id, dashboard_visible_sections)
+        VALUES (1, %s)
+        ON CONFLICT (id) DO UPDATE SET dashboard_visible_sections = EXCLUDED.dashboard_visible_sections
+        """,
+        (Json(visible_sections),),
     )
     conn.commit()
 

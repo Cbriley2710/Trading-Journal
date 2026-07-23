@@ -124,6 +124,23 @@ date_range = st.sidebar.date_input(
 # ends of the range - fall back to the full range until then.
 start_date, end_date = date_range if len(date_range) == 2 else (min_date, max_date)
 
+# Which chart sections to actually show - saved (see database.
+# get_dashboard_visible_sections()/save_dashboard_visible_sections())
+# so it stays this way next time the Dashboard is opened, on any
+# device, until changed again - same silent-save-on-change pattern as
+# Chart Settings elsewhere. Stat tiles and the Trades table itself
+# aren't included here - they're core content, not an optional chart.
+ALL_DASHBOARD_SECTIONS = [
+    "Account Performance", "Equity Curve", "Holding Period vs. Return",
+    "Profit/Loss by Symbol", "Equity Allocation", "Expectancy",
+    "Theoretical Account Projection",
+]
+saved_visible_sections = database.get_dashboard_visible_sections(conn, ALL_DASHBOARD_SECTIONS)
+visible_sections = st.sidebar.multiselect(
+    "Dashboard Charts", ALL_DASHBOARD_SECTIONS, default=saved_visible_sections)
+if visible_sections != saved_visible_sections:
+    database.save_dashboard_visible_sections(conn, visible_sections)
+
 filtered = trades_df[
     trades_df["symbol"].isin(selected_symbols)
     & (trades_df["date"].dt.date >= start_date)
@@ -143,6 +160,15 @@ avg_win = wins["profit_loss"].mean() if not wins.empty else 0
 avg_loss = losses["profit_loss"].mean() if not losses.empty else 0
 best = filtered.loc[filtered["profit_loss"].idxmax()]
 worst = filtered.loc[filtered["profit_loss"].idxmin()]
+
+# Computed unconditionally (not inside the Expectancy section below) since
+# Theoretical Account Projection also needs it - either section can be
+# hidden independently via the Dashboard Charts filter, so neither can
+# assume the other one ran first.
+loss_rate_pct = len(losses) / len(filtered) * 100
+win_contribution = (len(wins) / len(filtered)) * avg_win
+loss_contribution = (len(losses) / len(filtered)) * avg_loss
+expectancy = win_contribution + loss_contribution
 
 cols = st.columns(7)
 stat_tile(cols[0], "Total Trades", f"{len(filtered)}")
@@ -164,27 +190,28 @@ st.divider()
 # that value already has this year's P/L (and today's unrealized P/L)
 # baked into it, so using it as the denominator would inflate as the
 # year goes on and systematically understate every period's return.
-st.subheader("Account Performance")
-if jan1_balance:
-    today = pd.Timestamp(timeutil.today_eastern())
-    periods = [
-        ("7 Days", today - pd.Timedelta(days=7)),
-        ("30 Days", today - pd.Timedelta(days=30)),
-        ("90 Days", today - pd.Timedelta(days=90)),
-        ("YTD", pd.Timestamp(year=today.year, month=1, day=1)),
-        ("All-Time", None),
-    ]
-    period_cols = st.columns(len(periods))
-    for col, (label, cutoff) in zip(period_cols, periods):
-        period_trades = trades_df if cutoff is None else trades_df[trades_df["date"] >= cutoff]
-        period_pl = period_trades["profit_loss"].sum()
-        period_pct = period_pl / jan1_balance * 100
-        stat_tile(col, label, f"${period_pl:,.2f} ({period_pct:+.1f}%)",
-                  GOOD_COLOR if period_pl >= 0 else CRITICAL_COLOR)
-else:
-    st.info("Set your account value as of Jan 1 (Account Settings below) to see account performance by time period.")
+if "Account Performance" in visible_sections:
+    st.subheader("Account Performance")
+    if jan1_balance:
+        today = pd.Timestamp(timeutil.today_eastern())
+        periods = [
+            ("7 Days", today - pd.Timedelta(days=7)),
+            ("30 Days", today - pd.Timedelta(days=30)),
+            ("90 Days", today - pd.Timedelta(days=90)),
+            ("YTD", pd.Timestamp(year=today.year, month=1, day=1)),
+            ("All-Time", None),
+        ]
+        period_cols = st.columns(len(periods))
+        for col, (label, cutoff) in zip(period_cols, periods):
+            period_trades = trades_df if cutoff is None else trades_df[trades_df["date"] >= cutoff]
+            period_pl = period_trades["profit_loss"].sum()
+            period_pct = period_pl / jan1_balance * 100
+            stat_tile(col, label, f"${period_pl:,.2f} ({period_pct:+.1f}%)",
+                      GOOD_COLOR if period_pl >= 0 else CRITICAL_COLOR)
+    else:
+        st.info("Set your account value as of Jan 1 (Account Settings below) to see account performance by time period.")
 
-st.divider()
+    st.divider()
 
 def build_mark_to_market_curve(trades_records, open_positions, daily_index):
     """
@@ -275,166 +302,170 @@ def build_mark_to_market_curve(trades_records, open_positions, daily_index):
 # cumulative total at 0% at the start of that window, so "1 Year" shows
 # the gain made DURING the last year, not the whole account's history
 # compressed into one window.
-st.subheader("Equity Curve")
+if "Equity Curve" in visible_sections:
+    st.subheader("Equity Curve")
 
-if not jan1_balance:
-    st.info(
-        "Set your account value as of Jan 1 (Account Settings below) "
-        "to see the equity curve as a % gain."
-    )
-elif filtered.empty:
-    st.warning("No trades match the current filters.")
-else:
-    window_labels = ["1M", "3M", "6M", "1Y", "3Y", "All Time"]
-    equity_window = st.radio(
-        "Window", window_labels, index=5, horizontal=True, key="equity_window")
+    if not jan1_balance:
+        st.info(
+            "Set your account value as of Jan 1 (Account Settings below) "
+            "to see the equity curve as a % gain."
+        )
+    elif filtered.empty:
+        st.warning("No trades match the current filters.")
+    else:
+        window_labels = ["1M", "3M", "6M", "1Y", "3Y", "All Time"]
+        equity_window = st.radio(
+            "Window", window_labels, index=5, horizontal=True, key="equity_window")
 
-    today = pd.Timestamp(timeutil.today_eastern())
-    window_cutoffs = {
-        "1M": today - pd.DateOffset(months=1),
-        "3M": today - pd.DateOffset(months=3),
-        "6M": today - pd.DateOffset(months=6),
-        "1Y": today - pd.DateOffset(years=1),
-        "3Y": today - pd.DateOffset(years=3),
-        "All Time": None,
-    }
-    cutoff = window_cutoffs[equity_window]
+        today = pd.Timestamp(timeutil.today_eastern())
+        window_cutoffs = {
+            "1M": today - pd.DateOffset(months=1),
+            "3M": today - pd.DateOffset(months=3),
+            "6M": today - pd.DateOffset(months=6),
+            "1Y": today - pd.DateOffset(years=1),
+            "3Y": today - pd.DateOffset(years=3),
+            "All Time": None,
+        }
+        cutoff = window_cutoffs[equity_window]
 
-    # The FULL mark-to-market curve (every day since this account's very
-    # first trade) is built once, regardless of which window is
-    # selected, then just sliced/re-based per window below - the
-    # expensive part (fetching each symbol's price history) is cached in
-    # charting.fetch_daily_closes(), so switching windows doesn't
-    # re-fetch anything, it just re-slices numbers already in hand.
-    full_start = filtered["entry_date"].min()
-    full_daily_index = pd.date_range(start=full_start, end=today, freq="D")
-    open_positions_for_curve = [
-        p for p in database.get_open_positions(conn) if p["symbol"] in selected_symbols
-    ]
+        # The FULL mark-to-market curve (every day since this account's very
+        # first trade) is built once, regardless of which window is
+        # selected, then just sliced/re-based per window below - the
+        # expensive part (fetching each symbol's price history) is cached in
+        # charting.fetch_daily_closes(), so switching windows doesn't
+        # re-fetch anything, it just re-slices numbers already in hand.
+        full_start = filtered["entry_date"].min()
+        full_daily_index = pd.date_range(start=full_start, end=today, freq="D")
+        open_positions_for_curve = [
+            p for p in database.get_open_positions(conn) if p["symbol"] in selected_symbols
+        ]
 
-    with st.spinner("Fetching price history for the equity curve..."):
-        full_curve_pl = build_mark_to_market_curve(
-            filtered.to_dict("records"), open_positions_for_curve, full_daily_index)
+        with st.spinner("Fetching price history for the equity curve..."):
+            full_curve_pl = build_mark_to_market_curve(
+                filtered.to_dict("records"), open_positions_for_curve, full_daily_index)
 
-    window_start = max(cutoff, full_daily_index.min()) if cutoff is not None else full_daily_index.min()
-    baseline = full_curve_pl.asof(window_start)
-    window_curve = full_curve_pl.loc[window_start:] - baseline
-    window_pct = window_curve / jan1_balance * 100
+        window_start = max(cutoff, full_daily_index.min()) if cutoff is not None else full_daily_index.min()
+        baseline = full_curve_pl.asof(window_start)
+        window_curve = full_curve_pl.loc[window_start:] - baseline
+        window_pct = window_curve / jan1_balance * 100
 
-    equity_chart = go.Figure()
-    equity_chart.add_hline(y=0, line_color=BASELINE_COLOR, line_width=1)
-    equity_chart.add_trace(go.Scatter(
-        x=window_pct.index,
-        y=window_pct.values,
-        mode="lines",
-        line=dict(color=LINE_COLOR, width=2),
-        hovertemplate="%{x|%b %d, %Y}<br>Cumulative: %{y:+.2f}%<extra></extra>",
-    ))
-    st.plotly_chart(charting.style_simple_chart(equity_chart, "% Gain"), theme=None)
+        equity_chart = go.Figure()
+        equity_chart.add_hline(y=0, line_color=BASELINE_COLOR, line_width=1)
+        equity_chart.add_trace(go.Scatter(
+            x=window_pct.index,
+            y=window_pct.values,
+            mode="lines",
+            line=dict(color=LINE_COLOR, width=2),
+            hovertemplate="%{x|%b %d, %Y}<br>Cumulative: %{y:+.2f}%<extra></extra>",
+        ))
+        st.plotly_chart(charting.style_simple_chart(equity_chart, "% Gain"), theme=None)
 
 # --- Holding period vs. return scatter -------------------------------------
 # One dot per trade: how many days it was held (x) against how much it
 # returned as a % of what was actually put into it (y) - a quick way to
 # see whether trades held longer tend to do better or worse, at a
 # glance, instead of reading it out of the trade table row by row.
-st.subheader("Holding Period vs. Return")
+if "Holding Period vs. Return" in visible_sections:
+    st.subheader("Holding Period vs. Return")
 
-scatter_data = filtered.copy()
-scatter_data["holding_days"] = (scatter_data["date"] - scatter_data["entry_date"]).dt.days
-# Same entry-price convention as the trade table below: for a SHORT
-# trade, the stored buy_price is the cover (exit) and sell_price is
-# the short sale (entry) - the opposite pairing from a LONG trade.
-is_short = scatter_data["direction"] == "SHORT"
-entry_price = scatter_data["buy_price"].where(~is_short, scatter_data["sell_price"])
-scatter_data["return_pct"] = scatter_data["profit_loss"] / (entry_price * scatter_data["quantity"]) * 100
-scatter_colors = [GOOD_COLOR if v >= 0 else CRITICAL_COLOR for v in scatter_data["profit_loss"]]
+    scatter_data = filtered.copy()
+    scatter_data["holding_days"] = (scatter_data["date"] - scatter_data["entry_date"]).dt.days
+    # Same entry-price convention as the trade table below: for a SHORT
+    # trade, the stored buy_price is the cover (exit) and sell_price is
+    # the short sale (entry) - the opposite pairing from a LONG trade.
+    is_short = scatter_data["direction"] == "SHORT"
+    entry_price = scatter_data["buy_price"].where(~is_short, scatter_data["sell_price"])
+    scatter_data["return_pct"] = scatter_data["profit_loss"] / (entry_price * scatter_data["quantity"]) * 100
+    scatter_colors = [GOOD_COLOR if v >= 0 else CRITICAL_COLOR for v in scatter_data["profit_loss"]]
 
-scatter_chart = go.Figure()
-scatter_chart.add_hline(y=0, line_color=BASELINE_COLOR, line_width=1)
-scatter_chart.add_trace(go.Scatter(
-    x=scatter_data["holding_days"],
-    y=scatter_data["return_pct"],
-    mode="markers",
-    marker=dict(color=scatter_colors, size=8, opacity=0.8),
-    customdata=scatter_data[["symbol", "profit_loss"]],
-    hovertemplate="%{customdata[0]}<br>Held %{x} day(s)<br>Return: %{y:+.1f}%"
-                  "<br>P/L: $%{customdata[1]:,.2f}<extra></extra>",
-))
-scatter_fig = charting.style_simple_chart(scatter_chart, "Return (%)")
-scatter_fig.update_layout(xaxis_title="Holding Period (Days)")
-st.plotly_chart(scatter_fig, theme=None)
+    scatter_chart = go.Figure()
+    scatter_chart.add_hline(y=0, line_color=BASELINE_COLOR, line_width=1)
+    scatter_chart.add_trace(go.Scatter(
+        x=scatter_data["holding_days"],
+        y=scatter_data["return_pct"],
+        mode="markers",
+        marker=dict(color=scatter_colors, size=8, opacity=0.8),
+        customdata=scatter_data[["symbol", "profit_loss"]],
+        hovertemplate="%{customdata[0]}<br>Held %{x} day(s)<br>Return: %{y:+.1f}%"
+                      "<br>P/L: $%{customdata[1]:,.2f}<extra></extra>",
+    ))
+    scatter_fig = charting.style_simple_chart(scatter_chart, "Return (%)")
+    scatter_fig.update_layout(xaxis_title="Holding Period (Days)")
+    st.plotly_chart(scatter_fig, theme=None)
 
 # --- P/L by symbol chart -------------------------------------------------
-st.subheader("Profit/Loss by Symbol")
+if "Profit/Loss by Symbol" in visible_sections:
+    st.subheader("Profit/Loss by Symbol")
 
-by_symbol = filtered.groupby("symbol")["profit_loss"].sum().sort_values(ascending=False)
-bar_colors = [GOOD_COLOR if v >= 0 else CRITICAL_COLOR for v in by_symbol.values]
+    by_symbol = filtered.groupby("symbol")["profit_loss"].sum().sort_values(ascending=False)
+    bar_colors = [GOOD_COLOR if v >= 0 else CRITICAL_COLOR for v in by_symbol.values]
 
-# With an account value saved, each symbol's contribution is shown as a
-# % of that account too, not just its raw dollar P/L.
-if account_value:
-    bar_text = [f"${v:,.0f} ({v / account_value * 100:+.1f}%)" for v in by_symbol.values]
-    bar_customdata = by_symbol.values / account_value * 100
-    bar_hovertemplate = "%{x}: $%{y:,.2f} (%{customdata:+.1f}% of account)<extra></extra>"
-else:
-    bar_text = [f"${v:,.0f}" for v in by_symbol.values]
-    bar_customdata = None
-    bar_hovertemplate = "%{x}: $%{y:,.2f}<extra></extra>"
+    # With an account value saved, each symbol's contribution is shown as a
+    # % of that account too, not just its raw dollar P/L.
+    if account_value:
+        bar_text = [f"${v:,.0f} ({v / account_value * 100:+.1f}%)" for v in by_symbol.values]
+        bar_customdata = by_symbol.values / account_value * 100
+        bar_hovertemplate = "%{x}: $%{y:,.2f} (%{customdata:+.1f}% of account)<extra></extra>"
+    else:
+        bar_text = [f"${v:,.0f}" for v in by_symbol.values]
+        bar_customdata = None
+        bar_hovertemplate = "%{x}: $%{y:,.2f}<extra></extra>"
 
-bar_chart = go.Figure()
-bar_chart.add_hline(y=0, line_color=BASELINE_COLOR, line_width=1)
-bar_chart.add_trace(go.Bar(
-    x=by_symbol.index,
-    y=by_symbol.values,
-    marker_color=bar_colors,
-    text=bar_text,
-    textposition="outside",
-    customdata=bar_customdata,
-    hovertemplate=bar_hovertemplate,
-))
-st.plotly_chart(charting.style_simple_chart(bar_chart, "Total P/L ($)"), theme=None)
+    bar_chart = go.Figure()
+    bar_chart.add_hline(y=0, line_color=BASELINE_COLOR, line_width=1)
+    bar_chart.add_trace(go.Bar(
+        x=by_symbol.index,
+        y=by_symbol.values,
+        marker_color=bar_colors,
+        text=bar_text,
+        textposition="outside",
+        customdata=bar_customdata,
+        hovertemplate=bar_hovertemplate,
+    ))
+    st.plotly_chart(charting.style_simple_chart(bar_chart, "Total P/L ($)"), theme=None)
 
 # --- Equity allocation (open positions as % of account) -------------------
-st.subheader("Equity Allocation")
-if not account_value:
-    st.info("Set your account value above to see equity allocation across open positions.")
-else:
-    open_positions = database.get_open_positions(conn)
-    if not open_positions:
-        st.info(
-            "No open positions right now. A ticker shows up here as soon as "
-            "an imported buy hasn't been matched to a sell yet."
-        )
+if "Equity Allocation" in visible_sections:
+    st.subheader("Equity Allocation")
+    if not account_value:
+        st.info("Set your account value above to see equity allocation across open positions.")
     else:
-        alloc_rows = []
-        with st.spinner("Fetching current prices..."):
-            for position in open_positions:
-                current_price = charting.fetch_latest_price(position["symbol"])
-                if current_price is None:
-                    continue
-                current_value = current_price * position["quantity"]
-                alloc_rows.append({
-                    "symbol": position["symbol"],
-                    "current_value": current_value,
-                    "pct": current_value / account_value * 100,
-                })
-
-        if not alloc_rows:
-            st.warning("No current price data available for open positions.")
+        open_positions = database.get_open_positions(conn)
+        if not open_positions:
+            st.info(
+                "No open positions right now. A ticker shows up here as soon as "
+                "an imported buy hasn't been matched to a sell yet."
+            )
         else:
-            alloc_rows.sort(key=lambda r: r["pct"], reverse=True)
-            alloc_chart = go.Figure()
-            alloc_chart.add_trace(go.Bar(
-                x=[r["symbol"] for r in alloc_rows],
-                y=[r["pct"] for r in alloc_rows],
-                marker_color=charting.CATEGORICAL_PALETTE[0],
-                text=[f"{r['pct']:.1f}% (${r['current_value']:,.0f})" for r in alloc_rows],
-                textposition="outside",
-                hovertemplate="%{x}: %{y:.1f}% of account<extra></extra>",
-            ))
-            st.plotly_chart(charting.style_simple_chart(alloc_chart, "% of Account"), theme=None)
+            alloc_rows = []
+            with st.spinner("Fetching current prices..."):
+                for position in open_positions:
+                    current_price = charting.fetch_latest_price(position["symbol"])
+                    if current_price is None:
+                        continue
+                    current_value = current_price * position["quantity"]
+                    alloc_rows.append({
+                        "symbol": position["symbol"],
+                        "current_value": current_value,
+                        "pct": current_value / account_value * 100,
+                    })
 
-st.divider()
+            if not alloc_rows:
+                st.warning("No current price data available for open positions.")
+            else:
+                alloc_rows.sort(key=lambda r: r["pct"], reverse=True)
+                alloc_chart = go.Figure()
+                alloc_chart.add_trace(go.Bar(
+                    x=[r["symbol"] for r in alloc_rows],
+                    y=[r["pct"] for r in alloc_rows],
+                    marker_color=charting.CATEGORICAL_PALETTE[0],
+                    text=[f"{r['pct']:.1f}% (${r['current_value']:,.0f})" for r in alloc_rows],
+                    textposition="outside",
+                    hovertemplate="%{x}: %{y:.1f}% of account<extra></extra>",
+                ))
+                st.plotly_chart(charting.style_simple_chart(alloc_chart, "% of Account"), theme=None)
+
+    st.divider()
 
 # --- Expectancy -----------------------------------------------------------
 # The average $ result of a single trade - mathematically identical to
@@ -445,35 +476,38 @@ st.divider()
 # expectancy chart useful rather than just another number - the same net
 # result can come from winning often but small, or rarely but big, and
 # those call for very different adjustments to a trading approach.
-st.subheader("Expectancy")
+# (expectancy itself is computed up with the stat tiles, not here - see
+# that comment for why: Theoretical Account Projection needs it too, and
+# either section can be hidden independently.)
+if "Expectancy" in visible_sections:
+    st.subheader("Expectancy")
 
-win_rate_frac = len(wins) / len(filtered)
-loss_rate_pct = len(losses) / len(filtered) * 100
-win_contribution = win_rate_frac * avg_win
-loss_contribution = (len(losses) / len(filtered)) * avg_loss
-expectancy = win_contribution + loss_contribution
+    st.caption(
+        # $ signs are escaped (\$) - Streamlit's markdown renderer treats
+        # a PAIR of literal $ in the same string as LaTeX math-mode
+        # delimiters, which silently mangled this into a broken-looking
+        # code/math box instead of plain "$142.50" text (caught by
+        # actually loading the page, not just reading the source).
+        f"On average, every trade nets **\\${expectancy:,.2f}** - "
+        f"a {win_rate:.1f}% win rate × \\${avg_win:,.2f} average win, "
+        f"offset by a {loss_rate_pct:.1f}% loss rate × \\${avg_loss:,.2f} average loss."
+    )
 
-st.caption(
-    f"On average, every trade nets **${expectancy:,.2f}** - "
-    f"a {win_rate:.1f}% win rate × ${avg_win:,.2f} average win, "
-    f"offset by a {loss_rate_pct:.1f}% loss rate × ${avg_loss:,.2f} average loss."
-)
+    expectancy_labels = ["Win Contribution", "Loss Contribution", "Expectancy (Net)"]
+    expectancy_values = [win_contribution, loss_contribution, expectancy]
+    expectancy_colors = [GOOD_COLOR if v >= 0 else CRITICAL_COLOR for v in expectancy_values]
 
-expectancy_labels = ["Win Contribution", "Loss Contribution", "Expectancy (Net)"]
-expectancy_values = [win_contribution, loss_contribution, expectancy]
-expectancy_colors = [GOOD_COLOR if v >= 0 else CRITICAL_COLOR for v in expectancy_values]
-
-expectancy_chart = go.Figure()
-expectancy_chart.add_hline(y=0, line_color=BASELINE_COLOR, line_width=1)
-expectancy_chart.add_trace(go.Bar(
-    x=expectancy_labels,
-    y=expectancy_values,
-    marker_color=expectancy_colors,
-    text=[f"${v:,.2f}" for v in expectancy_values],
-    textposition="outside",
-    hovertemplate="%{x}: $%{y:,.2f}<extra></extra>",
-))
-st.plotly_chart(charting.style_simple_chart(expectancy_chart, "$ per Trade"), theme=None)
+    expectancy_chart = go.Figure()
+    expectancy_chart.add_hline(y=0, line_color=BASELINE_COLOR, line_width=1)
+    expectancy_chart.add_trace(go.Bar(
+        x=expectancy_labels,
+        y=expectancy_values,
+        marker_color=expectancy_colors,
+        text=[f"${v:,.2f}" for v in expectancy_values],
+        textposition="outside",
+        hovertemplate="%{x}: $%{y:,.2f}<extra></extra>",
+    ))
+    st.plotly_chart(charting.style_simple_chart(expectancy_chart, "$ per Trade"), theme=None)
 
 # --- Theoretical account projection ---------------------------------------
 # A simple, linear "if this exact expectancy keeps up" projection - your
@@ -485,45 +519,47 @@ st.plotly_chart(charting.style_simple_chart(expectancy_chart, "$ per Trade"), th
 # that kind of self-inflating math, for the same reason (see its comment
 # above): it would overstate the projection more and more the further out
 # it goes, exactly like dividing by a growing balance did there.
-st.subheader("Theoretical Account Projection")
-if not account_value:
-    st.info("Set your account value above (Account Settings below) to see a theoretical account projection.")
-else:
-    milestones = [20, 50, 100, 200]
-    projected_values = [account_value + expectancy * n for n in milestones]
+if "Theoretical Account Projection" in visible_sections:
+    st.subheader("Theoretical Account Projection")
+    if not account_value:
+        st.info("Set your account value above (Account Settings below) to see a theoretical account projection.")
+    else:
+        milestones = [20, 50, 100, 200]
+        projected_values = [account_value + expectancy * n for n in milestones]
 
-    st.caption(
-        f"Starting from your current calculated account value of ${account_value:,.2f}, "
-        f"assuming your ${expectancy:,.2f} average expectancy per trade holds up over "
-        "more trades - not a guarantee, just a straight-line extension of your current edge (or drag)."
-    )
+        st.caption(
+            # \$ - see the Expectancy caption's own comment above on why.
+            f"Starting from your current calculated account value of \\${account_value:,.2f}, "
+            f"assuming your \\${expectancy:,.2f} average expectancy per trade holds up over "
+            "more trades - not a guarantee, just a straight-line extension of your current edge (or drag)."
+        )
 
-    milestone_cols = st.columns(len(milestones))
-    for col, n, value in zip(milestone_cols, milestones, projected_values):
-        gain_pct = (value - account_value) / account_value * 100
-        stat_tile(col, f"After {n} Trades", f"${value:,.2f} ({gain_pct:+.1f}%)",
-                  GOOD_COLOR if gain_pct >= 0 else CRITICAL_COLOR)
+        milestone_cols = st.columns(len(milestones))
+        for col, n, value in zip(milestone_cols, milestones, projected_values):
+            gain_pct = (value - account_value) / account_value * 100
+            stat_tile(col, f"After {n} Trades", f"${value:,.2f} ({gain_pct:+.1f}%)",
+                      GOOD_COLOR if gain_pct >= 0 else CRITICAL_COLOR)
 
-    # A real numeric x-axis (0/20/50/100/200), not evenly-spaced category
-    # labels - milestones aren't evenly spaced in trade-count terms (+20,
-    # then +30, +50, +100), so treating them as equal-width categories
-    # would visually bend an actually-straight line into something that
-    # looks like it's accelerating, purely from the mismatched spacing.
-    projection_chart = go.Figure()
-    projection_chart.add_trace(go.Scatter(
-        x=[0] + milestones,
-        y=[account_value] + projected_values,
-        mode="lines+markers",
-        line=dict(color=LINE_COLOR, width=2),
-        marker=dict(size=8),
-        hovertemplate="%{x} trade(s) from now: $%{y:,.2f}<extra></extra>",
-    ))
-    projection_fig = charting.style_simple_chart(projection_chart, "Theoretical Account Value ($)")
-    projection_fig.update_xaxes(
-        title_text="Trades From Now", tickmode="array", tickvals=[0] + milestones,
-        ticktext=["Now"] + [str(n) for n in milestones],
-    )
-    st.plotly_chart(projection_fig, theme=None)
+        # A real numeric x-axis (0/20/50/100/200), not evenly-spaced category
+        # labels - milestones aren't evenly spaced in trade-count terms (+20,
+        # then +30, +50, +100), so treating them as equal-width categories
+        # would visually bend an actually-straight line into something that
+        # looks like it's accelerating, purely from the mismatched spacing.
+        projection_chart = go.Figure()
+        projection_chart.add_trace(go.Scatter(
+            x=[0] + milestones,
+            y=[account_value] + projected_values,
+            mode="lines+markers",
+            line=dict(color=LINE_COLOR, width=2),
+            marker=dict(size=8),
+            hovertemplate="%{x} trade(s) from now: $%{y:,.2f}<extra></extra>",
+        ))
+        projection_fig = charting.style_simple_chart(projection_chart, "Theoretical Account Value ($)")
+        projection_fig.update_xaxes(
+            title_text="Trades From Now", tickmode="array", tickvals=[0] + milestones,
+            ticktext=["Now"] + [str(n) for n in milestones],
+        )
+        st.plotly_chart(projection_fig, theme=None)
 
 st.divider()
 
@@ -582,10 +618,19 @@ with st.expander("Account Settings"):
 
     if jan1_balance:
         st.caption(
-            f"Calculated current account value: ${account_value:,.2f} "
-            f"(${jan1_balance:,.2f} Jan 1 baseline + ${deposits_this_year:,.2f} net "
-            f"deposits/withdrawals this year + ${realized_pl_this_year:,.2f} realized P/L "
-            f"this year + ${total_unrealized_pl_now:,.2f} unrealized P/L now)"
+            # \$ - a pre-existing bug (this caption predates today's other
+            # changes): 5 literal $ signs in one markdown string get
+            # parsed as LaTeX math-mode delimiters in pairs, mangling
+            # everything between the 1st/2nd and 3rd/4th into a broken-
+            # looking code box instead of plain currency text. Only ever
+            # showed up by actually loading the page, not from reading
+            # the source - a lone, unpaired $ (like every stat_tile()
+            # value elsewhere on this page) renders fine; it's only two
+            # or more in the SAME string that pair up and break.
+            f"Calculated current account value: \\${account_value:,.2f} "
+            f"(\\${jan1_balance:,.2f} Jan 1 baseline + \\${deposits_this_year:,.2f} net "
+            f"deposits/withdrawals this year + \\${realized_pl_this_year:,.2f} realized P/L "
+            f"this year + \\${total_unrealized_pl_now:,.2f} unrealized P/L now)"
         )
 
     st.subheader("Deposits & Withdrawals")
