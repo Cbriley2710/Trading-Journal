@@ -35,7 +35,7 @@ def main():
     print(f"Warming price cache for {len(symbols)} symbol(s)...")
     for symbol in sorted(symbols):
         cached = charting.warm_price_cache_for_symbol(symbol)
-        print(f"  {symbol}: {'cached' if cached else 'no price data found, skipped'}.")
+        print(f"  {symbol}: {'cached' if cached else 'skipped (no data yet, or today is not fully closed out)'}.")
     print("Done.")
 
 

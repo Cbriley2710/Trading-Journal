@@ -182,9 +182,20 @@ def warm_price_cache_for_symbol(symbol):
     needs further back than that, fetch_history() just falls back to a
     live fetch for that one case, same as before this cache existed.
 
+    Skips writing anything if the fetch doesn't actually reach through
+    today - a run before today's close (a manual test, or the scheduled
+    job somehow firing early) would otherwise tag yesterday's data as
+    "fresh for today," and _daily_history_from_cache() would then keep
+    serving that stale snapshot for the rest of the day even after
+    today's real close becomes available, with nothing left to correct
+    it. Leaving the old cache row (or no row) alone here just means
+    fetch_history() falls back to a live fetch, same as before this
+    symbol was ever cached.
+
     Returns True if it was cached, False if Yahoo Finance had no data
-    for this symbol (delisted, bad ticker, etc.) or the fetch failed -
-    callers print/skip accordingly rather than treating it as fatal.
+    for this symbol (delisted, bad ticker, etc.), the fetch failed, or
+    today's close isn't in the data yet - callers print/skip
+    accordingly rather than treating it as fatal.
     """
     try:
         history = yf.Ticker(symbol).history(period="5y", interval="1d")
@@ -194,6 +205,10 @@ def warm_price_cache_for_symbol(symbol):
         return False
 
     history.index = history.index.tz_localize(None)
+    today = timeutil.today_eastern()
+    if history.index[-1].date() != today:
+        return False
+
     history_dict = {
         "dates": [d.date().isoformat() for d in history.index],
         "open": history["Open"].tolist(),
@@ -203,7 +218,7 @@ def warm_price_cache_for_symbol(symbol):
         "volume": history["Volume"].tolist(),
     }
     conn = database.get_connection()
-    database.save_cached_price_history(conn, symbol, history_dict, timeutil.today_eastern())
+    database.save_cached_price_history(conn, symbol, history_dict, today)
     return True
 
 
@@ -217,14 +232,15 @@ def _daily_history_from_cache(symbol, needed_start):
     A None return means "fall back to a live fetch," same as if this
     cache didn't exist.
 
-    Deliberately does NOT also require the cache to already include
-    TODAY's own candle - Yahoo Finance doesn't always have a trading
-    day's close published the instant the warming job runs, and
-    demanding that would mean any such lag forces a live fetch for
-    EVERY chart that whole day, defeating the point. `fetched_for_date
-    == today` is already the freshness guarantee: whatever Yahoo had at
-    fetch time is what's here, same as a live fetch would have gotten
-    at that same moment.
+    Doesn't separately re-check that the cache includes today's own
+    candle - warm_price_cache_for_symbol() already guarantees that by
+    refusing to write anything unless its fetch actually reached
+    through today, so a `fetched_for_date == today` row here always
+    has today's close in it. That split is what avoids re-litigating
+    Yahoo's own publish timing on every chart load: a warm run before
+    today's close just skips writing (leaving whatever's here, or
+    nothing), rather than this function having to guess whether a
+    same-day row is trustworthy.
     """
     conn = database.get_connection()
     cached = database.get_cached_price_history(conn, symbol)
