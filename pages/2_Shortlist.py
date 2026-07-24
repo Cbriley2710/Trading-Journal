@@ -60,7 +60,7 @@ def fact_tile(column, label, value, color=None):
     ui.stat_tile(column, label, value, color, size="1.3rem")
 
 
-def render_price_chart(symbol, entry_point, entry_label, key_prefix, stop_loss=None):
+def render_price_chart(symbol, entry_point, entry_label, key_prefix, stop_loss=None, anchor_id=None):
     """
     The Timeframe/Chart-Settings controls plus the price chart itself -
     split out from render_chart_and_journal() below so the Journal
@@ -72,6 +72,14 @@ def render_price_chart(symbol, entry_point, entry_label, key_prefix, stop_loss=N
     `key_prefix` keeps each section's Streamlit widgets independent (so
     picking a timeframe for a watchlist ticker doesn't affect the open
     position's chart, etc).
+
+    `anchor_id`, if given, places a scroll target (see ui.scroll_to_
+    anchor()) immediately before the chart itself - deliberately AFTER
+    the Timeframe radio and Chart Settings row above it, so scrolling
+    there lands on the chart's own toolbar at the very top of the
+    viewport, with the chart, volume panel, and journal box all in one
+    screen - not higher up at "Reviewing X of Y," which still left the
+    chart itself below the fold.
     """
     timeframe_label = st.radio(
         "Timeframe", options=list(charting.TIMEFRAMES.keys()), index=1,
@@ -127,6 +135,9 @@ def render_price_chart(symbol, entry_point, entry_label, key_prefix, stop_loss=N
 
     conn = database.get_connection()
     saved_drawings = database.get_drawings(conn, symbol)
+
+    if anchor_id:
+        st.markdown(f'<div id="{anchor_id}"></div>', unsafe_allow_html=True)
 
     fig, fit_payload = charting.build_figure(
         symbol, history, entry_point, settings, overlay_history, entry_label=entry_label, interval=interval,
@@ -228,9 +239,8 @@ def render_chart_and_journal(symbol, entry_point, entry_label, key_prefix, stop_
     position detail view below.
     """
     anchor_id = f"{key_prefix}_{symbol}_journal_anchor"
-    st.markdown(f'<div id="{anchor_id}"></div>', unsafe_allow_html=True)
 
-    entry_point = render_price_chart(symbol, entry_point, entry_label, key_prefix, stop_loss=stop_loss)
+    entry_point = render_price_chart(symbol, entry_point, entry_label, key_prefix, stop_loss=stop_loss, anchor_id=anchor_id)
     if entry_point is None:
         return
 
@@ -682,11 +692,8 @@ def render_journal_session(conn):
     item = queue[index]
     symbol = item["symbol"]
     key_prefix = f"session_{index}"
-
     anchor_id = f"{key_prefix}_journal_anchor"
-    st.markdown(f'<div id="{anchor_id}"></div>', unsafe_allow_html=True)
-    if st.session_state.pop("_scroll_to_session_anchor", False):
-        ui.scroll_to_anchor(anchor_id)
+    should_scroll = st.session_state.pop("_scroll_to_session_anchor", False)
 
     header_cols = st.columns([5, 1])
     header_cols[0].subheader(f"Reviewing {index + 1} of {len(queue)}: {symbol}")
@@ -704,7 +711,10 @@ def render_journal_session(conn):
         st.divider()
 
     entry_point = render_price_chart(
-        symbol, item["entry_point"], item["entry_label"], key_prefix, stop_loss=stop_loss)
+        symbol, item["entry_point"], item["entry_label"], key_prefix, stop_loss=stop_loss, anchor_id=anchor_id)
+
+    if should_scroll:
+        ui.scroll_to_anchor(anchor_id)
 
     if entry_point is None:
         # No price data for this one right now - nothing to journal

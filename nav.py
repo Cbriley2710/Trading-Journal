@@ -99,7 +99,20 @@ def render_top_nav(current_label):
     _apply_background()
 
     st.markdown(
-        "<style>[data-testid='stSidebarNav'] {display: none;}</style>",
+        """
+        <style>
+        [data-testid='stSidebarNav'] {display: none;}
+        /* Chrome's CSS scroll anchoring silently readjusts this
+        container's scroll position whenever content above/around it
+        resizes (e.g. a chart finishing its async layout right after
+        ui.scroll_to_anchor() moves the page) - it was quietly undoing
+        that deliberate scroll a moment after it happened, landing back
+        wherever the browser's own anchor node happened to sit instead
+        of at the ticker's chart. Disabling it here is what makes
+        scroll_to_anchor()'s position actually stick. */
+        [data-testid='stMain'] {overflow-anchor: none;}
+        </style>
+        """,
         unsafe_allow_html=True,
     )
 

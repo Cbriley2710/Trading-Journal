@@ -45,12 +45,24 @@ def scroll_to_anchor(anchor_id):
     2. The anchor div is rendered by an ordinary st.markdown call
        earlier in the same script run, but Streamlit's frontend patches
        the page asynchronously - there's no guarantee the anchor has
-       actually been mounted into the DOM by the moment this iframe's
-       script starts running. A single immediate getElementById can
-       fire a beat too early and find nothing. Retrying for up to ~2
-       seconds (40 tries, 50ms apart) instead of trying exactly once
-       covers that gap without any visible delay in the normal case,
-       where the element is usually already there.
+       actually been mounted into the DOM, or that everything ABOVE it
+       (widgets, the custom chart component's iframe) has finished its
+       own layout, by the moment this iframe's script starts running.
+       A single scrollIntoView call can fire against a page that's
+       still reflowing above the anchor, landing short of the target.
+       Rather than trying exactly once, this keeps re-issuing
+       scrollIntoView on every retry tick for up to ~10 seconds (200
+       tries, 50ms apart) - "instant" scrolling makes repeat calls
+       cheap, and each one re-corrects for whatever has shifted since
+       the last, so the final position is right even if layout above
+       the anchor is still settling when the first attempt runs. The
+       anchor used for the Journal Session's chart (see
+       pages/2_Shortlist.py's render_price_chart()) sits right before
+       a live price-history fetch, which can easily take longer than a
+       couple seconds on a cold cache - a shorter window risked giving
+       up before the anchor even existed, silently leaving the page at
+       the rerun's default top-of-page scroll reset instead of at the
+       chart.
     """
     components.html(
         f"""
@@ -60,10 +72,11 @@ def scroll_to_anchor(anchor_id):
                 const el = window.parent.document.getElementById("{anchor_id}");
                 if (el) {{
                     el.scrollIntoView({{behavior: "instant", block: "start"}});
-                }} else if (triesLeft > 0) {{
+                }}
+                if (triesLeft > 0) {{
                     setTimeout(function() {{ attempt(triesLeft - 1); }}, 50);
                 }}
-            }})(40);
+            }})(200);
         </script>
         """,
         height=0,
