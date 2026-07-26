@@ -40,7 +40,7 @@ import nav
 import snaptrade_sync
 import timeutil
 
-st.set_page_config(page_title="Import Trades", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Import Trades", page_icon="📈", layout="wide", initial_sidebar_state="collapsed")
 
 if not auth.check_password():
     st.stop()

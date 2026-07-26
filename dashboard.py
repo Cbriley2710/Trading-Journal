@@ -49,7 +49,7 @@ LINE_COLOR = charting.CATEGORICAL_PALETTE[0]  # the single line in the equity cu
 MUTED_COLOR = charting.MUTED_COLOR  # neutral labels (stat tile captions) and the zero-line on charts
 BASELINE_COLOR = charting.MUTED_COLOR
 
-st.set_page_config(page_title="Trading Journal", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Trading Journal", page_icon="📈", layout="wide", initial_sidebar_state="collapsed")
 
 if not auth.check_password():
     st.stop()
@@ -656,8 +656,18 @@ with st.expander("Account Settings"):
             row_cols[0].write(f"{d['deposit_date']:%m/%d/%Y}")
             amount_label = f"${d['amount']:,.2f}" if d["amount"] >= 0 else f"-${abs(d['amount']):,.2f} (withdrawal)"
             row_cols[1].write(amount_label)
-            if row_cols[2].button("Delete", key=f"delete_deposit_{d['id']}"):
-                database.delete_deposit(conn, d["id"])
+            # Two clicks, not one - a deposit/withdrawal has no undo once
+            # deleted, unlike most other edits in this app. The row's
+            # button becomes "Confirm delete" after the first click
+            # (armed via session_state) instead of deleting immediately.
+            confirm_key = f"_confirm_delete_deposit_{d['id']}"
+            if st.session_state.get(confirm_key):
+                if row_cols[2].button("Confirm delete", key=f"confirm_delete_deposit_{d['id']}", type="primary"):
+                    database.delete_deposit(conn, d["id"])
+                    del st.session_state[confirm_key]
+                    st.rerun()
+            elif row_cols[2].button("Delete", key=f"delete_deposit_{d['id']}"):
+                st.session_state[confirm_key] = True
                 st.rerun()
     else:
         st.caption("No deposits or withdrawals recorded yet.")

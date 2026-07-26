@@ -34,7 +34,7 @@ import database
 import nav
 import ui
 
-st.set_page_config(page_title="Trade Analyzer", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Trade Analyzer", page_icon="📈", layout="wide", initial_sidebar_state="collapsed")
 
 if not auth.check_password():
     st.stop()
@@ -59,8 +59,11 @@ def trade_label(trade):
 
 
 def fact_tile(column, label, value, color=None):
-    """This page's slightly smaller variant of the shared stat tile."""
-    ui.stat_tile(column, label, value, color, size="1.3rem")
+    """This page's stat tile - same default size as every other page's
+    now (see ui.stat_tile()'s own docstring; this used to be a smaller
+    1.3rem here and on Shortlist only, a leftover inconsistency from
+    before this shared helper existed)."""
+    ui.stat_tile(column, label, value, color)
 
 
 trades = load_trades()

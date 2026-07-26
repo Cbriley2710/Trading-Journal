@@ -40,7 +40,7 @@ import database
 import nav
 import timeutil
 
-st.set_page_config(page_title="Logbook", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Logbook", page_icon="📈", layout="wide", initial_sidebar_state="collapsed")
 
 if not auth.check_password():
     st.stop()

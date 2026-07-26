@@ -44,18 +44,29 @@ def archive_all(conn, today):
     print(f"Found {len(positions)} open position(s) to archive.")
     archived_symbols = set()
     for position in positions:
-        is_short = position["direction"] == "SHORT"
-        archive_ticker(
-            conn, position["symbol"], position["entry_date"], position["avg_price"],
-            "Short Entry" if is_short else "Entry", today, as_of, direction=position["direction"],
-            stop_loss=database.get_stop_loss(conn, position["symbol"]))
+        # Wrapped per-ticker (not around the whole loop) so one bad/
+        # delisted symbol only skips itself - it used to be possible for
+        # a single failure here to abort archiving every OTHER position
+        # too, and skip send_daily_report_fallback() right along with it,
+        # since nothing below this function ran until it returned.
+        try:
+            is_short = position["direction"] == "SHORT"
+            archive_ticker(
+                conn, position["symbol"], position["entry_date"], position["avg_price"],
+                "Short Entry" if is_short else "Entry", today, as_of, direction=position["direction"],
+                stop_loss=database.get_stop_loss(conn, position["symbol"]))
+        except Exception as exc:
+            print(f"  {position['symbol']}: archiving failed unexpectedly ({exc}), skipping.")
         archived_symbols.add(position["symbol"])
 
     watchlist = database.get_watchlist(conn)
     watchlist = [w for w in watchlist if w["symbol"] not in archived_symbols]
     print(f"Found {len(watchlist)} watchlist ticker(s) to archive.")
     for entry in watchlist:
-        archive_ticker(conn, entry["symbol"], entry["added_at"], None, "Added", today, as_of)
+        try:
+            archive_ticker(conn, entry["symbol"], entry["added_at"], None, "Added", today, as_of)
+        except Exception as exc:
+            print(f"  {entry['symbol']}: archiving failed unexpectedly ({exc}), skipping.")
         archived_symbols.add(entry["symbol"])
 
     return archived_symbols

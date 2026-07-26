@@ -45,7 +45,7 @@ import nav
 import timeutil
 import ui
 
-st.set_page_config(page_title="Shortlist", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Shortlist", page_icon="📈", layout="wide", initial_sidebar_state="collapsed")
 
 if not auth.check_password():
     st.stop()
@@ -56,8 +56,11 @@ st.title("Shortlist")
 
 
 def fact_tile(column, label, value, color=None):
-    """This page's slightly smaller variant of the shared stat tile."""
-    ui.stat_tile(column, label, value, color, size="1.3rem")
+    """This page's stat tile - same default size as every other page's
+    now (see ui.stat_tile()'s own docstring; this used to be a smaller
+    1.3rem here and on Trade Analyzer only, a leftover inconsistency
+    from before this shared helper existed)."""
+    ui.stat_tile(column, label, value, color)
 
 
 def render_price_chart(symbol, entry_point, entry_label, key_prefix, stop_loss=None, anchor_id=None):
@@ -308,7 +311,11 @@ def render_position_stats(position, conn):
     fact_tile(cols[4], "Unrealized P/L",
               f"${unrealized_pl:,.2f}" if unrealized_pl is not None else "N/A", unrealized_color)
     fact_tile(cols[5], "Stop Loss", f"${stop_loss:,.2f}" if stop_loss is not None else "Not set")
-    st.caption("Set or move the stop-loss for this position on the Open Positions page.")
+    st.page_link(
+        "pages/4_Open_Positions.py",
+        label="Set or move the stop-loss for this position on the Open Positions page.",
+        icon="↗️",
+    )
 
     return stop_loss
 
@@ -392,6 +399,16 @@ def render_lists_section():
             # ticker(s) sitting there. "Remove All" lives in the same
             # form purely to keep its original side-by-side layout with
             # Add - it doesn't depend on the text box at all.
+            # "Remove All" needs two clicks, not one - clearing a whole
+            # list has no undo (Logbook history survives, but the
+            # watchlist membership itself is gone). The first click just
+            # arms this list's confirm flag and relabels the same
+            # button; a SECOND click, with it armed, is what actually
+            # removes anything.
+            remove_confirm_key = f"_confirm_remove_all_{list_id}"
+            remove_all_armed = st.session_state.get(remove_confirm_key, False)
+            remove_all_label = "Confirm Remove All" if remove_all_armed else "Remove All"
+
             with st.form(key=f"wl_add_form_{list_id}", clear_on_submit=True, border=False):
                 add_text = st.text_input(
                     "Add ticker(s)", key=f"wl_add_{list_id}",
@@ -400,7 +417,7 @@ def render_lists_section():
                 button_cols = st.columns(2)
                 add_clicked = button_cols[0].form_submit_button("Add")
                 list_symbols = [w["symbol"] for w in watchlist if w["list_id"] == list_id]
-                remove_clicked = button_cols[1].form_submit_button("Remove All")
+                remove_clicked = button_cols[1].form_submit_button(remove_all_label)
 
             if add_clicked and add_text.strip():
                 already_elsewhere = []
@@ -438,15 +455,20 @@ def render_lists_section():
                 st.rerun()
 
             if remove_clicked and list_symbols:
-                for sym in list_symbols:
-                    database.remove_from_watchlist(conn, sym)
-                selected = st.session_state.get("watchlist_selected")
-                if selected and selected.get("source") == "watchlist" and selected.get("symbol") in list_symbols:
-                    del st.session_state["watchlist_selected"]
-                st.session_state["watchlist_message"] = (
-                    f"Cleared {new_name} ({len(list_symbols)} ticker(s)). Their Logbook history is kept."
-                )
-                st.rerun()
+                if not remove_all_armed:
+                    st.session_state[remove_confirm_key] = True
+                    st.rerun()
+                else:
+                    for sym in list_symbols:
+                        database.remove_from_watchlist(conn, sym)
+                    selected = st.session_state.get("watchlist_selected")
+                    if selected and selected.get("source") == "watchlist" and selected.get("symbol") in list_symbols:
+                        del st.session_state["watchlist_selected"]
+                    del st.session_state[remove_confirm_key]
+                    st.session_state["watchlist_message"] = (
+                        f"Cleared {new_name} ({len(list_symbols)} ticker(s)). Their Logbook history is kept."
+                    )
+                    st.rerun()
 
             # A fixed-height, scrollable window for the ticker list
             # itself - so a long list scrolls in place instead of

@@ -56,10 +56,11 @@ through quickly):
 """
 
 import os
+import time
 from datetime import datetime
 
 import psycopg2
-from psycopg2.extras import Json
+from psycopg2.extras import Json, execute_values
 import streamlit as st
 
 import snaptrade_sync
@@ -110,11 +111,30 @@ def get_connection():
     """Opens a connection to the hosted Postgres database - the first
     call in this process also makes sure every table exists."""
     global _schema_ready
-    conn = psycopg2.connect(_get_database_url())
+    conn = _connect_with_retry()
     if not _schema_ready:
         init_db(conn)
         _schema_ready = True
     return conn
+
+
+def _connect_with_retry():
+    """
+    Connects to Neon with a 10-second connect_timeout (instead of no
+    timeout at all, which let an unreachable/very-slow-to-wake database
+    hang the entire page rather than fail visibly) and one retry after
+    a short pause. Neon's free tier suspends an idle database and takes
+    a few seconds to wake back up on the next connection - the first
+    attempt after a while away sometimes lands right in that window.
+    A second, still-failing attempt is treated as a real problem (bad
+    credentials, Neon actually down) and raises normally rather than
+    retrying forever.
+    """
+    try:
+        return psycopg2.connect(_get_database_url(), connect_timeout=10)
+    except psycopg2.OperationalError:
+        time.sleep(3)
+        return psycopg2.connect(_get_database_url(), connect_timeout=10)
 
 
 def _column_exists(cur, table, column):
@@ -335,6 +355,13 @@ def init_db(conn):
         cur.execute("ALTER TABLE ui_settings ADD COLUMN background_image BYTEA")
     if not _column_exists(cur, "ui_settings", "background_image_mime"):
         cur.execute("ALTER TABLE ui_settings ADD COLUMN background_image_mime TEXT")
+    # A customizable accent color for the interactive chart's toolbar
+    # (active tool highlight, hover tooltip border - see charting.py's
+    # _component_theme_colors()), set on the Settings page. NULL (never
+    # saved, or reset) means "use the app's built-in default," same
+    # NULL-means-default convention as dashboard_visible_sections above.
+    if not _column_exists(cur, "ui_settings", "accent_color"):
+        cur.execute("ALTER TABLE ui_settings ADD COLUMN accent_color TEXT")
     # One general, not-tied-to-any-ticker journal entry per day - shown
     # as the first step of the guided Journal Session (see
     # pages/2_Shortlist.py's render_journal_session()) before it moves
@@ -416,37 +443,69 @@ def _insert_transactions(conn, transactions):
     either source run repeatedly, or alongside the other, without
     creating duplicates.
 
+    Does the fuzzy dedup check (#2 above) once in Python against every
+    existing row, instead of one SELECT per candidate row, then adds
+    every genuinely-new row in a single batched INSERT - a full-history
+    CSV or a year-wide SnapTrade sync used to mean two round-trips to
+    Neon PER transaction; this is two round-trips total. The exact-match
+    UNIQUE constraint (#1 above) is kept as an "ON CONFLICT DO NOTHING"
+    backstop on the batched insert, for the unlikely case something else
+    wrote the same exact row between this function's read and write.
+
     Returns how many new rows were actually added.
     """
     cur = conn.cursor()
+    cur.execute("SELECT date, symbol, action, price, quantity FROM transactions")
+    existing = [
+        {"date": row[0], "symbol": row[1], "action": row[2], "price": row[3], "quantity": row[4]}
+        for row in cur.fetchall()
+    ]
 
-    new_count = 0
+    def as_date(d):
+        # `existing` (straight from Postgres) holds plain `date`
+        # objects; `t`/`to_insert` (straight from the CSV/SnapTrade
+        # loaders) hold `datetime`s - a datetime and a date on the same
+        # calendar day compare UNEQUAL with plain `==`, so both sides
+        # have to be normalized the same way before comparing.
+        return d.date() if isinstance(d, datetime) else d
+
+    def is_duplicate(t, others):
+        t_date = as_date(t["date"])
+        return any(
+            as_date(e["date"]) == t_date and e["symbol"] == t["symbol"]
+            and e["action"] == t["action"] and e["quantity"] == t["quantity"]
+            and abs(e["price"] - t["price"]) <= max(0.01, e["price"] * 0.002)
+            for e in others
+        )
+
+    to_insert = []
     for t in transactions:
-        cur.execute(
-            """
-            SELECT 1 FROM transactions
-            WHERE date = %s AND symbol = %s AND action = %s AND quantity = %s
-              AND abs(price - %s) <= greatest(0.01, price * 0.002)
-            LIMIT 1
-            """,
-            (t["date"].date(), t["symbol"], t["action"], t["quantity"], t["price"]),
-        )
-        if cur.fetchone():
+        # Checked against `existing` AND every row already accepted
+        # earlier in THIS SAME batch - a CSV/sync response can itself
+        # contain near-duplicates of a row it also contains, and the
+        # original per-row loop caught that too (each INSERT was
+        # visible to the next row's SELECT within the same open,
+        # not-yet-committed transaction).
+        if is_duplicate(t, existing) or is_duplicate(t, to_insert):
             continue
+        to_insert.append(t)
 
-        cur.execute(
-            """
-            INSERT INTO transactions (date, symbol, action, price, quantity)
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT DO NOTHING
-            """,
-            (t["date"].date(), t["symbol"], t["action"], t["price"], t["quantity"]),
-        )
-        if cur.rowcount == 1:
-            new_count += 1
+    if not to_insert:
+        return 0
 
+    inserted = execute_values(
+        cur,
+        """
+        INSERT INTO transactions (date, symbol, action, price, quantity)
+        VALUES %s
+        ON CONFLICT DO NOTHING
+        RETURNING id
+        """,
+        [(t["date"].date(), t["symbol"], t["action"], t["price"], t["quantity"]) for t in to_insert],
+        fetch=True,
+    )
     conn.commit()
-    return new_count
+    return len(inserted)
 
 
 def import_transactions(conn, csv_path):
@@ -478,6 +537,19 @@ def import_transactions_snaptrade(conn, start_date, end_date):
     """
     transactions = snaptrade_sync.fetch_activities(start_date, end_date)
     return _insert_transactions(conn, transactions)
+
+
+def clear_trade_cache():
+    """
+    Clears the cached get_trades()/get_open_positions() reads (see
+    their own docstrings for why they're cached). Called right after
+    rebuild_trades() below so the current session sees newly-imported
+    trades immediately instead of waiting out the cache's TTL - the
+    same clear-on-write pattern nav.clear_background_cache() already
+    uses for the background image cache.
+    """
+    get_trades.clear()
+    get_open_positions.clear()
 
 
 def rebuild_trades(conn):
@@ -536,17 +608,28 @@ def rebuild_trades(conn):
         ],
     )
     conn.commit()
+    clear_trade_cache()
 
     return len(stock_trades)
 
 
-def get_trades(conn):
+@st.cache_data(ttl=60, show_spinner=False)
+def get_trades(_conn):
     """
     Returns every completed trade from the `trades` table, oldest
     first, in the same dictionary shape build_trade_tracker.py and
     dashboard.py already expect.
+
+    Cached (see clear_trade_cache()) - this and get_open_positions()
+    below were the two most expensive reads in the app, each re-run on
+    every single Streamlit rerun (any widget click, not just an actual
+    data change) by several pages at once. `_conn` (leading underscore)
+    tells st.cache_data to key the cache on nothing but the function's
+    other arguments - there are none here, so effectively one shared
+    cache entry for the whole process - rather than trying to hash the
+    connection object itself, which it can't do anyway.
     """
-    cur = conn.cursor()
+    cur = _conn.cursor()
     cur.execute("""
         SELECT symbol, entry_date, buy_price, quantity, exit_date, sell_price, profit_loss, direction
         FROM trades
@@ -593,7 +676,8 @@ def _aggregate_open_lots(open_lots, direction):
     return positions
 
 
-def get_open_positions(conn):
+@st.cache_data(ttl=60, show_spinner=False)
+def get_open_positions(_conn):
     """
     Returns currently-open positions (bought but not yet sold, or sold
     short but not yet covered), computed fresh from match_trades_lifo()'s
@@ -606,8 +690,11 @@ def get_open_positions(conn):
     a symbol could in principle appear twice, once "LONG" and once
     "SHORT", if it somehow has both open at once; they aren't netted
     against each other. Sorted oldest entry first.
+
+    Cached (see get_trades() above for why, and clear_trade_cache()
+    below for how it's kept fresh after an import).
     """
-    cur = conn.cursor()
+    cur = _conn.cursor()
     cur.execute("SELECT date, symbol, action, price, quantity FROM transactions")
     transactions = [
         {
@@ -1140,6 +1227,23 @@ def save_strategy_settings(conn, ma_period, closes_threshold, unlock_pct, approa
     conn.commit()
 
 
+def _merge_ma_settings(row, defaults):
+    """Shared by get_position_ma_settings()/get_all_position_ma_settings()
+    below - turns one position_stops row's MA columns (any of which may
+    be NULL, meaning "use the global default") into a complete settings
+    dict. `row` is (ma_stop_mode, ma_period, ma_closes_threshold,
+    ma_unlock_pct, ma_approach_pct, ma_extended_pct)."""
+    mode, ma_period, closes_threshold, unlock_pct, approach_pct, extended_pct = row
+    return {
+        "mode": mode or "off",
+        "ma_period": ma_period if ma_period is not None else defaults["ma_period"],
+        "closes_threshold": closes_threshold if closes_threshold is not None else defaults["closes_threshold"],
+        "unlock_pct": unlock_pct if unlock_pct is not None else defaults["unlock_pct"],
+        "approach_pct": approach_pct if approach_pct is not None else defaults["approach_pct"],
+        "extended_pct": extended_pct if extended_pct is not None else defaults["extended_pct"],
+    }
+
+
 def get_position_ma_settings(conn, symbol, defaults):
     """
     Returns this position's MA Stop Rule settings, merged with the
@@ -1147,6 +1251,10 @@ def get_position_ma_settings(conn, symbol, defaults):
     position hasn't customized - a position that's never been touched
     gets {"mode": "off", ...all the global defaults...}. `mode` is
     "off"/"manual"/"auto" (see pages/4_Open_Positions.py).
+
+    Looks up one symbol - see get_all_position_ma_settings() below for
+    the batched version the Open Positions page actually uses now, to
+    avoid one round-trip per open position.
     """
     cur = conn.cursor()
     cur.execute(
@@ -1159,15 +1267,27 @@ def get_position_ma_settings(conn, symbol, defaults):
     row = cur.fetchone()
     if row is None:
         return {"mode": "off", **defaults}
-    mode, ma_period, closes_threshold, unlock_pct, approach_pct, extended_pct = row
-    return {
-        "mode": mode or "off",
-        "ma_period": ma_period if ma_period is not None else defaults["ma_period"],
-        "closes_threshold": closes_threshold if closes_threshold is not None else defaults["closes_threshold"],
-        "unlock_pct": unlock_pct if unlock_pct is not None else defaults["unlock_pct"],
-        "approach_pct": approach_pct if approach_pct is not None else defaults["approach_pct"],
-        "extended_pct": extended_pct if extended_pct is not None else defaults["extended_pct"],
-    }
+    return _merge_ma_settings(row, defaults)
+
+
+def get_all_position_ma_settings(conn, defaults):
+    """
+    Returns every position's MA Stop Rule settings as {symbol: settings},
+    each already merged with the global `defaults` exactly like
+    get_position_ma_settings() - one query instead of one per open
+    position (the same batching get_all_stop_losses() already does for
+    dollar stops). A symbol with no position_stops row at all (never
+    touched) simply won't be a key here - look it up with
+    `.get(symbol, {"mode": "off", **defaults})`.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT symbol, ma_stop_mode, ma_period, ma_closes_threshold, ma_unlock_pct, ma_approach_pct, ma_extended_pct
+        FROM position_stops
+        """
+    )
+    return {row[0]: _merge_ma_settings(row[1:], defaults) for row in cur.fetchall()}
 
 
 def save_position_ma_settings(conn, symbol, mode, ma_period, closes_threshold, unlock_pct, approach_pct, extended_pct):
@@ -1308,6 +1428,37 @@ def clear_background_image(conn):
     cur.execute(
         "UPDATE ui_settings SET background_image = NULL, background_image_mime = NULL WHERE id = 1"
     )
+    conn.commit()
+
+
+def get_accent_color(conn):
+    """Returns the saved chart accent color override (a "#rrggbb"
+    string), or None if it's never been set/has been reset - see
+    charting.py's _component_theme_colors() for where None falls back
+    to the app's built-in default instead."""
+    cur = conn.cursor()
+    cur.execute("SELECT accent_color FROM ui_settings WHERE id = 1")
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def save_accent_color(conn, color):
+    """Saves a custom chart accent color - see get_accent_color()."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO ui_settings (id, accent_color) VALUES (1, %s)
+        ON CONFLICT (id) DO UPDATE SET accent_color = EXCLUDED.accent_color
+        """,
+        (color,),
+    )
+    conn.commit()
+
+
+def clear_accent_color(conn):
+    """Resets the chart accent color back to the app's built-in default."""
+    cur = conn.cursor()
+    cur.execute("UPDATE ui_settings SET accent_color = NULL WHERE id = 1")
     conn.commit()
 
 

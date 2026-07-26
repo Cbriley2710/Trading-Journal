@@ -10,11 +10,15 @@ has no way to send anything back. Drawing tools need the opposite too
 (what did you draw, so it can be saved), which is only possible
 through Streamlit's real component protocol - see the hand-rolled
 postMessage calls below (componentReady / setFrameHeight /
-setComponentValue). This file is served as-is (a static path, not a
-Python-templated string like the old iframe version), so dark-theme
-colors are hardcoded here rather than substituted in - keep them in
-sync with charting.py's own CHART_BACKGROUND/CHART_TEXT_COLOR/etc. if
-those ever change.
+setComponentValue). This file is served as-is (a static path, not a Python-templated
+string like the old iframe version), so it can't have Python constants
+substituted directly into it at serve time. Instead, charting.py sends
+its palette constants (CHART_BACKGROUND/CHART_TEXT_COLOR/etc) as a
+`colors` arg on every render call (see applyTheme() below) - the
+hex literals still hardcoded throughout this file (in the <style>
+block below, and as JS defaults near the top of the <script>) are only
+the FALLBACK shown before that first render call arrives, not a second
+copy that has to be hand-kept in sync with Python anymore.
 
 Everything the old chart had (crosshair, the OHLC summary line, the
 scroll/pan y-axis auto-fit, the entry/exit marker repositioning) is
@@ -24,21 +28,32 @@ ported over unchanged - drawing tools are additive, not a replacement.
 <head>
 <meta charset="utf-8">
 <style>
+    /* Fallback defaults, shown until the first render call's `colors`
+    arg arrives (see applyTheme() in the script below) - not a second
+    hand-kept-in-sync copy of charting.py's palette anymore, just what
+    this file looks like for the brief moment before Python's actual
+    values are applied. */
+    :root {
+        --chart-bg: #111214;
+        --chart-text: #d1d4dc;
+        --grid-color: #23262b;
+        --accent-color: #2375f4;
+    }
     html, body {
         margin: 0; padding: 0; overflow: hidden;
-        background: #111214; color: #d1d4dc; font-family: sans-serif;
+        background: var(--chart-bg); color: var(--chart-text); font-family: sans-serif;
     }
     #toolbar {
         display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
-        padding: 6px 10px; border-bottom: 1px solid #23262b;
+        padding: 6px 10px; border-bottom: 1px solid var(--grid-color);
     }
     .tool-btn {
-        background: #1c1e22; color: #d1d4dc; border: 1px solid #23262b;
+        background: #1c1e22; color: var(--chart-text); border: 1px solid var(--grid-color);
         border-radius: 4px; padding: 4px 10px; font-size: 0.8rem; cursor: pointer;
     }
     .tool-btn:hover { background: #26292e; }
-    .tool-btn.active { background: #2375f4; border-color: #2375f4; color: #fff; }
-    .tool-sep { width: 1px; height: 20px; background: #23262b; margin: 0 4px; }
+    .tool-btn.active { background: var(--accent-color); border-color: var(--accent-color); color: #fff; }
+    .tool-sep { width: 1px; height: 20px; background: var(--grid-color); margin: 0 4px; }
     #toolbar label {
         font-size: 0.75rem; color: #9199a3; display: flex; align-items: center; gap: 4px;
     }
@@ -82,6 +97,25 @@ ported over unchanged - drawing tools are additive, not a replacement.
 
     var figure = null, fitPayload = null, drawings = [];
     var lastSignature = null;
+
+    // ---- Theme colors - see this file's own header comment. Defaults
+    // here match the <style> block's :root fallback; both get replaced
+    // by charting.py's actual palette (via applyTheme() below) as soon
+    // as the first render call arrives, which for a component embedded
+    // in a real Streamlit page is effectively immediately. ----
+    var THEME = {
+        bg: "#111214", text: "#d1d4dc", grid: "#23262b",
+        accent: "#2375f4", good: "#0ca30c", critical: "#d03b3b",
+    };
+
+    function applyTheme(colors) {
+        Object.assign(THEME, colors || {});
+        var root = document.documentElement.style;
+        root.setProperty("--chart-bg", THEME.bg);
+        root.setProperty("--chart-text", THEME.text);
+        root.setProperty("--grid-color", THEME.grid);
+        root.setProperty("--accent-color", THEME.accent);
+    }
 
     // ---- Drawing tool state ----
     var currentTool = "pan";
@@ -195,7 +229,7 @@ ported over unchanged - drawing tools are additive, not a replacement.
             // purpose - see build_figure()'s matching note in
             // charting.py for why) shows this right next to the arrow
             // itself, dark-themed to match the rest of the chart.
-            hoverlabel: {bgcolor: "#111214", bordercolor: list[0] ? list[0].color : "#2375f4", font: {color: "#d1d4dc", size: 11}},
+            hoverlabel: {bgcolor: THEME.bg, bordercolor: list[0] ? list[0].color : THEME.accent, font: {color: THEME.text, size: 11}},
             showlegend: false,
             name: symbol === "triangle-up" ? "__arrows_up" : "__arrows_down",
         };
@@ -401,7 +435,7 @@ ported over unchanged - drawing tools are additive, not a replacement.
         var chg = d.chg[index], pct = d.pct[index];
         if (chg !== null && chg !== undefined && pct !== null && pct !== undefined) {
             var sign = chg >= 0 ? "+" : "";
-            var color = chg >= 0 ? "#0ca30c" : "#d03b3b";
+            var color = chg >= 0 ? THEME.good : THEME.critical;
             html += "&nbsp;&nbsp; <span style='color:" + color + ";'>"
                 + "Chg " + sign + formatPrice(chg)
                 + "&nbsp;&nbsp; Chg% " + sign + pct.toFixed(2) + "%</span>";
@@ -555,6 +589,12 @@ ported over unchanged - drawing tools are additive, not a replacement.
         // drawing (which triggers a normal Streamlit rerun, which
         // re-invokes this component) doesn't reset your current pan/
         // zoom position or which tool is selected.
+        // Applied every render, not just when the chart itself rebuilds
+        // below - cheap (just a few CSS custom properties), and keeps
+        // this correct even if a future feature changes colors without
+        // also changing chart_signature (e.g. an app-wide theme picker).
+        applyTheme(args.colors);
+
         if (args.chart_signature === lastSignature) return;
         lastSignature = args.chart_signature;
         figure = JSON.parse(args.fig_json);

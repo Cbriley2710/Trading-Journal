@@ -32,6 +32,7 @@ WHERE CREDENTIALS LIVE, IN TWO STAGES:
 """
 
 import os
+import socket
 import time
 from datetime import datetime
 
@@ -59,6 +60,13 @@ USER_ID = "primary"
 # actually hit in practice; the rest are excluded on the same
 # reasoning (not something you'd hold as a tracked stock position).
 _NON_STOCK_SECURITY_TYPES = {"oef", "bnd", "crypto", "pm", "struct", "rt", "ut", "wi", "wt"}
+
+# How long a single get_account_activities() page request is allowed to
+# hang before giving up, and how many times to retry a request that
+# times out - see _fetch_activities_page() below. This SDK's generated
+# client has no per-call timeout/retry option of its own to configure.
+_REQUEST_TIMEOUT_SECONDS = 30
+_MAX_TIMEOUT_RETRIES = 2
 
 
 def _get_secret_optional(key):
@@ -237,6 +245,49 @@ def list_connected_accounts():
     return list(response.body)
 
 
+def _fetch_activities_page(client, account_id, user_id, user_secret, start_date, end_date, offset):
+    """
+    One page of get_account_activities(), with a request timeout and a
+    couple of retries - without this, a slow or hanging SnapTrade
+    response could block "Sync Now" (or the scheduled
+    snaptrade_daily_sync.py job) indefinitely, since this SDK's
+    generated client exposes no per-call timeout of its own to set.
+
+    socket.setdefaulttimeout() is the bluntest tool available here (it
+    applies process-wide, not just to this one request) but is safe in
+    this narrow window: it's set immediately before the call and
+    restored in `finally` right after, and nothing else runs
+    concurrently on this thread while it's in effect.
+
+    Only retries a genuine network hang/timeout (OSError, which
+    socket.timeout is a subclass of) - a real API error (bad auth, a
+    404) raises one of this SDK's own exception types instead, which is
+    let through immediately rather than retried pointlessly.
+    """
+    previous_timeout = socket.getdefaulttimeout()
+    last_exc = None
+    try:
+        for attempt in range(_MAX_TIMEOUT_RETRIES + 1):
+            socket.setdefaulttimeout(_REQUEST_TIMEOUT_SECONDS)
+            try:
+                return client.account_information.get_account_activities(
+                    account_id=account_id, user_id=user_id, user_secret=user_secret,
+                    start_date=start_date, end_date=end_date,
+                    type="BUY,SELL", offset=offset, limit=1000,
+                )
+            except OSError as exc:
+                last_exc = exc
+                if attempt < _MAX_TIMEOUT_RETRIES:
+                    time.sleep(2 * (attempt + 1))
+    finally:
+        socket.setdefaulttimeout(previous_timeout)
+
+    raise TimeoutError(
+        f"SnapTrade request timed out after {_MAX_TIMEOUT_RETRIES + 1} attempts "
+        f"({_REQUEST_TIMEOUT_SECONDS}s each): {last_exc}"
+    )
+
+
 def fetch_activities(start_date, end_date):
     """
     Pulls every BUY/SELL activity across all connected accounts
@@ -271,11 +322,8 @@ def fetch_activities(start_date, end_date):
     for account in list_connected_accounts():
         offset = 0
         while True:
-            response = client.account_information.get_account_activities(
-                account_id=account["id"], user_id=user_id, user_secret=user_secret,
-                start_date=start_date, end_date=end_date,
-                type="BUY,SELL", offset=offset, limit=1000,
-            )
+            response = _fetch_activities_page(
+                client, account["id"], user_id, user_secret, start_date, end_date, offset)
             rows = list(response.body.get("data", []))
 
             for row in rows:

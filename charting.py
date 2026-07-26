@@ -90,6 +90,57 @@ CATEGORICAL_PALETTE = [
     "#9085e9", "#e66767", "#d55181", "#d95926",
 ]
 
+# Sent to chart_component/index.html on every render (see its own
+# applyTheme()) so its CSS/JS theme colors come from these Python
+# constants instead of a second copy hand-kept-in-sync inside that
+# static file - this project's actual single source of chart theme
+# truth is this module, not the HTML.
+_COMPONENT_THEME_COLORS = {
+    "bg": CHART_BACKGROUND,
+    "text": CHART_TEXT_COLOR,
+    "grid": GRIDLINE_COLOR,
+    "accent": CATEGORICAL_PALETTE[0],
+    "good": GOOD_COLOR,
+    "critical": CRITICAL_COLOR,
+}
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_accent_color():
+    """
+    Cached read of the saved chart accent color override (see database.
+    get_accent_color()/pages/5_Settings.py) - _component_theme_colors()
+    below calls this on every chart render, so it's cached the same way
+    nav.py's own _load_background_image() caches the (also read on
+    every page) background image. Cached 5 minutes; clear_accent_color_
+    cache() is called right after a save/reset on the Settings page so
+    the CURRENT session sees the change immediately.
+    """
+    conn = database.get_connection()
+    return database.get_accent_color(conn)
+
+
+def clear_accent_color_cache():
+    """Clears the cached accent color read - call right after saving or
+    resetting it on the Settings page (see _load_accent_color())."""
+    _load_accent_color.clear()
+
+
+def _component_theme_colors():
+    """
+    Colors sent to chart_component/index.html on every render (see
+    render_interactive_chart() below). Only `accent` is ever different
+    from _COMPONENT_THEME_COLORS' fixed defaults - it's the one part of
+    this app's look that's user-customizable (Settings page), since
+    native Streamlit widgets elsewhere can't be recolored per-session,
+    only this custom component's own CSS can.
+    """
+    colors = dict(_COMPONENT_THEME_COLORS)
+    accent = _load_accent_color()
+    if accent:
+        colors["accent"] = accent
+    return colors
+
 # Timeframes offered, and the default VISIBLE calendar-day window when
 # the chart first opens (Hourly 5 days, Daily 120, Weekly ~2 years,
 # Monthly a year) - a coarser timeframe needs much more of a window to
@@ -643,7 +694,7 @@ def build_archive_snapshot(symbol, entry_date, buy_price, entry_label, as_of, di
     return render_png(fig)
 
 
-def _color_input(container, label, default_color, key):
+def color_input(container, label, default_color, key):
     """
     A hex-code text box with a small color-swatch preview underneath,
     used everywhere in this toolbar instead of st.color_picker.
@@ -654,6 +705,11 @@ def _color_input(container, label, default_color, key):
     before the picked color ever took effect (a Streamlit platform
     quirk, not something fixable from here). A plain text box has no
     floating panel of its own, so it can't run into that.
+
+    Not module-private (no longer has a leading underscore) - the
+    Settings page reuses this same widget for the app's chart accent
+    color (see get_accent_color()/_component_theme_colors() below)
+    rather than building a second color-input pattern from scratch.
     """
     color = container.text_input(label, value=default_color, key=key, max_chars=7)
     if not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
@@ -675,7 +731,7 @@ def render_settings_toolbar(container, key_prefix):
 
     This is an expander, not a popover - a popover auto-closes on any
     click it considers "outside" itself, which caused the same kind of
-    problem _color_input() below is guarding against (see its docstring).
+    problem color_input() below is guarding against (see its docstring).
     An expander only closes when you click its own header again.
 
     `key_prefix` must be unique to the caller (e.g. "position", "watchlist",
@@ -703,12 +759,12 @@ def render_settings_toolbar(container, key_prefix):
 
         if chart_type == "Candlestick":
             candle_cols = st.columns(2)
-            up_color = _color_input(candle_cols[0], "Bullish candle", UP_CANDLE_COLOR, f"{key_prefix}_up_color")
-            down_color = _color_input(candle_cols[1], "Bearish candle", DOWN_CANDLE_COLOR, f"{key_prefix}_down_color")
+            up_color = color_input(candle_cols[0], "Bullish candle", UP_CANDLE_COLOR, f"{key_prefix}_up_color")
+            down_color = color_input(candle_cols[1], "Bearish candle", DOWN_CANDLE_COLOR, f"{key_prefix}_down_color")
             line_color = None
         else:
             up_color = down_color = None
-            line_color = _color_input(st, "Line color", CATEGORICAL_PALETTE[0], f"{key_prefix}_line_color")
+            line_color = color_input(st, "Line color", CATEGORICAL_PALETTE[0], f"{key_prefix}_line_color")
 
         ma_text = st.text_input(
             "Moving Averages (comma-separated periods)", value=saved_prefs["ma_text"],
@@ -728,7 +784,7 @@ def render_settings_toolbar(container, key_prefix):
             for i, period in enumerate(ma_periods):
                 default_color = saved_prefs["ma_colors"].get(
                     str(period), CATEGORICAL_PALETTE[i % len(CATEGORICAL_PALETTE)])
-                ma_colors[period] = _color_input(
+                ma_colors[period] = color_input(
                     ma_color_cols[i], f"{period}-period", default_color, f"{key_prefix}_ma_color_{period}")
 
         current_colors = {str(period): color for period, color in ma_colors.items()}
@@ -742,7 +798,7 @@ def render_settings_toolbar(container, key_prefix):
         ).strip().upper()
         overlay_color = None
         if overlay_symbol:
-            overlay_color = _color_input(st, "Overlay color", CATEGORICAL_PALETTE[4], f"{key_prefix}_overlay_color")
+            overlay_color = color_input(st, "Overlay color", CATEGORICAL_PALETTE[4], f"{key_prefix}_overlay_color")
             st.caption(
                 "The overlay ticker gets its own price scale on the left "
                 "(the dashed line) - comparing two different stocks' dollar "
@@ -1228,6 +1284,7 @@ def render_interactive_chart(fig, fit_payload, drawings, key):
         fit_json=json.dumps(fit_payload),
         drawings=drawings,
         chart_signature=_chart_signature(fig),
+        colors=_component_theme_colors(),
         key=key,
         default=drawings,
     )

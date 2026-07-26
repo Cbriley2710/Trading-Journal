@@ -1,0 +1,19 @@
+# Streamlit's own theme for every NATIVE widget (buttons, text/number
+# inputs, focus rings, st.success/st.error/st.info banners, the file
+# uploader, etc). Before this file existed, none of that was themed at
+# all - the app's dark look came only from custom CSS layered on top by
+# charting.py/ui.py/nav.py, so native widgets still showed Streamlit's
+# default light-mode chrome underneath/around them.
+#
+# Values are hand-copied from charting.py's own palette constants
+# (CHART_BACKGROUND, CHART_TEXT_COLOR, GRIDLINE_COLOR, and the first
+# entry of CATEGORICAL_PALETTE) so this matches the chart's look rather
+# than inventing a second dark palette - there's no way for a .toml
+# file to literally import a Python constant, so if those ever change,
+# update the matching value here by hand too.
+[theme]
+base = "dark"
+primaryColor = "#2375f4"            # charting.CATEGORICAL_PALETTE[0]
+backgroundColor = "#111214"         # charting.CHART_BACKGROUND
+secondaryBackgroundColor = "#23262b" # charting.GRIDLINE_COLOR
+textColor = "#d1d4dc"               # charting.CHART_TEXT_COLOR

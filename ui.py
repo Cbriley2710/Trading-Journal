@@ -88,9 +88,11 @@ def stat_tile(column, label, value, color=None, size="1.4rem"):
     Renders one number in a column, with its muted label above it. If a
     color is given, the number is colored (green for a gain, red for a
     loss) - otherwise it's left the normal text color. `size` is the
-    number's font size - the Dashboard and Open Positions pages use the
-    default, Trade Analyzer and Shortlist use a slightly smaller
-    "1.3rem" (kept exactly as each page always looked).
+    number's font size - every page uses this same default now (Trade
+    Analyzer and Shortlist used to pass a smaller "1.3rem" here, a
+    leftover from before this shared helper existed); `size` still
+    exists as a param for whatever future page might genuinely need a
+    different size on purpose.
     """
     style = f"color:{color};" if color else ""
     column.markdown(

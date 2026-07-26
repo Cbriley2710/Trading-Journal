@@ -2,8 +2,23 @@
 trading.db
 *.xlsx
 *.csv
+
+# Screenshots/photos dropped in this folder are assumed to be personal
+# (account screenshots, recovery codes, statements) - ignored by default
+# so a stray `git add -A` can never publish one to the public repo.
+# Add a specific `!filename.png` exception below if a project image ever
+# genuinely needs committing.
+*.png
+*.jpg
+*.jpeg
+
+# .streamlit holds real secrets, so the whole folder is ignored - the two
+# exceptions below are the files that DO belong in Git: the example
+# secrets file (no real values in it) and the app's theme, which has to
+# be committed or the deployed app falls back to Streamlit's default look.
 .streamlit/*
 !.streamlit/secrets.toml.example
+!.streamlit/config.toml
 
 # Python
 __pycache__/

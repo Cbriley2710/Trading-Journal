@@ -33,9 +33,9 @@ import database
 import ma_strategy
 import nav
 import timeutil
-from ui import stat_tile
+from ui import scroll_to_anchor, stat_tile
 
-st.set_page_config(page_title="Open Positions", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Open Positions", page_icon="📈", layout="wide", initial_sidebar_state="collapsed")
 
 if not auth.check_password():
     st.stop()
@@ -56,6 +56,10 @@ conn = database.get_connection()
 positions = database.get_open_positions(conn)
 stops = database.get_all_stop_losses(conn)
 ma_defaults = database.get_strategy_settings(conn)
+# One query for every position's MA settings instead of one per position
+# (see database.get_all_position_ma_settings()) - a symbol not in this
+# dict has never had a mode set, so it defaults to "off".
+all_ma_settings = database.get_all_position_ma_settings(conn, ma_defaults)
 
 # Same calculated-account-value formula as the Dashboard page (see its
 # Account Settings expander): a Jan 1 baseline plus this year's deposits
@@ -91,7 +95,7 @@ if positions:
             # position that's actually opted in (mode != "off"), so a
             # position not using this feature doesn't cost an extra
             # price-history fetch on every page load.
-            ma_settings = database.get_position_ma_settings(conn, position["symbol"], ma_defaults)
+            ma_settings = all_ma_settings.get(position["symbol"], {"mode": "off", **ma_defaults})
             ma_signal = None
             if ma_settings["mode"] != "off":
                 ma_signal = ma_strategy.compute_signal(
@@ -146,11 +150,31 @@ if positions:
 # live-recomputed columns). Individual widgets with their own stable
 # keys (buttons, number_input) don't have that problem.
 if positions:
+    # Editing a stop-loss or MA Mode below triggers st.rerun(), which
+    # resets the browser's scroll to the very top of the page by
+    # default - jarring on the table you're most likely scrolled
+    # halfway down mid-market-hours to reach. The flag/anchor pair here
+    # is the same pattern already used for this on the Shortlist page
+    # (see ui.scroll_to_anchor() and pages/2_Shortlist.py's
+    # "_scroll_to_session_anchor"): set the flag right before each
+    # st.rerun() below, then land back here (not the page's outer top)
+    # on the rerun that follows.
+    positions_anchor_id = "open_positions_table_anchor"
+    should_scroll_to_positions = st.session_state.pop("_scroll_to_positions_anchor", False)
+    st.markdown(f'<div id="{positions_anchor_id}"></div>', unsafe_allow_html=True)
+    if should_scroll_to_positions:
+        scroll_to_anchor(positions_anchor_id)
+
     st.header("Positions & Stop-Loss")
     st.caption(
         "Edit Stop Loss directly - 0 (or blank) means no stop set. MA Mode: "
         "click O/M/A to switch (highlighted = active); Manual/Auto show a "
         "live signal in the last column."
+    )
+    st.page_link(
+        "pages/5_Settings.py",
+        label="The MA period and every threshold above are set on the Settings page.",
+        icon="↗️",
     )
 
     # Relative widths, adjustable on the Settings page (see database.
@@ -215,10 +239,23 @@ if positions:
         old_stop = round(stops.get(symbol) or 0.0, 2)
         if round(new_stop, 2) != old_stop:
             if new_stop > 0:
+                # Setting or moving a stop stays one step - there's
+                # nothing to lose by acting on it immediately.
                 database.set_stop_loss(conn, symbol, round(new_stop, 2))
+                st.session_state["_scroll_to_positions_anchor"] = True
+                st.rerun()
             else:
-                database.delete_stop_loss(conn, symbol)
-            st.rerun()
+                # Clearing a REAL stop (0/blank while one was actually
+                # set) used to delete instantly on this same keystroke -
+                # indistinguishable from any other edit, no undo. Now
+                # it only shows a confirm button; nothing is deleted
+                # until that's clicked. Retyping the original stop
+                # value cancels out of this without a separate button.
+                stop_col.caption("Clear stop?")
+                if stop_col.button("Confirm clear", key=f"confirm_clear_stop_{symbol}", width="stretch"):
+                    database.delete_stop_loss(conn, symbol)
+                    st.session_state["_scroll_to_positions_anchor"] = True
+                    st.rerun()
 
         current_mode = e["ma_settings"]["mode"]
         for mode_col, mode_value, mode_letter in ((o_col, "off", "O"), (m_col, "manual", "M"), (a_col, "auto", "A")):
@@ -233,6 +270,7 @@ if positions:
                 # numbers rather than a per-ticker override (see
                 # database.get_position_ma_settings()).
                 database.save_position_ma_settings(conn, symbol, mode_value, None, None, None, None, None)
+                st.session_state["_scroll_to_positions_anchor"] = True
                 st.rerun()
 
         if e["ma_signal"] is not None:

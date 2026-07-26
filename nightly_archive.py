@@ -55,7 +55,17 @@ def main():
     conn = database.get_connection()
     today = timeutil.today_eastern()
 
-    archiving.archive_all(conn, today)
+    # archive_all() already guards each individual ticker (see
+    # archiving.py) - this outer try/except is a second layer, for
+    # anything that could fail before/between those per-ticker guards
+    # (e.g. the initial get_open_positions()/get_watchlist() calls),
+    # so send_daily_report_fallback() below always gets a chance to run
+    # even in that case.
+    try:
+        archiving.archive_all(conn, today)
+    except Exception as exc:
+        print(f"Chart archiving failed unexpectedly: {exc}")
+
     send_daily_report_fallback(conn, today)
 
     # The "discard after midnight" half of the price cache's lifecycle

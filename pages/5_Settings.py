@@ -26,10 +26,11 @@ adjustable alternative.
 import streamlit as st
 
 import auth
+import charting
 import database
 import nav
 
-st.set_page_config(page_title="Settings", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Settings", page_icon="📈", layout="wide", initial_sidebar_state="collapsed")
 
 if not auth.check_password():
     st.stop()
@@ -136,4 +137,32 @@ if background_cols[1].button("Remove Background", disabled=not current_backgroun
     database.clear_background_image(conn)
     nav.clear_background_cache()
     st.success("Background removed - back to the default look.")
+    st.rerun()
+
+st.divider()
+
+st.header("Chart Accent Color")
+st.caption(
+    "Recolors the interactive chart's toolbar - the active tool "
+    "highlight and hover tooltip border. This is the one part of the "
+    "app's look that can be customized live like this; everything "
+    "else (buttons, backgrounds, text) uses the app's fixed built-in "
+    "theme, which only changes with a code update."
+)
+
+saved_accent = database.get_accent_color(conn)
+current_accent = saved_accent or charting.CATEGORICAL_PALETTE[0]
+new_accent = charting.color_input(st, "Accent color", current_accent, "settings_accent_color")
+
+accent_cols = st.columns(2)
+if accent_cols[0].button("Save Accent Color", disabled=new_accent == saved_accent):
+    database.save_accent_color(conn, new_accent)
+    charting.clear_accent_color_cache()
+    st.success("Accent color saved.")
+    st.rerun()
+
+if accent_cols[1].button("Reset to Default", disabled=saved_accent is None):
+    database.clear_accent_color(conn)
+    charting.clear_accent_color_cache()
+    st.success("Accent color reset to the default.")
     st.rerun()
