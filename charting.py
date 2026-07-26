@@ -24,6 +24,7 @@ since those positions haven't been sold yet.
 
 import hashlib
 import json
+import math
 import re
 from datetime import timedelta
 from pathlib import Path
@@ -1311,6 +1312,34 @@ def _chart_signature(fig):
     return hashlib.md5(json.dumps(fig_dict, sort_keys=True, default=str).encode()).hexdigest()
 
 
+def _json_safe(value):
+    """
+    Recursively replaces NaN/Infinity floats with None, so json.dumps()
+    of the result is valid, spec-compliant JSON. Python's json module
+    happily emits a literal `NaN`/`Infinity` token for these by default
+    - not valid JSON by the actual spec, and the browser's strict
+    JSON.parse() rejects it outright the moment it appears anywhere in
+    the string. That used to mean one bad/incomplete data point
+    anywhere in fit_payload (e.g. a stray NaN high/low from yfinance)
+    silently broke the ENTIRE chart component - the render event's own
+    JSON.parse(args.fit_json) call would throw before initChart() ever
+    ran, leaving a blank area with no visible error anywhere in the
+    Streamlit app itself (only in the browser console). The chart
+    component's own JS (see chart_component/index.html's
+    seriesExtent()) already treats null as "no data for this point" -
+    it just needs valid JSON to get that far. Plotly's own fig.to_json()
+    already does the equivalent conversion for the figure itself; this
+    covers fit_payload, which is serialized with plain json.dumps().
+    """
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
 def render_interactive_chart(fig, fit_payload, drawings, key):
     """
     Renders the chart via the trading_journal_chart custom component
@@ -1334,7 +1363,7 @@ def render_interactive_chart(fig, fit_payload, drawings, key):
     """
     result = _chart_component(
         fig_json=fig.to_json(),
-        fit_json=json.dumps(fit_payload),
+        fit_json=json.dumps(_json_safe(fit_payload)),
         drawings=drawings,
         chart_signature=_chart_signature(fig),
         colors=_component_theme_colors(),
