@@ -69,7 +69,12 @@ def fact_tile(column, label, value, color=None):
 trades = load_trades()
 
 if not trades:
-    st.info("No trades found yet. Run import_trades.py first to populate the database.")
+    st.info("No trades found yet.")
+    st.page_link(
+        "pages/0_Import_Trades.py",
+        label="Import your trade history to get started.",
+        icon="↗️",
+    )
     st.stop()
 
 trades_sorted = sorted(trades, key=lambda t: t["date"], reverse=True)
@@ -113,7 +118,7 @@ is_short = trade["direction"] == "SHORT"
 entry_price, exit_price = (trade["sell_price"], trade["buy_price"]) if is_short \
     else (trade["buy_price"], trade["sell_price"])
 
-outcome_color = charting.GOOD_COLOR if trade["profit_loss"] >= 0 else charting.CRITICAL_COLOR
+outcome_color = charting.win_loss_color(trade["profit_loss"] >= 0)
 # Expressed as % of entry price, using the actual (correctly-signed)
 # profit_loss rather than a raw price ratio - a profitable short would
 # otherwise show a misleading negative % (cover price fell below the

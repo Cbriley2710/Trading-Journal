@@ -144,10 +144,10 @@ st.divider()
 st.header("Chart Accent Color")
 st.caption(
     "Recolors the interactive chart's toolbar - the active tool "
-    "highlight and hover tooltip border. This is the one part of the "
-    "app's look that can be customized live like this; everything "
-    "else (buttons, backgrounds, text) uses the app's fixed built-in "
-    "theme, which only changes with a code update."
+    "highlight and hover tooltip border. This and Win/Loss Colors below "
+    "are the parts of the app's look that can be customized live like "
+    "this; everything else (buttons, backgrounds, text) uses the app's "
+    "fixed built-in theme, which only changes with a code update."
 )
 
 saved_accent = database.get_accent_color(conn)
@@ -165,4 +165,39 @@ if accent_cols[1].button("Reset to Default", disabled=saved_accent is None):
     database.clear_accent_color(conn)
     charting.clear_accent_color_cache()
     st.success("Accent color reset to the default.")
+    st.rerun()
+
+st.divider()
+
+st.header("Win/Loss Colors")
+st.caption(
+    "The green/red pair used everywhere a stat tile, chart marker, or "
+    "bar shows a gain vs. a loss - Dashboard, Trade Analyzer, Shortlist, "
+    "and Open Positions."
+)
+
+saved_trade_colors = database.get_trade_colors(conn)
+current_good = saved_trade_colors["good"] or charting.GOOD_COLOR
+current_critical = saved_trade_colors["critical"] or charting.CRITICAL_COLOR
+
+trade_color_cols = st.columns(2)
+new_good = charting.color_input(trade_color_cols[0], "Win color", current_good, "settings_good_color")
+new_critical = charting.color_input(trade_color_cols[1], "Loss color", current_critical, "settings_critical_color")
+
+trade_color_buttons = st.columns(2)
+trade_colors_unchanged = (
+    new_good == saved_trade_colors["good"] and new_critical == saved_trade_colors["critical"]
+)
+if trade_color_buttons[0].button("Save Win/Loss Colors", disabled=trade_colors_unchanged):
+    database.save_trade_colors(conn, new_good, new_critical)
+    charting.clear_trade_colors_cache()
+    st.success("Win/loss colors saved.")
+    st.rerun()
+
+if trade_color_buttons[1].button(
+    "Reset to Defaults", disabled=saved_trade_colors == {"good": None, "critical": None}
+):
+    database.clear_trade_colors(conn)
+    charting.clear_trade_colors_cache()
+    st.success("Win/loss colors reset to the defaults.")
     st.rerun()

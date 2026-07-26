@@ -111,16 +111,39 @@ def render_top_nav(current_label):
         of at the ticker's chart. Disabling it here is what makes
         scroll_to_anchor()'s position actually stick. */
         [data-testid='stMain'] {overflow-anchor: none;}
+
+        /* On a phone-width screen, len(PAGES) (7) equal-width columns
+        squeeze labels like "Trade Analyzer" into unreadably narrow
+        buttons. Scoped to just the nav row (the "top_nav_row" container
+        key below, via Streamlit's documented .st-key-<key> class - see
+        https://docs.streamlit.io/develop/concepts/configuration/theming
+        under "Using custom CSS classes") so this doesn't affect any
+        other st.columns() grid elsewhere in the app (Open Positions'
+        table, Shortlist's watchlists, etc), which need their precise
+        column alignment kept intact. */
+        @media (max-width: 640px) {
+            .st-key-top_nav_row [data-testid="stHorizontalBlock"] {
+                flex-wrap: wrap;
+            }
+            .st-key-top_nav_row [data-testid="stHorizontalBlock"] > div {
+                min-width: 30%;
+            }
+            .st-key-top_nav_row button {
+                font-size: 0.75rem;
+                padding: 0.25rem 0.4rem;
+            }
+        }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    cols = st.columns(len(PAGES))
-    for col, (label, path) in zip(cols, PAGES):
-        if label == current_label:
-            col.button(label, disabled=True, width="stretch", type="primary")
-        elif col.button(label, width="stretch"):
-            st.switch_page(path)
+    with st.container(key="top_nav_row"):
+        cols = st.columns(len(PAGES))
+        for col, (label, path) in zip(cols, PAGES):
+            if label == current_label:
+                col.button(label, disabled=True, width="stretch", type="primary")
+            elif col.button(label, width="stretch"):
+                st.switch_page(path)
 
     st.divider()

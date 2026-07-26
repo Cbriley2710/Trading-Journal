@@ -63,7 +63,7 @@ def fact_tile(column, label, value, color=None):
     ui.stat_tile(column, label, value, color)
 
 
-def render_price_chart(symbol, entry_point, entry_label, key_prefix, stop_loss=None, anchor_id=None):
+def render_price_chart(conn, symbol, entry_point, entry_label, key_prefix, stop_loss=None, anchor_id=None):
     """
     The Timeframe/Chart-Settings controls plus the price chart itself -
     split out from render_chart_and_journal() below so the Journal
@@ -75,6 +75,10 @@ def render_price_chart(symbol, entry_point, entry_label, key_prefix, stop_loss=N
     `key_prefix` keeps each section's Streamlit widgets independent (so
     picking a timeframe for a watchlist ticker doesn't affect the open
     position's chart, etc).
+
+    `conn` is passed in (not opened here) - every caller already has one
+    from further up the stack; see render_chart_and_journal()'s own note
+    for why threading it through matters on this page specifically.
 
     `anchor_id`, if given, places a scroll target (see ui.scroll_to_
     anchor()) immediately before the chart itself - deliberately AFTER
@@ -136,7 +140,6 @@ def render_price_chart(symbol, entry_point, entry_label, key_prefix, stop_loss=N
     # (The OHLC summary line now lives inside the chart component itself,
     # where it updates live as the crosshair moves - see charting.py.)
 
-    conn = database.get_connection()
     saved_drawings = database.get_drawings(conn, symbol)
 
     if anchor_id:
@@ -235,19 +238,26 @@ def save_journal_entry(conn, symbol, entry_point, entry_label, notes, stop_loss=
     return png_bytes
 
 
-def render_chart_and_journal(symbol, entry_point, entry_label, key_prefix, stop_loss=None):
+def render_chart_and_journal(conn, symbol, entry_point, entry_label, key_prefix, stop_loss=None):
     """
     The plain single-ticker view: chart, then today's-journal box, then
     a Save button. Used by both the watchlist ticker view and the open
     position detail view below.
+
+    `conn` is passed in from the caller rather than opened here - this
+    function used to open its own connection AND call render_price_
+    chart() (which opened a second one of its own), so a single ticker
+    view could pay for 2+ fresh Postgres connections when every caller
+    already had one available higher up the stack. Threading one
+    connection all the way down instead means this page opens at most
+    1 connection per view instead of up to 4.
     """
     anchor_id = f"{key_prefix}_{symbol}_journal_anchor"
 
-    entry_point = render_price_chart(symbol, entry_point, entry_label, key_prefix, stop_loss=stop_loss, anchor_id=anchor_id)
+    entry_point = render_price_chart(conn, symbol, entry_point, entry_label, key_prefix, stop_loss=stop_loss, anchor_id=anchor_id)
     if entry_point is None:
         return
 
-    conn = database.get_connection()
     clicked, notes = render_journal_box(conn, symbol, key_prefix)
 
     if clicked:
@@ -299,7 +309,7 @@ def render_position_stats(position, conn):
             unrealized_pl = (position["avg_price"] - current_price) * position["quantity"]
         else:
             unrealized_pl = (current_price - position["avg_price"]) * position["quantity"]
-        unrealized_color = charting.GOOD_COLOR if unrealized_pl >= 0 else charting.CRITICAL_COLOR
+        unrealized_color = charting.win_loss_color(unrealized_pl >= 0)
 
     stop_loss = database.get_stop_loss(conn, symbol)
 
@@ -340,7 +350,7 @@ def render_position_detail(position, conn):
         "direction": position["direction"],
     }
     render_chart_and_journal(
-        symbol, entry_point, "Short Entry" if is_short else "Entry", key_prefix="position", stop_loss=stop_loss)
+        conn, symbol, entry_point, "Short Entry" if is_short else "Entry", key_prefix="position", stop_loss=stop_loss)
 
 
 def parse_ticker_input(text):
@@ -358,7 +368,7 @@ def parse_ticker_input(text):
     return symbols
 
 
-def render_lists_section():
+def render_lists_section(conn):
     st.header("Watchlists")
     st.caption(
         "Lists 1-4 are yours to manage: add tickers one at a time or paste a "
@@ -368,7 +378,6 @@ def render_lists_section():
         "and journal below."
     )
 
-    conn = database.get_connection()
     names = database.get_watchlist_names(conn)
     watchlist = database.get_watchlist(conn)
     positions = database.get_open_positions(conn)
@@ -386,13 +395,18 @@ def render_lists_section():
         with column:
             # The list's name doubles as its editable title - typing a
             # new name saves right away, same silent-save pattern as
-            # the Chart Settings moving averages.
+            # the Chart Settings moving averages. Unlike that one, this
+            # gets a toast (see below) - Chart Settings' inputs feed a
+            # chart you can SEE update; there's no equivalent visual
+            # confirmation here, so without it a rename saved with no
+            # feedback at all.
             new_name = st.text_input(
                 f"List {list_id} name", value=names[list_id],
                 key=f"wl_name_{list_id}", label_visibility="collapsed",
             )
             if new_name.strip() and new_name != names[list_id]:
                 database.set_watchlist_name(conn, list_id, new_name.strip())
+                st.toast(f"Renamed to \"{new_name.strip()}\".")
 
             # Wrapped in a form (clear_on_submit=True) so the box empties
             # out right after Add instead of leaving the just-added
@@ -482,8 +496,26 @@ def render_lists_section():
                         entry["symbol"], key=f"wl_{list_id}_{entry['symbol']}", width="stretch",
                     ):
                         st.session_state["watchlist_selected"] = {"symbol": entry["symbol"], "source": "watchlist"}
-                    if ticker_cols[1].button("✕", key=f"wlx_{list_id}_{entry['symbol']}"):
+                    # Two clicks, not one - this button is clicked far more
+                    # often than "Remove All" (day-to-day list grooming) and
+                    # sits directly next to the ticker-select button above,
+                    # so a stray tap here used to silently drop a ticker
+                    # with no undo. Same armed-then-confirm pattern as
+                    # "Remove All" just above, but there's no room in this
+                    # narrow column for a relabeled button - the "✕" itself
+                    # turns into a highlighted primary button once armed,
+                    # instead.
+                    remove_confirm_key = f"_confirm_remove_{list_id}_{entry['symbol']}"
+                    is_armed = st.session_state.get(remove_confirm_key, False)
+                    if ticker_cols[1].button(
+                        "✕", key=f"wlx_{list_id}_{entry['symbol']}",
+                        type="primary" if is_armed else "secondary",
+                    ):
+                        if not is_armed:
+                            st.session_state[remove_confirm_key] = True
+                            st.rerun()
                         database.remove_from_watchlist(conn, entry["symbol"])
+                        del st.session_state[remove_confirm_key]
                         selected = st.session_state.get("watchlist_selected")
                         if selected and selected.get("source") == "watchlist" and selected.get("symbol") == entry["symbol"]:
                             del st.session_state["watchlist_selected"]
@@ -520,7 +552,7 @@ def render_lists_section():
     if selected.get("source") == "watchlist" and selected.get("symbol") in watchlist_by_symbol:
         entry = watchlist_by_symbol[selected["symbol"]]
         entry_point = {"entry_date": entry["added_at"]}
-        render_chart_and_journal(entry["symbol"], entry_point, "Added", key_prefix="watchlist")
+        render_chart_and_journal(conn, entry["symbol"], entry_point, "Added", key_prefix="watchlist")
         return
 
     # The selection no longer resolves to anything real (position
@@ -733,7 +765,7 @@ def render_journal_session(conn):
         st.divider()
 
     entry_point = render_price_chart(
-        symbol, item["entry_point"], item["entry_label"], key_prefix, stop_loss=stop_loss, anchor_id=anchor_id)
+        conn, symbol, item["entry_point"], item["entry_label"], key_prefix, stop_loss=stop_loss, anchor_id=anchor_id)
 
     if should_scroll:
         ui.scroll_to_anchor(anchor_id)
@@ -803,4 +835,4 @@ else:
             st.session_state["_scroll_to_session_anchor"] = True
             st.rerun()
     st.divider()
-    render_lists_section()
+    render_lists_section(conn)

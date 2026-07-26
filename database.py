@@ -362,6 +362,15 @@ def init_db(conn):
     # NULL-means-default convention as dashboard_visible_sections above.
     if not _column_exists(cur, "ui_settings", "accent_color"):
         cur.execute("ALTER TABLE ui_settings ADD COLUMN accent_color TEXT")
+    # Customizable win/loss colors - the same NULL-means-default
+    # convention as accent_color above, but for the green/red pair used
+    # everywhere a stat tile, chart marker, or bar needs to show a gain
+    # vs a loss (see charting.py's GOOD_COLOR/CRITICAL_COLOR/
+    # win_loss_color()).
+    if not _column_exists(cur, "ui_settings", "good_color"):
+        cur.execute("ALTER TABLE ui_settings ADD COLUMN good_color TEXT")
+    if not _column_exists(cur, "ui_settings", "critical_color"):
+        cur.execute("ALTER TABLE ui_settings ADD COLUMN critical_color TEXT")
     # One general, not-tied-to-any-ticker journal entry per day - shown
     # as the first step of the guided Journal Session (see
     # pages/2_Shortlist.py's render_journal_session()) before it moves
@@ -755,6 +764,32 @@ def get_logbook_entry(conn, symbol, entry_date):
         "notes": row[0],
         "chart_image": bytes(row[1]) if row[1] is not None else None,
         "archived_at": row[2],
+    }
+
+
+def get_logbook_entries_for_date(conn, entry_date):
+    """
+    Returns every symbol's logbook row for `entry_date` as {symbol: {...}}
+    (same per-entry shape as get_logbook_entry()) - one query instead of
+    one per symbol. Used by daily_report.build_report_pdf(), which used
+    to call get_logbook_entry() once per watchlist ticker plus once per
+    open position (a real N+1 query pattern on both the "Generate & Email
+    Report" button and the nightly report fallback). A symbol with
+    nothing archived for this date simply won't be a key here - look it
+    up with `.get(symbol)`, same None-if-missing behavior as before.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT symbol, notes, chart_image, archived_at FROM logbook_entries WHERE entry_date = %s",
+        (entry_date,),
+    )
+    return {
+        row[0]: {
+            "notes": row[1],
+            "chart_image": bytes(row[2]) if row[2] is not None else None,
+            "archived_at": row[3],
+        }
+        for row in cur.fetchall()
     }
 
 
@@ -1459,6 +1494,42 @@ def clear_accent_color(conn):
     """Resets the chart accent color back to the app's built-in default."""
     cur = conn.cursor()
     cur.execute("UPDATE ui_settings SET accent_color = NULL WHERE id = 1")
+    conn.commit()
+
+
+def get_trade_colors(conn):
+    """Returns the saved win/loss color override as {"good": ...,
+    "critical": ...} - either key can be None (not saved/reset), meaning
+    "use the app's built-in default" for that one - see charting.py's
+    win_loss_color(). Returns {"good": None, "critical": None} if
+    neither has ever been saved."""
+    cur = conn.cursor()
+    cur.execute("SELECT good_color, critical_color FROM ui_settings WHERE id = 1")
+    row = cur.fetchone()
+    if row is None:
+        return {"good": None, "critical": None}
+    return {"good": row[0], "critical": row[1]}
+
+
+def save_trade_colors(conn, good_color, critical_color):
+    """Saves custom win/loss colors - see get_trade_colors()."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO ui_settings (id, good_color, critical_color) VALUES (1, %s, %s)
+        ON CONFLICT (id) DO UPDATE SET
+            good_color = EXCLUDED.good_color,
+            critical_color = EXCLUDED.critical_color
+        """,
+        (good_color, critical_color),
+    )
+    conn.commit()
+
+
+def clear_trade_colors(conn):
+    """Resets both win/loss colors back to the app's built-in defaults."""
+    cur = conn.cursor()
+    cur.execute("UPDATE ui_settings SET good_color = NULL, critical_color = NULL WHERE id = 1")
     conn.commit()
 
 

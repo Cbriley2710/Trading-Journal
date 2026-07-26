@@ -53,9 +53,47 @@ _chart_component = components.declare_component("trading_journal_chart", path=st
 # used for *trade outcome* meaning elsewhere (win/loss stat tiles,
 # entry/exit markers), which is a different thing from which way one
 # day's candle moved. Don't repaint these to match the candle colors.
+# Built-in defaults - see win_loss_color() below for the customizable
+# version every call site in the app actually uses.
 GOOD_COLOR = "#0ca30c"
 CRITICAL_COLOR = "#d03b3b"
 MUTED_COLOR = "#898781"
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_trade_colors():
+    """
+    Cached read of the saved win/loss color override (see database.
+    get_trade_colors()) - win_loss_color() below calls this on every
+    use, so it's cached the same way _load_accent_color() caches its
+    own read. Cached 5 minutes; clear_trade_colors_cache() is called
+    right after a save/reset on the Settings page so the CURRENT
+    session sees the change immediately.
+    """
+    conn = database.get_connection()
+    return database.get_trade_colors(conn)
+
+
+def clear_trade_colors_cache():
+    """Clears the cached win/loss color read - call right after saving
+    or resetting it on the Settings page (see _load_trade_colors())."""
+    _load_trade_colors.clear()
+
+
+def win_loss_color(is_win):
+    """
+    Returns the (possibly customized) color for a gain (is_win=True) or
+    a loss (is_win=False) - the single thing every stat tile, chart
+    marker, and bar in the app that colors by trade outcome should call,
+    instead of picking between GOOD_COLOR/CRITICAL_COLOR directly. Falls
+    back to those same built-in constants until a custom pair is saved
+    on the Settings page (see database.get_trade_colors()/
+    save_trade_colors()).
+    """
+    colors = _load_trade_colors()
+    if is_win:
+        return colors["good"] or GOOD_COLOR
+    return colors["critical"] or CRITICAL_COLOR
 
 # The chart's own dark theme, sampled from the DeepVue screenshot.
 CHART_BACKGROUND = "#111214"
@@ -518,6 +556,23 @@ def fetch_daily_closes(symbol, start, end):
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
+def _symbol_splits(symbol):
+    """
+    All-time split history for `symbol`, straight from yfinance -
+    split out from split_adjustment_factor() below so the actual
+    Yahoo Finance call happens once per SYMBOL and is cached that way,
+    not once per (symbol, since) pair. yf.Ticker(...).splits already
+    returns a symbol's entire split history regardless of any date
+    filter, so calling it fresh for every distinct `since` a caller
+    passed (e.g. once per trade in dashboard.py's equity curve, one
+    call per differing entry date) was repeating the identical fetch.
+    """
+    try:
+        return yf.Ticker(symbol).splits
+    except Exception:
+        return pd.Series(dtype=float)
+
+
 def split_adjustment_factor(symbol, since):
     """
     Returns the cumulative stock-split ratio for every split `symbol` has
@@ -538,15 +593,13 @@ def split_adjustment_factor(symbol, since):
     converts it into the same today's-share-terms convention
     fetch_daily_closes() already returns, before the two get compared.
 
-    Cached for a day (splits are rare, announced well in advance, and
-    won't change mid-session) rather than an hour like
-    fetch_daily_closes() - there's no "still-moving" value here to
-    justify checking more often.
+    The underlying fetch (_symbol_splits() above) is cached for a day
+    (splits are rare, announced well in advance, and won't change
+    mid-session) - the `since`-based filtering itself is cheap enough
+    (a plain in-memory filter over one symbol's small split list) not
+    to need its own cache.
     """
-    try:
-        splits = yf.Ticker(symbol).splits
-    except Exception:
-        return 1.0
+    splits = _symbol_splits(symbol)
     if splits.empty:
         return 1.0
     since_ts = pd.Timestamp(since)
@@ -884,7 +937,7 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
     ma_colors = settings["ma_colors"]
 
     if is_closed:
-        outcome_color = GOOD_COLOR if sell_price >= buy_price else CRITICAL_COLOR
+        outcome_color = win_loss_color(sell_price >= buy_price)
     else:
         outcome_color = CATEGORICAL_PALETTE[0]
 

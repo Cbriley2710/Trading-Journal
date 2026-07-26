@@ -309,7 +309,7 @@ else:
     total_cost_basis = sum(e["cost_basis"] for e in priced)
     total_current_value = sum(e["current_value"] for e in priced)
     total_unrealized_pl = sum(e["unrealized_pl"] for e in priced)
-    unrealized_color = charting.GOOD_COLOR if total_unrealized_pl >= 0 else charting.CRITICAL_COLOR
+    unrealized_color = charting.win_loss_color(total_unrealized_pl >= 0)
     if jan1_balance:
         account_value = jan1_balance + deposits_this_year + realized_pl_this_year + total_unrealized_pl
 
@@ -399,7 +399,7 @@ else:
             x=[r["value"] for r in heat_rows],
             y=[r["label"] for r in heat_rows],
             orientation="h",
-            marker_color=charting.CRITICAL_COLOR,
+            marker_color=charting.win_loss_color(False),
             customdata=[r["detail"] for r in heat_rows],
             text=[r["text"] for r in heat_rows],
             textposition="outside",
@@ -441,7 +441,7 @@ else:
         x=[f"{r['symbol']}{' (S)' if r['direction'] == 'SHORT' else ''} {r['entry_date']:%m/%d}" for r in last10],
         y=[r["pl"] for r in last10],
         marker=dict(
-            color=[charting.GOOD_COLOR if r["pl"] >= 0 else charting.CRITICAL_COLOR for r in last10],
+            color=[charting.win_loss_color(r["pl"] >= 0) for r in last10],
             opacity=[0.55 if r["is_open"] else 1.0 for r in last10],
         ),
         customdata=[["Open (unrealized)" if r["is_open"] else "Closed"] for r in last10],

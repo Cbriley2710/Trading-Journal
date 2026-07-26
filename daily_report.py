@@ -170,12 +170,17 @@ def build_report_pdf(conn, report_date):
     cover page with the date, then one page per ticker - every list
     (Lists 1-4, by their saved names) followed by Open Positions - each
     showing that day's archived chart + notes via
-    database.get_logbook_entry(). A list with nothing in it is skipped
-    entirely rather than given an empty page.
+    database.get_logbook_entries_for_date(). A list with nothing in it
+    is skipped entirely rather than given an empty page.
     """
     names = database.get_watchlist_names(conn)
     watchlist = database.get_watchlist(conn)
     positions = database.get_open_positions(conn)
+    # One query for every symbol's logbook entry on this date, instead
+    # of one query per watchlist ticker plus one per open position -
+    # this used to be a real N+1 pattern felt both as button lag on
+    # "Generate & Email Report" and in the nightly report fallback job.
+    logbook_entries = database.get_logbook_entries_for_date(conn, report_date)
 
     pdf = DarkReportPDF(format="A4", orientation="L")
     pdf.set_margin(PAGE_MARGIN_MM)
@@ -204,11 +209,10 @@ def build_report_pdf(conn, report_date):
     for list_id in range(1, 5):
         symbols = [w["symbol"] for w in watchlist if w["list_id"] == list_id]
         for symbol in symbols:
-            _write_ticker_page(
-                pdf, names[list_id], symbol, database.get_logbook_entry(conn, symbol, report_date))
+            _write_ticker_page(pdf, names[list_id], symbol, logbook_entries.get(symbol))
 
     for position in positions:
-        entry = database.get_logbook_entry(conn, position["symbol"], report_date)
+        entry = logbook_entries.get(position["symbol"])
         _write_ticker_page(pdf, "Open Positions", _position_label(position), entry)
 
     return bytes(pdf.output())

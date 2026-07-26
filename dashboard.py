@@ -43,8 +43,11 @@ from ui import stat_tile
 # Reusing charting.py's colors (rather than picking new ones here) keeps
 # this page's charts looking like the same dark, DeepVue-styled charts
 # used everywhere else in the app - Trade Analyzer, Shortlist, Logbook.
-GOOD_COLOR = charting.GOOD_COLOR
-CRITICAL_COLOR = charting.CRITICAL_COLOR
+# Win/loss coloring itself goes through charting.win_loss_color(is_win)
+# at each use below, not a module-level GOOD_COLOR/CRITICAL_COLOR alias
+# like this used to have - see that function's own docstring for why
+# (it's the one part of the app's color scheme that's user-customizable
+# on the Settings page).
 LINE_COLOR = charting.CATEGORICAL_PALETTE[0]  # the single line in the equity curve chart
 MUTED_COLOR = charting.MUTED_COLOR  # neutral labels (stat tile captions) and the zero-line on charts
 BASELINE_COLOR = charting.MUTED_COLOR
@@ -95,7 +98,7 @@ st.divider()
 
 
 def load_trades():
-    """Pulls every completed trade out of trading.db as a pandas
+    """Pulls every completed trade out of the database as a pandas
     DataFrame (a table you can filter/sort/summarize easily), reusing
     database.get_trades() from Phase 1 - no separate data-loading logic."""
     conn = database.get_connection()
@@ -106,7 +109,12 @@ def load_trades():
 trades_df = load_trades()
 
 if trades_df.empty:
-    st.info("No trades found yet. Run import_trades.py first to populate trading.db.")
+    st.info("No trades found yet.")
+    st.page_link(
+        "pages/0_Import_Trades.py",
+        label="Import your trade history to get started.",
+        icon="↗️",
+    )
     st.stop()
 
 # --- Sidebar filters ---------------------------------------------------
@@ -173,11 +181,11 @@ expectancy = win_contribution + loss_contribution
 cols = st.columns(7)
 stat_tile(cols[0], "Total Trades", f"{len(filtered)}")
 stat_tile(cols[1], "Win Rate", f"{win_rate:.1f}%")
-stat_tile(cols[2], "Total P/L", f"${total_pl:,.2f}", GOOD_COLOR if total_pl >= 0 else CRITICAL_COLOR)
-stat_tile(cols[3], "Avg Win", f"${avg_win:,.2f}", GOOD_COLOR)
-stat_tile(cols[4], "Avg Loss", f"${avg_loss:,.2f}", CRITICAL_COLOR)
-stat_tile(cols[5], "Best Trade", f"{best['symbol']} ${best['profit_loss']:,.2f}", GOOD_COLOR)
-stat_tile(cols[6], "Worst Trade", f"{worst['symbol']} ${worst['profit_loss']:,.2f}", CRITICAL_COLOR)
+stat_tile(cols[2], "Total P/L", f"${total_pl:,.2f}", charting.win_loss_color(total_pl >= 0))
+stat_tile(cols[3], "Avg Win", f"${avg_win:,.2f}", charting.win_loss_color(True))
+stat_tile(cols[4], "Avg Loss", f"${avg_loss:,.2f}", charting.win_loss_color(False))
+stat_tile(cols[5], "Best Trade", f"{best['symbol']} ${best['profit_loss']:,.2f}", charting.win_loss_color(True))
+stat_tile(cols[6], "Worst Trade", f"{worst['symbol']} ${worst['profit_loss']:,.2f}", charting.win_loss_color(False))
 
 st.divider()
 
@@ -191,7 +199,7 @@ st.divider()
 # baked into it, so using it as the denominator would inflate as the
 # year goes on and systematically understate every period's return.
 if "Account Performance" in visible_sections:
-    st.subheader("Account Performance")
+    st.header("Account Performance")
     if jan1_balance:
         today = pd.Timestamp(timeutil.today_eastern())
         periods = [
@@ -207,7 +215,7 @@ if "Account Performance" in visible_sections:
             period_pl = period_trades["profit_loss"].sum()
             period_pct = period_pl / jan1_balance * 100
             stat_tile(col, label, f"${period_pl:,.2f} ({period_pct:+.1f}%)",
-                      GOOD_COLOR if period_pl >= 0 else CRITICAL_COLOR)
+                      charting.win_loss_color(period_pl >= 0))
     else:
         st.info("Set your account value as of Jan 1 (Account Settings below) to see account performance by time period.")
 
@@ -234,7 +242,33 @@ def build_mark_to_market_curve(trades_records, open_positions, daily_index):
     `trades_records`/`open_positions` are plain dict records (from
     DataFrame.to_dict("records") / database.get_open_positions()) rather
     than DataFrames, since this loops row by row anyway.
+
+    Fetches each symbol's price history ONCE (the widest window any of
+    its trades/positions need), not once per trade - a symbol traded
+    many times used to mean that many separate calls to charting.
+    fetch_daily_closes(), each with a different exact (symbol, start,
+    end) cache key, so its st.cache_data caching almost never actually
+    hit for a repeatedly-traded symbol. Slicing each trade's own
+    [entry, exit] window out of the one wider fetch afterward gives
+    numerically identical results (the wider fetch's forward-fill can
+    only ever have MORE valid data behind any given day, never less),
+    just far fewer live Yahoo Finance calls.
     """
+    symbol_windows = {}
+    for trade in trades_records:
+        entry, exit_ = pd.Timestamp(trade["entry_date"]), pd.Timestamp(trade["date"])
+        lo, hi = symbol_windows.get(trade["symbol"], (entry, exit_))
+        symbol_windows[trade["symbol"]] = (min(lo, entry), max(hi, exit_))
+    for position in open_positions:
+        entry = pd.Timestamp(position["entry_date"])
+        lo, hi = symbol_windows.get(position["symbol"], (entry, daily_index.max()))
+        symbol_windows[position["symbol"]] = (min(lo, entry), max(hi, daily_index.max()))
+
+    symbol_closes = {
+        symbol: charting.fetch_daily_closes(symbol, window_start, window_end)
+        for symbol, (window_start, window_end) in symbol_windows.items()
+    }
+
     total = pd.Series(0.0, index=daily_index)
 
     for trade in trades_records:
@@ -243,7 +277,7 @@ def build_mark_to_market_curve(trades_records, open_positions, daily_index):
         is_short = trade["direction"] == "SHORT"
         entry_price = trade["sell_price"] if is_short else trade["buy_price"]
 
-        closes = charting.fetch_daily_closes(trade["symbol"], entry, exit_)
+        closes = symbol_closes[trade["symbol"]].loc[entry:exit_]
         if closes.empty:
             # No price history for this stretch - fall back to crediting
             # the whole gain on the exit day rather than losing it entirely.
@@ -277,7 +311,7 @@ def build_mark_to_market_curve(trades_records, open_positions, daily_index):
         entry = pd.Timestamp(position["entry_date"])
         is_short = position["direction"] == "SHORT"
 
-        closes = charting.fetch_daily_closes(position["symbol"], entry, daily_index.max())
+        closes = symbol_closes[position["symbol"]].loc[entry:daily_index.max()]
         if closes.empty:
             continue
 
@@ -303,7 +337,7 @@ def build_mark_to_market_curve(trades_records, open_positions, daily_index):
 # the gain made DURING the last year, not the whole account's history
 # compressed into one window.
 if "Equity Curve" in visible_sections:
-    st.subheader("Equity Curve")
+    st.header("Equity Curve")
 
     if not jan1_balance:
         st.info(
@@ -367,7 +401,7 @@ if "Equity Curve" in visible_sections:
 # see whether trades held longer tend to do better or worse, at a
 # glance, instead of reading it out of the trade table row by row.
 if "Holding Period vs. Return" in visible_sections:
-    st.subheader("Holding Period vs. Return")
+    st.header("Holding Period vs. Return")
 
     scatter_data = filtered.copy()
     scatter_data["holding_days"] = (scatter_data["date"] - scatter_data["entry_date"]).dt.days
@@ -377,7 +411,7 @@ if "Holding Period vs. Return" in visible_sections:
     is_short = scatter_data["direction"] == "SHORT"
     entry_price = scatter_data["buy_price"].where(~is_short, scatter_data["sell_price"])
     scatter_data["return_pct"] = scatter_data["profit_loss"] / (entry_price * scatter_data["quantity"]) * 100
-    scatter_colors = [GOOD_COLOR if v >= 0 else CRITICAL_COLOR for v in scatter_data["profit_loss"]]
+    scatter_colors = [charting.win_loss_color(v >= 0) for v in scatter_data["profit_loss"]]
 
     scatter_chart = go.Figure()
     scatter_chart.add_hline(y=0, line_color=BASELINE_COLOR, line_width=1)
@@ -396,10 +430,10 @@ if "Holding Period vs. Return" in visible_sections:
 
 # --- P/L by symbol chart -------------------------------------------------
 if "Profit/Loss by Symbol" in visible_sections:
-    st.subheader("Profit/Loss by Symbol")
+    st.header("Profit/Loss by Symbol")
 
     by_symbol = filtered.groupby("symbol")["profit_loss"].sum().sort_values(ascending=False)
-    bar_colors = [GOOD_COLOR if v >= 0 else CRITICAL_COLOR for v in by_symbol.values]
+    bar_colors = [charting.win_loss_color(v >= 0) for v in by_symbol.values]
 
     # With an account value saved, each symbol's contribution is shown as a
     # % of that account too, not just its raw dollar P/L.
@@ -427,7 +461,7 @@ if "Profit/Loss by Symbol" in visible_sections:
 
 # --- Equity allocation (open positions as % of account) -------------------
 if "Equity Allocation" in visible_sections:
-    st.subheader("Equity Allocation")
+    st.header("Equity Allocation")
     if not account_value:
         st.info("Set your account value above to see equity allocation across open positions.")
     else:
@@ -481,7 +515,7 @@ if "Equity Allocation" in visible_sections:
 # that comment for why: Theoretical Account Projection needs it too, and
 # either section can be hidden independently.)
 if "Expectancy" in visible_sections:
-    st.subheader("Expectancy")
+    st.header("Expectancy")
 
     st.caption(
         # $ signs are escaped (\$) - Streamlit's markdown renderer treats
@@ -496,7 +530,7 @@ if "Expectancy" in visible_sections:
 
     expectancy_labels = ["Win Contribution", "Loss Contribution", "Expectancy (Net)"]
     expectancy_values = [win_contribution, loss_contribution, expectancy]
-    expectancy_colors = [GOOD_COLOR if v >= 0 else CRITICAL_COLOR for v in expectancy_values]
+    expectancy_colors = [charting.win_loss_color(v >= 0) for v in expectancy_values]
 
     expectancy_chart = go.Figure()
     expectancy_chart.add_hline(y=0, line_color=BASELINE_COLOR, line_width=1)
@@ -521,7 +555,7 @@ if "Expectancy" in visible_sections:
 # above): it would overstate the projection more and more the further out
 # it goes, exactly like dividing by a growing balance did there.
 if "Theoretical Account Projection" in visible_sections:
-    st.subheader("Theoretical Account Projection")
+    st.header("Theoretical Account Projection")
     if not account_value:
         st.info("Set your account value above (Account Settings below) to see a theoretical account projection.")
     else:
@@ -539,7 +573,7 @@ if "Theoretical Account Projection" in visible_sections:
         for col, n, value in zip(milestone_cols, milestones, projected_values):
             gain_pct = (value - account_value) / account_value * 100
             stat_tile(col, f"After {n} Trades", f"${value:,.2f} ({gain_pct:+.1f}%)",
-                      GOOD_COLOR if gain_pct >= 0 else CRITICAL_COLOR)
+                      charting.win_loss_color(gain_pct >= 0))
 
         # A real numeric x-axis (0/20/50/100/200), not evenly-spaced category
         # labels - milestones aren't evenly spaced in trade-count terms (+20,
@@ -565,7 +599,7 @@ if "Theoretical Account Projection" in visible_sections:
 st.divider()
 
 # --- Trade table ----------------------------------------------------------
-st.subheader("Trades")
+st.header("Trades")
 
 table = filtered.sort_values("date", ascending=False).copy()
 table["Result"] = table["profit_loss"].apply(lambda v: "✅ Win" if v > 0 else "❌ Loss" if v < 0 else "Breakeven")
@@ -634,7 +668,7 @@ with st.expander("Account Settings"):
             f"this year + \\${total_unrealized_pl_now:,.2f} unrealized P/L now)"
         )
 
-    st.subheader("Deposits & Withdrawals")
+    st.header("Deposits & Withdrawals")
     st.caption("Enter a positive amount for a deposit, or a negative amount for a withdrawal.")
     deposit_cols = st.columns([1, 1, 1])
     deposit_amount = deposit_cols[0].number_input(
