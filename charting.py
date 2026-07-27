@@ -255,31 +255,6 @@ def parse_ma_periods(text):
     return sorted(periods)
 
 
-def _expected_last_trading_day():
-    """
-    The most recent date a fresh fetch's last bar SHOULD be dated -
-    used by warm_price_cache_for_symbol() below to tell "this fetch
-    reaches through the most recent close" apart from "this fetch is
-    stale." A plain "does it match today?" check (which this used to
-    be) can never pass on a Saturday or Sunday, since the market's
-    last real close is Friday's, not today's - which meant the
-    persistent cache could never be (re)warmed at all on a weekend,
-    permanently locking in whatever was last saved (including an
-    incomplete snapshot, if that's what Friday's own warm run
-    happened to catch - see the NaN check right below this function's
-    call site). This is a simple weekday-only approximation (it
-    doesn't know about market holidays), matching this project's
-    existing "good enough, not a full trading calendar" approach
-    elsewhere (e.g. nightly_archive.py's own scheduling notes).
-    """
-    today = timeutil.today_eastern()
-    if today.weekday() == 5:  # Saturday
-        return today - timedelta(days=1)
-    if today.weekday() == 6:  # Sunday
-        return today - timedelta(days=2)
-    return today
-
-
 def warm_price_cache_for_symbol(symbol):
     """
     Fetches 5 years of daily history for `symbol` and stores it in the
@@ -345,7 +320,8 @@ def warm_price_cache_for_symbol(symbol):
         return "no_data"
 
     history.index = history.index.tz_localize(None)
-    if history.index[-1].date() != _expected_last_trading_day():
+    expected_day = timeutil.expected_last_trading_day()
+    if history.index[-1].date() != expected_day:
         return "not_ready"
 
     # Yahoo Finance sometimes reports a day's Volume before that same
@@ -361,7 +337,11 @@ def warm_price_cache_for_symbol(symbol):
     if last_bar[["Open", "High", "Low", "Close"]].isna().any():
         return "not_ready"
 
-    today = timeutil.today_eastern()
+    # Tagged with the TRADING DAY this fetch covers (expected_day),
+    # not timeutil.today_eastern() - see expected_last_trading_day()'s
+    # own docstring for why using the literal calendar day here used
+    # to silently break this cache for days at a time whenever this
+    # scheduled job's actual run landed after midnight Eastern.
     history_dict = {
         "dates": [d.date().isoformat() for d in history.index],
         "open": history["Open"].tolist(),
@@ -371,7 +351,7 @@ def warm_price_cache_for_symbol(symbol):
         "volume": history["Volume"].tolist(),
     }
     conn = database.get_connection()
-    database.save_cached_price_history(conn, symbol, history_dict, today)
+    database.save_cached_price_history(conn, symbol, history_dict, expected_day)
     return "ok"
 
 
@@ -380,24 +360,31 @@ def _daily_history_from_cache(symbol, needed_start):
     Returns a daily-interval DataFrame (Open/High/Low/Close/Volume,
     shaped exactly like a live yfinance fetch) from the persistent
     price_cache table, or None if there's nothing usable there - no
-    cached row at all, it wasn't refreshed today, or it doesn't reach
-    back as far as `needed_start` (fetch_history()'s own `fetch_start`).
-    A None return means "fall back to a live fetch," same as if this
-    cache didn't exist.
+    cached row at all, it doesn't cover the most recent expected
+    trading day, or it doesn't reach back as far as `needed_start`
+    (fetch_history()'s own `fetch_start`). A None return means "fall
+    back to a live fetch," same as if this cache didn't exist.
 
-    Doesn't separately re-check that the cache includes today's own
-    candle - warm_price_cache_for_symbol() already guarantees that by
-    refusing to write anything unless its fetch actually reached
-    through today, so a `fetched_for_date == today` row here always
-    has today's close in it. That split is what avoids re-litigating
-    Yahoo's own publish timing on every chart load: a warm run before
-    today's close just skips writing (leaving whatever's here, or
-    nothing), rather than this function having to guess whether a
-    same-day row is trustworthy.
+    Compares against timeutil.expected_last_trading_day() rather than
+    timeutil.today_eastern() - the cached row is tagged with the
+    TRADING DAY it covers (see warm_price_cache_for_symbol()), which on
+    a Saturday/Sunday is still Friday, not the literal weekend date.
+    Comparing against literal "today" here would make a perfectly
+    current weekend cache look stale and force a needless live fetch.
+
+    Doesn't separately re-check that the cache includes the most
+    recent close - warm_price_cache_for_symbol() already guarantees
+    that by refusing to write anything unless its fetch actually
+    reached through the expected trading day, so a matching
+    `fetched_for_date` here always has that close in it. That split is
+    what avoids re-litigating Yahoo's own publish timing on every
+    chart load: a warm run before today's close just skips writing
+    (leaving whatever's here, or nothing), rather than this function
+    having to guess whether a same-day row is trustworthy.
     """
     conn = database.get_connection()
     cached = database.get_cached_price_history(conn, symbol)
-    if cached is None or cached["fetched_for_date"] != timeutil.today_eastern():
+    if cached is None or cached["fetched_for_date"] != timeutil.expected_last_trading_day():
         return None
 
     hist = cached["history"]

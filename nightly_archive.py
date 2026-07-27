@@ -71,8 +71,11 @@ def main():
     # The "discard after midnight" half of the price cache's lifecycle
     # (see database.clear_stale_price_cache() and warm_price_cache.py) -
     # run last, once today's real archiving work is done, so a problem
-    # here never affects that.
-    database.clear_stale_price_cache(conn, today)
+    # here never affects that. Uses expected_last_trading_day(), not
+    # `today` above - see clear_stale_price_cache()'s own docstring for
+    # why comparing against the literal calendar day was wiping out a
+    # perfectly good weekend cache.
+    database.clear_stale_price_cache(conn, timeutil.expected_last_trading_day())
 
     print("Done.")
 

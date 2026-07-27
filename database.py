@@ -1090,19 +1090,26 @@ def save_cached_price_history(conn, symbol, history_dict, fetched_for_date):
     conn.commit()
 
 
-def clear_stale_price_cache(conn, today):
+def clear_stale_price_cache(conn, expected_day):
     """
-    Deletes any cached price history not refreshed today - called by
-    nightly_archive.py once its own (near-midnight) archiving is done,
-    which is the "discard after midnight" half of the price cache's
-    lifecycle. Covers both an ordinary day's now-stale cache AND a
-    symbol that's no longer tracked at all (removed from every
-    watchlist, position closed) - either way, nothing refreshed it
-    today, so it's safe to drop; a symbol that IS still tracked just
-    gets a fresh row again at the next warming run.
+    Deletes any cached price history not tagged with `expected_day` -
+    called by nightly_archive.py once its own (near-midnight) archiving
+    is done, which is the "discard after midnight" half of the price
+    cache's lifecycle. Covers both an ordinary day's now-stale cache AND
+    a symbol that's no longer tracked at all (removed from every
+    watchlist, position closed) - either way, nothing refreshed it for
+    `expected_day`, so it's safe to drop; a symbol that IS still tracked
+    just gets a fresh row again at the next warming run.
+
+    `expected_day` should be timeutil.expected_last_trading_day(), NOT
+    timeutil.today_eastern() - passing the literal calendar day here
+    used to delete a perfectly valid weekend cache (tagged with
+    Friday's trading day) the moment this ran past Friday itself, since
+    a plain calendar "today" never equals "Friday" again after the
+    weekend starts.
     """
     cur = conn.cursor()
-    cur.execute("DELETE FROM price_cache WHERE fetched_for_date != %s", (today,))
+    cur.execute("DELETE FROM price_cache WHERE fetched_for_date != %s", (expected_day,))
     conn.commit()
 
 
