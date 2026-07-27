@@ -45,7 +45,7 @@ st.set_page_config(page_title="Import Trades", page_icon="📈", layout="wide", 
 if not auth.check_password():
     st.stop()
 
-nav.render_top_nav("Import Trades")
+nav.render_top_nav("import_trades")
 
 st.title("Import Trades")
 

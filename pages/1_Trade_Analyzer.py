@@ -39,7 +39,7 @@ st.set_page_config(page_title="Trade Analyzer", page_icon="📈", layout="wide",
 if not auth.check_password():
     st.stop()
 
-nav.render_top_nav("Trade Analyzer")
+nav.render_top_nav("trade_analyzer")
 
 st.title("Trade Analyzer")
 

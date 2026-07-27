@@ -21,16 +21,21 @@ import streamlit as st
 
 import database
 
-# (label shown on its button, file path Streamlit needs for switch_page).
-# "Dashboard" is the main entry script (dashboard.py), not in pages/.
+# (stable page id, default label shown on its button, file path Streamlit
+# needs for switch_page). "dashboard" is the main entry script
+# (dashboard.py), not in pages/. The id is what every page passes to
+# render_top_nav() and never changes; the label is just the default
+# text shown until/unless it's overridden on the Settings page (see
+# get_nav_labels() below) - keeping these separate is what lets a page's
+# button be renamed without breaking "which page am I on" tracking.
 PAGES = [
-    ("Dashboard", "dashboard.py"),
-    ("Import Trades", "pages/0_Import_Trades.py"),
-    ("Trade Analyzer", "pages/1_Trade_Analyzer.py"),
-    ("Shortlist", "pages/2_Shortlist.py"),
-    ("Open Positions", "pages/4_Open_Positions.py"),
-    ("Logbook", "pages/3_Logbook.py"),
-    ("Settings", "pages/5_Settings.py"),
+    ("dashboard", "Dashboard", "dashboard.py"),
+    ("import_trades", "Import Trades", "pages/0_Import_Trades.py"),
+    ("trade_analyzer", "Trade Analyzer", "pages/1_Trade_Analyzer.py"),
+    ("shortlist", "Shortlist", "pages/2_Shortlist.py"),
+    ("open_positions", "Open Positions", "pages/4_Open_Positions.py"),
+    ("logbook", "Logbook", "pages/3_Logbook.py"),
+    ("settings", "Settings", "pages/5_Settings.py"),
 ]
 
 
@@ -56,6 +61,24 @@ def clear_background_cache():
     saving or removing a background on the Settings page (see
     _load_background_image()'s own docstring for why)."""
     _load_background_image.clear()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_nav_labels():
+    """
+    Cached read of the saved nav-bar label overrides (see database.
+    get_nav_labels()) - render_top_nav() calls this on every page
+    load/rerun, same reasoning as _load_background_image() above.
+    """
+    conn = database.get_connection()
+    return database.get_nav_labels(conn)
+
+
+def clear_nav_labels_cache():
+    """Clears the cached nav-label read - call this right after saving
+    or resetting labels on the Settings page so the CURRENT session
+    sees the change immediately instead of waiting out the TTL."""
+    _load_nav_labels.clear()
 
 
 def _apply_background():
@@ -88,13 +111,18 @@ def _apply_background():
     )
 
 
-def render_top_nav(current_label):
+def render_top_nav(current_page):
     """
     Call this once near the top of every page, right after the password
-    check passes. `current_label` must match one of the labels in PAGES
-    above - that button is shown highlighted and disabled (you're
-    already there); clicking any other button jumps straight to that
-    page via st.switch_page().
+    check passes. `current_page` must match one of the stable ids in
+    PAGES above (e.g. "settings", not "Settings") - that button is
+    shown highlighted and disabled (you're already there); clicking any
+    other button jumps straight to that page via st.switch_page(). The
+    actual button TEXT comes from _load_nav_labels() (a page's custom
+    label from the Settings page, or PAGES' own default if it's never
+    been customized) - current_page itself never changes even if the
+    label does, since page routing/highlighting can't depend on
+    whatever a user happens to have renamed a button to.
     """
     _apply_background()
 
@@ -138,12 +166,19 @@ def render_top_nav(current_label):
         unsafe_allow_html=True,
     )
 
+    nav_labels = _load_nav_labels()
+
     with st.container(key="top_nav_row"):
         cols = st.columns(len(PAGES))
-        for col, (label, path) in zip(cols, PAGES):
-            if label == current_label:
-                col.button(label, disabled=True, width="stretch", type="primary")
-            elif col.button(label, width="stretch"):
+        for col, (page_id, default_label, path) in zip(cols, PAGES):
+            label = nav_labels.get(page_id, default_label)
+            # Keyed by the stable page_id, not the label - two pages
+            # given the same custom label would otherwise collide
+            # (Streamlit identifies a plain st.button by its label plus
+            # position, and a duplicate would raise an error).
+            if page_id == current_page:
+                col.button(label, disabled=True, width="stretch", type="primary", key=f"nav_btn_{page_id}")
+            elif col.button(label, width="stretch", key=f"nav_btn_{page_id}"):
                 st.switch_page(path)
 
     st.divider()

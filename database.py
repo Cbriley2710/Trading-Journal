@@ -371,6 +371,15 @@ def init_db(conn):
         cur.execute("ALTER TABLE ui_settings ADD COLUMN good_color TEXT")
     if not _column_exists(cur, "ui_settings", "critical_color"):
         cur.execute("ALTER TABLE ui_settings ADD COLUMN critical_color TEXT")
+    # Custom text for the top nav bar's page buttons (see nav.py's
+    # PAGES/render_top_nav()), keyed by each page's stable id - a page
+    # missing from this dict just uses PAGES' own built-in default
+    # label, the same JSONB-blob-of-named-values approach as
+    # open_positions_column_widths above (there's no reason for seven
+    # separate TEXT columns when this is really one related group of
+    # settings).
+    if not _column_exists(cur, "ui_settings", "nav_labels"):
+        cur.execute("ALTER TABLE ui_settings ADD COLUMN nav_labels JSONB NOT NULL DEFAULT '{}'")
     # One general, not-tied-to-any-ticker journal entry per day - shown
     # as the first step of the guided Journal Session (see
     # pages/2_Shortlist.py's render_journal_session()) before it moves
@@ -1537,6 +1546,36 @@ def clear_trade_colors(conn):
     """Resets both win/loss colors back to the app's built-in defaults."""
     cur = conn.cursor()
     cur.execute("UPDATE ui_settings SET good_color = NULL, critical_color = NULL WHERE id = 1")
+    conn.commit()
+
+
+def get_nav_labels(conn):
+    """Returns the saved nav-bar label overrides as {page_id: custom
+    label} - a page_id missing from this dict means "use nav.py's own
+    built-in default label for it," see nav.py's PAGES/render_top_nav()."""
+    cur = conn.cursor()
+    cur.execute("SELECT nav_labels FROM ui_settings WHERE id = 1")
+    row = cur.fetchone()
+    return row[0] if row and row[0] else {}
+
+
+def save_nav_labels(conn, labels):
+    """Saves the nav-bar label overrides - see get_nav_labels()."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO ui_settings (id, nav_labels) VALUES (1, %s)
+        ON CONFLICT (id) DO UPDATE SET nav_labels = EXCLUDED.nav_labels
+        """,
+        (Json(labels),),
+    )
+    conn.commit()
+
+
+def clear_nav_labels(conn):
+    """Resets every nav-bar label back to its built-in default."""
+    cur = conn.cursor()
+    cur.execute("UPDATE ui_settings SET nav_labels = '{}' WHERE id = 1")
     conn.commit()
 
 

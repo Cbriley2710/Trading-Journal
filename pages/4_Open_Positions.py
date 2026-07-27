@@ -40,7 +40,7 @@ st.set_page_config(page_title="Open Positions", page_icon="📈", layout="wide",
 if not auth.check_password():
     st.stop()
 
-nav.render_top_nav("Open Positions")
+nav.render_top_nav("open_positions")
 
 st.title("Open Positions")
 

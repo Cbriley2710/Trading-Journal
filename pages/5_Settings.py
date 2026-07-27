@@ -37,7 +37,7 @@ st.set_page_config(page_title="Settings", page_icon="📈", layout="wide", initi
 if not auth.check_password():
     st.stop()
 
-nav.render_top_nav("Settings")
+nav.render_top_nav("settings")
 
 st.title("Settings")
 
@@ -264,4 +264,39 @@ if trade_color_buttons[1].button(
     database.clear_trade_colors(conn)
     charting.clear_trade_colors_cache()
     st.success("Win/loss colors reset to the defaults.")
+    st.rerun()
+
+st.divider()
+
+st.header("Navigation Bar Labels")
+st.caption(
+    "Rename the buttons in the top navigation bar. Leave a box blank "
+    "(or matching the default) to use the app's built-in name for that "
+    "page."
+)
+
+saved_nav_labels = database.get_nav_labels(conn)
+nav_label_cols = st.columns(len(nav.PAGES))
+nav_label_inputs = {}
+for col, (page_id, default_label, _path) in zip(nav_label_cols, nav.PAGES):
+    current_value = saved_nav_labels.get(page_id, default_label)
+    nav_label_inputs[page_id] = col.text_input(default_label, value=current_value, key=f"settings_nav_label_{page_id}")
+
+new_nav_labels = {}
+for page_id, default_label, _path in nav.PAGES:
+    text = nav_label_inputs[page_id].strip()
+    if text and text != default_label:
+        new_nav_labels[page_id] = text
+
+nav_label_buttons = st.columns(2)
+if nav_label_buttons[0].button("Save Navigation Labels", disabled=new_nav_labels == saved_nav_labels):
+    database.save_nav_labels(conn, new_nav_labels)
+    nav.clear_nav_labels_cache()
+    st.success("Navigation labels saved.")
+    st.rerun()
+
+if nav_label_buttons[1].button("Reset to Defaults", disabled=not saved_nav_labels, key="reset_nav_labels"):
+    database.clear_nav_labels(conn)
+    nav.clear_nav_labels_cache()
+    st.success("Navigation labels reset to the defaults.")
     st.rerun()

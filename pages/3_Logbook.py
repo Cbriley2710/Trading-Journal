@@ -45,7 +45,7 @@ st.set_page_config(page_title="Logbook", page_icon="📈", layout="wide", initia
 if not auth.check_password():
     st.stop()
 
-nav.render_top_nav("Logbook")
+nav.render_top_nav("logbook")
 
 st.title("Logbook")
 

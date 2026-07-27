@@ -40,6 +40,7 @@ import streamlit as st
 import archiving
 import auth
 import charting
+import daily_report
 import database
 import nav
 import timeutil
@@ -50,7 +51,7 @@ st.set_page_config(page_title="Shortlist", page_icon="📈", layout="wide", init
 if not auth.check_password():
     st.stop()
 
-nav.render_top_nav("Shortlist")
+nav.render_top_nav("shortlist")
 
 st.title("Shortlist")
 
@@ -759,6 +760,37 @@ def _render_todays_thoughts_step(conn, today):
     return False
 
 
+def _send_report_after_session(conn):
+    """
+    Generates and emails today's Daily Report automatically right after
+    a Journal Session finishes, so that's one less thing to remember to
+    do separately on the Logbook page. Guarded by get_daily_report_status
+    first - same check nightly_archive.py's own fallback already makes
+    before calling this - so finishing a second session the same day
+    (or the nightly job running later that night) doesn't send a
+    duplicate email.
+
+    archive_first is left False here: _archive_pending_snapshots() just
+    finished archiving a fresh chart for every ticker that got a "Save &
+    Next" this session, so re-archiving everything again (what
+    archive_first=True does) would pay the several-seconds-per-chart
+    cost twice for the same tickers. The trade-off is that a ticker that
+    was Skipped this session won't have a freshly-archived image in
+    today's report this way - the same as today's existing behavior for
+    any skipped ticker otherwise.
+    """
+    today = timeutil.today_eastern()
+    if database.get_daily_report_status(conn, today):
+        return
+
+    with st.spinner("Generating and emailing today's report..."):
+        success, message = daily_report.generate_and_send_report(conn, today)
+    if success:
+        st.success(message)
+    else:
+        st.error(message)
+
+
 def render_journal_session(conn):
     """
     The guided Journal Session: walks through every ticker in the queue
@@ -778,6 +810,7 @@ def render_journal_session(conn):
         _archive_pending_snapshots(conn, session)
         database.clear_journal_session_progress(conn)
         st.success(f"Session complete - journaled {len(queue)} ticker(s) today.")
+        _send_report_after_session(conn)
         if st.button("Back to Shortlist"):
             del st.session_state["journal_session"]
             st.rerun()
@@ -816,6 +849,13 @@ def render_journal_session(conn):
         if st.button("Skip →", key=f"{key_prefix}_skip"):
             _advance_session(conn, session, queue)
         return
+
+    if should_scroll:
+        # Only bother once the journal box is actually about to be
+        # rendered below (the no-price-data case above never gets
+        # one) - otherwise this retries for a pointless ~10 seconds
+        # looking for a box that was never going to exist.
+        ui.focus_textarea("Today's Journal")
 
     clicked, notes, remove_from_watchlist = render_journal_box(
         conn, symbol, key_prefix, submit_labels=("Save & Next →", "Skip"),

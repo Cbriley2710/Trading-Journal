@@ -9,6 +9,7 @@ had already started to drift (two pages used a slightly bigger font
 than the other two).
 """
 
+import json
 import time
 
 import streamlit.components.v1 as components
@@ -33,7 +34,7 @@ def scroll_to_anchor(anchor_id):
     window.parent is what reaches back out into the actual page from
     inside that iframe.
 
-    Two things a naive version of this gets wrong, both fixed here:
+    Three things a naive version of this gets wrong, all fixed here:
 
     1. Saving the SAME ticker's journal twice in a row sends this exact
        same HTML both times - Streamlit/React can (and does) decide the
@@ -63,17 +64,95 @@ def scroll_to_anchor(anchor_id):
        up before the anchor even existed, silently leaving the page at
        the rerun's default top-of-page scroll reset instead of at the
        chart.
+    3. Re-issuing scrollIntoView unconditionally for the full ~10
+       seconds means it was fighting any attempt to manually scroll
+       away during that entire window - every 50ms retry would just
+       snap the page straight back, making the page feel locked in
+       place right after a chart loads. A wheel/touch/keyboard event on
+       the real page cancels the remaining retries immediately, so a
+       deliberate scroll wins instead of getting overridden. The
+       listeners are registered on window.parent (the real page, not
+       this throwaway iframe) - since this iframe gets torn down and
+       replaced on every call, the browser won't clean those up on its
+       own, so this removes them itself once either the user has
+       scrolled or the retries run out, whichever comes first.
+    """
+    components.html(
+        f"""
+        <!-- _nonce: {time.time()} -->
+        <script>
+            (function() {{
+                let interrupted = false;
+                const events = ["wheel", "touchmove", "keydown"];
+                function onUserInput() {{
+                    interrupted = true;
+                    cleanup();
+                }}
+                function cleanup() {{
+                    events.forEach(e => window.parent.removeEventListener(e, onUserInput));
+                }}
+                events.forEach(e => window.parent.addEventListener(e, onUserInput, {{passive: true}}));
+
+                (function attempt(triesLeft) {{
+                    if (interrupted) {{
+                        return;
+                    }}
+                    const el = window.parent.document.getElementById("{anchor_id}");
+                    if (el) {{
+                        el.scrollIntoView({{behavior: "instant", block: "start"}});
+                    }}
+                    if (triesLeft > 0) {{
+                        setTimeout(function() {{ attempt(triesLeft - 1); }}, 50);
+                    }} else {{
+                        cleanup();
+                    }}
+                }})(200);
+            }})();
+        </script>
+        """,
+        height=0,
+    )
+
+
+def focus_textarea(label):
+    """
+    Puts the cursor in the <textarea> whose visible label is `label`, so
+    stepping to a new ticker in the Journal Session drops you straight
+    into typing instead of needing an extra click into the box first.
+
+    Streamlit mirrors a widget's own label onto its underlying
+    <textarea> as its aria-label attribute - reused here to find the
+    right one, rather than trying to reconstruct Streamlit's own
+    internal (undocumented, hashed) widget key/id scheme. Matched with
+    a loop + getAttribute rather than spliced into a CSS selector
+    string, since a label can contain an apostrophe ("Today's
+    Journal") that would otherwise clash with whatever quote character
+    wraps the selector - json.dumps() below produces a properly
+    escaped JS string literal instead of a hand-quoted one.
+
+    Same iframe + nonce + retry-until-found shape as scroll_to_anchor()
+    above, for the same reason (the box may not be mounted into the DOM
+    yet when this first runs) - but unlike that scroll restore, this
+    stops the moment it succeeds instead of repeating: there's no
+    reason to keep stealing focus back once it's already landed there.
     """
     components.html(
         f"""
         <!-- _nonce: {time.time()} -->
         <script>
             (function attempt(triesLeft) {{
-                const el = window.parent.document.getElementById("{anchor_id}");
-                if (el) {{
-                    el.scrollIntoView({{behavior: "instant", block: "start"}});
+                const target = {json.dumps(label)};
+                const boxes = window.parent.document.querySelectorAll("textarea");
+                let found = null;
+                for (const box of boxes) {{
+                    if (box.getAttribute("aria-label") === target) {{
+                        found = box;
+                        break;
+                    }}
                 }}
-                if (triesLeft > 0) {{
+                if (found) {{
+                    found.focus();
+                }} else if (triesLeft > 0) {{
                     setTimeout(function() {{ attempt(triesLeft - 1); }}, 50);
                 }}
             }})(200);

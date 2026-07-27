@@ -57,7 +57,7 @@ st.set_page_config(page_title="Trading Journal", page_icon="📈", layout="wide"
 if not auth.check_password():
     st.stop()
 
-nav.render_top_nav("Dashboard")
+nav.render_top_nav("dashboard")
 
 st.title("Trading Journal Dashboard")
 
