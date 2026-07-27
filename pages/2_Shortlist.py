@@ -161,15 +161,20 @@ def render_price_chart(conn, symbol, entry_point, entry_label, key_prefix, stop_
     return entry_point
 
 
-def render_journal_box(conn, symbol, key_prefix, submit_labels=("Save",)):
+def render_journal_box(conn, symbol, key_prefix, submit_labels=("Save",), on_watchlist=False):
     """
     Today's Journal - a short text box, pre-filled with today's existing
     entry for `symbol` if there is one, sized for a quick note rather
     than a full-width essay box (a journal entry here is usually a
-    sentence or two). Narrow on purpose too, leaving a column beside it
-    free for the Save/Next/Skip button(s), so notes + button(s) sit in
-    one compact row near the bottom of the chart instead of a full-width
-    box with buttons stacked below it pushing everything past one screen.
+    sentence or two). Narrow on purpose too, leaving room beside it for
+    the Save/Next/Skip button(s) and (if `on_watchlist`) a "remove from
+    watchlist" checkbox, so notes + controls sit in one compact row near
+    the bottom of the chart instead of a full-width box with everything
+    stacked below it pushing past one screen.
+
+    Yesterday's entry (if there is one) is shown read-only just above
+    the box, so you can see what you said before writing today's -
+    otherwise reviewing that means leaving this view for the Logbook.
 
     Wrapped in a form (rather than a plain text_area + button) for two
     things a plain widget can't do: Ctrl+Enter while typing in the box
@@ -191,17 +196,34 @@ def render_journal_box(conn, symbol, key_prefix, submit_labels=("Save",)):
     single-ticker view), or two for a primary/secondary pair side by
     side (the guided Journal Session's "Save & Next →"/"Skip" - the
     first label is the one Ctrl+Enter triggers, since only one button
-    per form can be `type="primary"`). Returns (clicked_label_or_None,
-    notes) - notes is always whatever's in the box at submit time,
-    regardless of which button was clicked.
+    per form can be `type="primary"`). `on_watchlist` should be True
+    only when `symbol` is a real, manually-managed watchlist row (not
+    an open position, which List 5 shows automatically but isn't itself
+    a watchlist entry to remove) - see this function's callers.
+
+    Returns (clicked_label_or_None, notes, remove_from_watchlist) -
+    notes is always whatever's in the box at submit time regardless of
+    which button was clicked; remove_from_watchlist is only ever True
+    if `on_watchlist` was True AND that checkbox was checked at submit.
     """
     today = timeutil.today_eastern()
     existing_entry = database.get_logbook_entry(conn, symbol, today)
     existing_notes = existing_entry["notes"] if existing_entry else ""
 
+    yesterday = today - timedelta(days=1)
+    yesterday_entry = database.get_logbook_entry(conn, symbol, yesterday)
+    if yesterday_entry and yesterday_entry["notes"] and yesterday_entry["notes"].strip():
+        with st.container(border=True):
+            st.caption(f"Yesterday's Journal ({yesterday:%m/%d/%Y})")
+            st.write(yesterday_entry["notes"])
+
     clicked = None
+    remove_from_watchlist = False
     with st.form(key=f"{key_prefix}_{symbol}_journal_form", clear_on_submit=True, border=False):
-        box_col, button_col = st.columns([3, 1])
+        # Narrower than this used to be (was a plain [3, 1] box/button
+        # split) - the third column is unused space when on_watchlist
+        # is False, and the checkbox's own column otherwise.
+        box_col, button_col, checkbox_col = st.columns([2, 1, 2])
         notes = box_col.text_area(
             "Today's Journal", value=existing_notes or "",
             height=68, key=f"{key_prefix}_{symbol}_notes")
@@ -221,7 +243,11 @@ def render_journal_box(conn, symbol, key_prefix, submit_labels=("Save",)):
             if button_col.form_submit_button(secondary_label, width="stretch"):
                 clicked = secondary_label
 
-    return clicked, notes
+        if on_watchlist:
+            remove_from_watchlist = checkbox_col.checkbox(
+                "Remove from watchlist", key=f"{key_prefix}_{symbol}_remove_from_watchlist")
+
+    return clicked, notes, remove_from_watchlist
 
 
 def save_journal_entry(conn, symbol, entry_point, entry_label, notes, stop_loss=None):
@@ -238,7 +264,7 @@ def save_journal_entry(conn, symbol, entry_point, entry_label, notes, stop_loss=
     return png_bytes
 
 
-def render_chart_and_journal(conn, symbol, entry_point, entry_label, key_prefix, stop_loss=None):
+def render_chart_and_journal(conn, symbol, entry_point, entry_label, key_prefix, stop_loss=None, on_watchlist=False):
     """
     The plain single-ticker view: chart, then today's-journal box, then
     a Save button. Used by both the watchlist ticker view and the open
@@ -251,6 +277,10 @@ def render_chart_and_journal(conn, symbol, entry_point, entry_label, key_prefix,
     already had one available higher up the stack. Threading one
     connection all the way down instead means this page opens at most
     1 connection per view instead of up to 4.
+
+    `on_watchlist` (see render_journal_box()) should only be True when
+    `symbol` is a real watchlist entry - the open-position caller below
+    leaves it False, since a position isn't itself a watchlist row.
     """
     anchor_id = f"{key_prefix}_{symbol}_journal_anchor"
 
@@ -258,7 +288,7 @@ def render_chart_and_journal(conn, symbol, entry_point, entry_label, key_prefix,
     if entry_point is None:
         return
 
-    clicked, notes = render_journal_box(conn, symbol, key_prefix)
+    clicked, notes, remove_from_watchlist = render_journal_box(conn, symbol, key_prefix, on_watchlist=on_watchlist)
 
     if clicked:
         png_bytes = save_journal_entry(conn, symbol, entry_point, entry_label, notes, stop_loss=stop_loss)
@@ -269,11 +299,21 @@ def render_chart_and_journal(conn, symbol, entry_point, entry_label, key_prefix,
                 "Notes saved, but no price data was found to archive a chart "
                 "image right now (tonight's fallback archive will try again)."
             )
+        if remove_from_watchlist:
+            database.remove_from_watchlist(conn, symbol)
+            selected = st.session_state.get("watchlist_selected")
+            if selected and selected.get("source") == "watchlist" and selected.get("symbol") == symbol:
+                del st.session_state["watchlist_selected"]
+            st.toast(f"Removed {symbol} from its watchlist. Its Logbook history is kept.")
         # Lands back on the chart/journal box (not the page's outer top,
         # above the nav bar and lists) - a plain rerun from a form
         # submit would otherwise leave you having to scroll back down
-        # to see the very thing you just saved.
-        ui.scroll_to_anchor(anchor_id)
+        # to see the very thing you just saved. Skipped when the
+        # ticker was just removed from its watchlist - that anchor
+        # (tied to this now-gone selection) no longer has anything
+        # meaningful to scroll back to.
+        if not remove_from_watchlist:
+            ui.scroll_to_anchor(anchor_id)
 
 
 def position_label(position):
@@ -552,7 +592,7 @@ def render_lists_section(conn):
     if selected.get("source") == "watchlist" and selected.get("symbol") in watchlist_by_symbol:
         entry = watchlist_by_symbol[selected["symbol"]]
         entry_point = {"entry_date": entry["added_at"]}
-        render_chart_and_journal(conn, entry["symbol"], entry_point, "Added", key_prefix="watchlist")
+        render_chart_and_journal(conn, entry["symbol"], entry_point, "Added", key_prefix="watchlist", on_watchlist=True)
         return
 
     # The selection no longer resolves to anything real (position
@@ -777,7 +817,16 @@ def render_journal_session(conn):
             _advance_session(conn, session, queue)
         return
 
-    clicked, notes = render_journal_box(conn, symbol, key_prefix, submit_labels=("Save & Next →", "Skip"))
+    clicked, notes, remove_from_watchlist = render_journal_box(
+        conn, symbol, key_prefix, submit_labels=("Save & Next →", "Skip"),
+        on_watchlist=(item["source"] == "watchlist"))
+
+    if remove_from_watchlist and clicked:
+        # Honored on either button, not just "Save & Next" - checking
+        # this is a standalone "I'm done with this ticker" decision,
+        # independent of whether there's also a note worth saving today.
+        database.remove_from_watchlist(conn, symbol)
+        st.toast(f"Removed {symbol} from its watchlist. Its Logbook history is kept.")
 
     if clicked == "Save & Next →":
         # Notes save instantly; the chart snapshot itself is deferred to
