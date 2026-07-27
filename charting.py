@@ -26,6 +26,7 @@ import hashlib
 import json
 import math
 import re
+import time
 from datetime import timedelta
 from pathlib import Path
 
@@ -307,22 +308,45 @@ def warm_price_cache_for_symbol(symbol):
     fetch_history() falls back to a live fetch, same as before this
     symbol was ever cached.
 
-    Returns True if it was cached, False if Yahoo Finance had no data
-    for this symbol (delisted, bad ticker, etc.), the fetch failed,
-    the most recent trading day's close isn't in the data yet, or that
-    close has incomplete Open/High/Low/Close values - callers
-    print/skip accordingly rather than treating it as fatal.
+    Returns "ok" if it was cached. Otherwise returns a short reason why
+    not, so callers can tell "Yahoo Finance itself couldn't be reached"
+    apart from "the data just isn't ready yet" instead of lumping both
+    into one generic failure (this used to be a plain True/False,
+    which meant a rate-limit or network error showed the user the same
+    misleading "not finalized yet" message as genuinely-incomplete
+    data - see history_error_message() above for the same distinction
+    fetch_history() already makes):
+    - "rate_limited": Yahoo Finance is temporarily blocking requests.
+    - "fetch_failed": some other network/API problem.
+    - "no_data": Yahoo Finance has no data at all for this symbol
+      (delisted, bad ticker, etc.).
+    - "not_ready": the most recent trading day's close isn't in the
+      data yet, or has incomplete Open/High/Low/Close values.
+    Callers print/skip accordingly rather than treating any of these
+    as fatal.
     """
-    try:
-        history = yf.Ticker(symbol).history(period="5y", interval="1d")
-    except Exception:
-        return False
+    history = None
+    for attempt in range(2):
+        try:
+            history = yf.Ticker(symbol).history(period="5y", interval="1d")
+            break
+        except YFRateLimitError:
+            # A rate limit often clears within a couple seconds, so
+            # one retry after a short pause is worth it before giving
+            # up and asking the user to click the button again later.
+            if attempt == 0:
+                time.sleep(2)
+                continue
+            return "rate_limited"
+        except Exception:
+            return "fetch_failed"
+
     if history.empty:
-        return False
+        return "no_data"
 
     history.index = history.index.tz_localize(None)
     if history.index[-1].date() != _expected_last_trading_day():
-        return False
+        return "not_ready"
 
     # Yahoo Finance sometimes reports a day's Volume before that same
     # day's Open/High/Low/Close are actually finalized - a real gap
@@ -335,7 +359,7 @@ def warm_price_cache_for_symbol(symbol):
     # runs after a market close.
     last_bar = history.iloc[-1]
     if last_bar[["Open", "High", "Low", "Close"]].isna().any():
-        return False
+        return "not_ready"
 
     today = timeutil.today_eastern()
     history_dict = {
@@ -348,7 +372,7 @@ def warm_price_cache_for_symbol(symbol):
     }
     conn = database.get_connection()
     database.save_cached_price_history(conn, symbol, history_dict, today)
-    return True
+    return "ok"
 
 
 def _daily_history_from_cache(symbol, needed_start):

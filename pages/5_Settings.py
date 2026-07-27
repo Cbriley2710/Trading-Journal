@@ -23,6 +23,8 @@ buttons), which means there's no native drag-to-resize; this is the
 adjustable alternative.
 """
 
+import time
+
 import streamlit as st
 
 import auth
@@ -56,13 +58,16 @@ st.caption(
 
 if st.button("Refresh Price Cache Now"):
     tracked_symbols = sorted(database.get_tracked_symbols(conn))
-    refreshed, skipped = [], []
+    results = {}
     with st.spinner(f"Refreshing price cache for {len(tracked_symbols)} symbol(s)..."):
         for symbol in tracked_symbols:
-            if charting.warm_price_cache_for_symbol(symbol):
-                refreshed.append(symbol)
-            else:
-                skipped.append(symbol)
+            results[symbol] = charting.warm_price_cache_for_symbol(symbol)
+            # A short pause between symbols so a big batch doesn't read
+            # as a burst of rapid requests to Yahoo Finance and trip
+            # its rate limiting - which used to be able to fail every
+            # symbol at once and get reported as "data not ready yet"
+            # even when Yahoo's own site showed complete data.
+            time.sleep(1)
     # Clears this session's own in-memory chart cache too, so a chart
     # opened right after this shows the refreshed data immediately -
     # without this, the hour-long st.cache_data TTL on these could
@@ -70,14 +75,34 @@ if st.button("Refresh Price Cache Now"):
     # this button was clicked.
     charting.fetch_history.clear()
     charting.fetch_daily_closes.clear()
-    if skipped:
-        st.warning(
-            f"Refreshed {len(refreshed)}/{len(tracked_symbols)} symbol(s). "
-            f"Yahoo Finance doesn't have a complete, up-to-date close yet "
-            f"for: {', '.join(skipped)} - try again later."
-        )
-    else:
+
+    refreshed = [s for s, r in results.items() if r == "ok"]
+    not_ready = [s for s, r in results.items() if r == "not_ready"]
+    unreachable = [s for s, r in results.items() if r in ("rate_limited", "fetch_failed")]
+    no_data = [s for s, r in results.items() if r == "no_data"]
+
+    if not not_ready and not unreachable and not no_data:
         st.success(f"Refreshed all {len(refreshed)} symbol(s).")
+    else:
+        if refreshed:
+            st.caption(f"Refreshed {len(refreshed)}/{len(tracked_symbols)} symbol(s).")
+        if not_ready:
+            st.warning(
+                f"Yahoo Finance doesn't have a complete, up-to-date close yet "
+                f"for: {', '.join(not_ready)} - try again later."
+            )
+        if unreachable:
+            st.warning(
+                f"Couldn't reach Yahoo Finance for: {', '.join(unreachable)} - "
+                "this is usually a brief network hiccup or Yahoo Finance "
+                "rate-limiting a big batch of requests, not a real data "
+                "problem. Try clicking the button again in a minute."
+            )
+        if no_data:
+            st.warning(
+                f"Yahoo Finance has no data at all for: {', '.join(no_data)} - "
+                "double check the ticker is correct."
+            )
 
 st.divider()
 

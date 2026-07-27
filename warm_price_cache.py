@@ -25,8 +25,16 @@ again here too, a few hours before nightly_archive.py does it anyway,
 would just be duplicate effort for no benefit.
 """
 
+import time
+
 import charting
 import database
+
+# A short pause between each symbol's fetch, so warming the cache for
+# every tracked symbol back-to-back doesn't read as a burst of rapid
+# requests to Yahoo Finance and trip its rate limiting - which would
+# otherwise fail the whole batch at once instead of just one symbol.
+PAUSE_BETWEEN_SYMBOLS_SECONDS = 1
 
 
 def main():
@@ -34,8 +42,9 @@ def main():
     symbols = database.get_tracked_symbols(conn)
     print(f"Warming price cache for {len(symbols)} symbol(s)...")
     for symbol in sorted(symbols):
-        cached = charting.warm_price_cache_for_symbol(symbol)
-        print(f"  {symbol}: {'cached' if cached else 'skipped (no data yet, or today is not fully closed out)'}.")
+        result = charting.warm_price_cache_for_symbol(symbol)
+        print(f"  {symbol}: {result}")
+        time.sleep(PAUSE_BETWEEN_SYMBOLS_SECONDS)
     print("Done.")
 
 
