@@ -254,6 +254,31 @@ def parse_ma_periods(text):
     return sorted(periods)
 
 
+def _expected_last_trading_day():
+    """
+    The most recent date a fresh fetch's last bar SHOULD be dated -
+    used by warm_price_cache_for_symbol() below to tell "this fetch
+    reaches through the most recent close" apart from "this fetch is
+    stale." A plain "does it match today?" check (which this used to
+    be) can never pass on a Saturday or Sunday, since the market's
+    last real close is Friday's, not today's - which meant the
+    persistent cache could never be (re)warmed at all on a weekend,
+    permanently locking in whatever was last saved (including an
+    incomplete snapshot, if that's what Friday's own warm run
+    happened to catch - see the NaN check right below this function's
+    call site). This is a simple weekday-only approximation (it
+    doesn't know about market holidays), matching this project's
+    existing "good enough, not a full trading calendar" approach
+    elsewhere (e.g. nightly_archive.py's own scheduling notes).
+    """
+    today = timeutil.today_eastern()
+    if today.weekday() == 5:  # Saturday
+        return today - timedelta(days=1)
+    if today.weekday() == 6:  # Sunday
+        return today - timedelta(days=2)
+    return today
+
+
 def warm_price_cache_for_symbol(symbol):
     """
     Fetches 5 years of daily history for `symbol` and stores it in the
@@ -283,9 +308,10 @@ def warm_price_cache_for_symbol(symbol):
     symbol was ever cached.
 
     Returns True if it was cached, False if Yahoo Finance had no data
-    for this symbol (delisted, bad ticker, etc.), the fetch failed, or
-    today's close isn't in the data yet - callers print/skip
-    accordingly rather than treating it as fatal.
+    for this symbol (delisted, bad ticker, etc.), the fetch failed,
+    the most recent trading day's close isn't in the data yet, or that
+    close has incomplete Open/High/Low/Close values - callers
+    print/skip accordingly rather than treating it as fatal.
     """
     try:
         history = yf.Ticker(symbol).history(period="5y", interval="1d")
@@ -295,10 +321,23 @@ def warm_price_cache_for_symbol(symbol):
         return False
 
     history.index = history.index.tz_localize(None)
-    today = timeutil.today_eastern()
-    if history.index[-1].date() != today:
+    if history.index[-1].date() != _expected_last_trading_day():
         return False
 
+    # Yahoo Finance sometimes reports a day's Volume before that same
+    # day's Open/High/Low/Close are actually finalized - a real gap
+    # that used to make the interactive chart's most recent candle
+    # fail to render (see chart_component/index.html's handling of a
+    # null OHLC point). Refusing to cache a bar with that gap here
+    # means today's row only ever gets written once Yahoo's own data
+    # is actually complete, instead of permanently locking in an
+    # incomplete snapshot as "fresh for today" the first time this
+    # runs after a market close.
+    last_bar = history.iloc[-1]
+    if last_bar[["Open", "High", "Low", "Close"]].isna().any():
+        return False
+
+    today = timeutil.today_eastern()
     history_dict = {
         "dates": [d.date().isoformat() for d in history.index],
         "open": history["Open"].tolist(),

@@ -42,6 +42,45 @@ st.title("Settings")
 conn = database.get_connection()
 settings = database.get_strategy_settings(conn)
 
+st.header("Price Cache")
+st.caption(
+    "Pre-fetched daily price history for every open position and "
+    "watchlist ticker, refreshed automatically once a day shortly after "
+    "market close (see warm_price_cache.py). Use this if a chart's most "
+    "recent candlestick is ever missing - Yahoo Finance occasionally "
+    "reports a trading day's volume before that same day's price is "
+    "fully finalized, which used to get permanently cached as-is until "
+    "the next scheduled refresh. Safe to click any time; it only adds "
+    "or replaces data, never removes anything."
+)
+
+if st.button("Refresh Price Cache Now"):
+    tracked_symbols = sorted(database.get_tracked_symbols(conn))
+    refreshed, skipped = [], []
+    with st.spinner(f"Refreshing price cache for {len(tracked_symbols)} symbol(s)..."):
+        for symbol in tracked_symbols:
+            if charting.warm_price_cache_for_symbol(symbol):
+                refreshed.append(symbol)
+            else:
+                skipped.append(symbol)
+    # Clears this session's own in-memory chart cache too, so a chart
+    # opened right after this shows the refreshed data immediately -
+    # without this, the hour-long st.cache_data TTL on these could
+    # still serve whatever was fetched (possibly incomplete) before
+    # this button was clicked.
+    charting.fetch_history.clear()
+    charting.fetch_daily_closes.clear()
+    if skipped:
+        st.warning(
+            f"Refreshed {len(refreshed)}/{len(tracked_symbols)} symbol(s). "
+            f"Yahoo Finance doesn't have a complete, up-to-date close yet "
+            f"for: {', '.join(skipped)} - try again later."
+        )
+    else:
+        st.success(f"Refreshed all {len(refreshed)} symbol(s).")
+
+st.divider()
+
 st.header("MA Stop Rule Defaults")
 st.caption(
     "Used by every open position - the Open Positions page only lets you "
