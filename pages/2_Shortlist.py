@@ -475,15 +475,15 @@ def render_lists_section(conn):
                 remove_clicked = button_cols[1].form_submit_button(remove_all_label)
 
             if add_clicked and add_text.strip():
-                already_elsewhere = []
-                added_count = 0
                 newly_added = []
+                moved = []
                 for sym in parse_ticker_input(add_text):
-                    if database.add_to_watchlist(conn, sym, list_id):
-                        added_count += 1
+                    status, previous_list_id = database.add_to_watchlist(conn, sym, list_id)
+                    if status == "added":
                         newly_added.append(sym)
-                    else:
-                        already_elsewhere.append(sym)
+                    elif status == "moved":
+                        moved.append((sym, previous_list_id))
+                    # "unchanged" - already exactly in this list, nothing to report.
                 if newly_added:
                     # Warms the persistent price cache (see charting.
                     # warm_price_cache_for_symbol()) for a ticker right
@@ -491,20 +491,20 @@ def render_lists_section(conn):
                     # after-close warming job - a brief delay here
                     # (proportional to how many tickers were just
                     # pasted in) instead of a slow first chart load
-                    # later.
+                    # later. Not needed for a MOVED ticker - it was
+                    # already tracked, so it's already warmed.
                     with st.spinner(f"Warming price cache for {', '.join(newly_added)}..."):
                         for sym in newly_added:
                             charting.warm_price_cache_for_symbol(sym)
                 parts = []
-                if added_count:
-                    parts.append(f"Added {added_count} ticker(s) to {new_name}.")
-                if already_elsewhere:
-                    locations = {w["symbol"]: w["list_id"] for w in database.get_watchlist(conn)}
-                    where = ", ".join(
-                        f"{sym} (already in {names.get(locations.get(sym), '?')})"
-                        for sym in already_elsewhere
+                if newly_added:
+                    parts.append(f"Added {len(newly_added)} ticker(s) to {new_name}.")
+                if moved:
+                    moved_desc = ", ".join(
+                        f"{sym} (from {names.get(previous_list_id, '?')})"
+                        for sym, previous_list_id in moved
                     )
-                    parts.append(f"Not added: {where}.")
+                    parts.append(f"Moved to {new_name}: {moved_desc}.")
                 if parts:
                     st.session_state["watchlist_message"] = " ".join(parts)
                 st.rerun()

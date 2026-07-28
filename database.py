@@ -905,24 +905,46 @@ def get_watchlist(conn):
 
 def add_to_watchlist(conn, symbol, list_id=1):
     """
-    Adds a ticker to one of the five watchlists. A ticker can only live
-    in ONE list at a time - if it's already somewhere (this list or
-    another), nothing changes and this returns False so the page can
-    say where it already is. Returns True when it was actually added.
+    Adds a ticker to one of the five watchlists, or MOVES it there if
+    it's already tracked in a different one - a ticker only ever lives
+    in ONE list at a time (see the UNIQUE constraint on watchlist.
+    symbol), so "add to List 2" when it's already sitting in List 1
+    means move it, not reject the add.
 
-    `added_at` is passed explicitly (US Eastern - see timeutil.py)
-    instead of relying on the table's own DEFAULT NOW() - Postgres's
-    NOW() reflects the database server's own timezone (UTC on Neon),
-    which would make a ticker added in the evening show as "added"
-    tomorrow.
+    Returns a (status, previous_list_id) pair:
+      - ("added", None): a brand-new row was created.
+      - ("moved", previous_list_id): it was already tracked in a
+        different list and has now been moved to `list_id`.
+      - ("unchanged", None): it was already exactly in `list_id` -
+        nothing to do.
+
+    `added_at` is only set on a genuinely new row, passed explicitly
+    (US Eastern - see timeutil.py) instead of relying on the table's
+    own DEFAULT NOW() - Postgres's NOW() reflects the database server's
+    own timezone (UTC on Neon), which would make a ticker added in the
+    evening show as "added" tomorrow. Moving a ticker between lists
+    doesn't touch added_at - it doesn't reset how long it's been
+    tracked, only which list it currently shows up in.
     """
     cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO watchlist (symbol, list_id, added_at) VALUES (%s, %s, %s) ON CONFLICT (symbol) DO NOTHING",
-        (symbol, list_id, timeutil.now_eastern()),
-    )
+    cur.execute("SELECT list_id FROM watchlist WHERE symbol = %s", (symbol,))
+    existing = cur.fetchone()
+
+    if existing is None:
+        cur.execute(
+            "INSERT INTO watchlist (symbol, list_id, added_at) VALUES (%s, %s, %s)",
+            (symbol, list_id, timeutil.now_eastern()),
+        )
+        conn.commit()
+        return "added", None
+
+    previous_list_id = existing[0]
+    if previous_list_id == list_id:
+        return "unchanged", None
+
+    cur.execute("UPDATE watchlist SET list_id = %s WHERE symbol = %s", (list_id, symbol))
     conn.commit()
-    return cur.rowcount == 1
+    return "moved", previous_list_id
 
 
 def remove_from_watchlist(conn, symbol):
