@@ -164,18 +164,22 @@ def render_price_chart(conn, symbol, entry_point, entry_label, key_prefix, stop_
 
 def render_journal_box(conn, symbol, key_prefix, submit_labels=("Save",), on_watchlist=False):
     """
-    Today's Journal - a short text box, pre-filled with today's existing
-    entry for `symbol` if there is one, sized for a quick note rather
-    than a full-width essay box (a journal entry here is usually a
-    sentence or two). Narrow on purpose too, leaving room beside it for
-    the Save/Next/Skip button(s) and (if `on_watchlist`) a "remove from
-    watchlist" checkbox, so notes + controls sit in one compact row near
-    the bottom of the chart instead of a full-width box with everything
-    stacked below it pushing past one screen.
+    One row, left to right: yesterday's entry (read-only), today's
+    entry (a short text box - a journal entry here is usually a
+    sentence or two, not a full-width essay box), the Save/Next/Skip
+    button(s) stacked in their own narrow column, and (if `on_watchlist`)
+    a compact "remove from watchlist" checkbox - everything in one
+    compact row near the bottom of the chart instead of yesterday's
+    entry sitting in its own full-width block above it, pushing the
+    actual controls further down the screen.
 
-    Yesterday's entry (if there is one) is shown read-only just above
-    the box, so you can see what you said before writing today's -
-    otherwise reviewing that means leaving this view for the Logbook.
+    Yesterday's entry (if there is one) is shown read-only so you can
+    see what you said before writing today's - otherwise reviewing that
+    means leaving this view for the Logbook. Always rendered inside its
+    own bordered box (a muted "No entry." placeholder when there isn't
+    one) so that column holds a consistent width/position across
+    tickers instead of the row's shape shifting depending on whether
+    yesterday had anything written.
 
     Wrapped in a form (rather than a plain text_area + button) for two
     things a plain widget can't do: Ctrl+Enter while typing in the box
@@ -213,18 +217,18 @@ def render_journal_box(conn, symbol, key_prefix, submit_labels=("Save",), on_wat
 
     yesterday = today - timedelta(days=1)
     yesterday_entry = database.get_logbook_entry(conn, symbol, yesterday)
-    if yesterday_entry and yesterday_entry["notes"] and yesterday_entry["notes"].strip():
-        with st.container(border=True):
-            st.caption(f"Yesterday's Journal ({yesterday:%m/%d/%Y})")
-            st.write(yesterday_entry["notes"])
+    yesterday_notes = yesterday_entry["notes"] if yesterday_entry and yesterday_entry["notes"] else ""
 
     clicked = None
     remove_from_watchlist = False
     with st.form(key=f"{key_prefix}_{symbol}_journal_form", clear_on_submit=True, border=False):
-        # Narrower than this used to be (was a plain [3, 1] box/button
-        # split) - the third column is unused space when on_watchlist
-        # is False, and the checkbox's own column otherwise.
-        box_col, button_col, checkbox_col = st.columns([2, 1, 2])
+        yesterday_col, box_col, button_col, checkbox_col = st.columns([2, 2, 1, 0.6])
+
+        with yesterday_col:
+            with st.container(border=True):
+                st.caption(f"Yesterday's Journal ({yesterday:%m/%d/%Y})")
+                st.write(yesterday_notes.strip() if yesterday_notes.strip() else "No entry.")
+
         notes = box_col.text_area(
             "Today's Journal", value=existing_notes or "",
             height=68, key=f"{key_prefix}_{symbol}_notes")
@@ -245,8 +249,13 @@ def render_journal_box(conn, symbol, key_prefix, submit_labels=("Save",), on_wat
                 clicked = secondary_label
 
         if on_watchlist:
+            # Short label ("Remove" rather than "Remove from watchlist")
+            # plus a hover tooltip spelling that out - this column is
+            # deliberately narrow (just wide enough for the checkbox
+            # itself), and the full phrase would wrap awkwardly there.
             remove_from_watchlist = checkbox_col.checkbox(
-                "Remove from watchlist", key=f"{key_prefix}_{symbol}_remove_from_watchlist")
+                "Remove", key=f"{key_prefix}_{symbol}_remove_from_watchlist",
+                help="Remove from watchlist")
 
     return clicked, notes, remove_from_watchlist
 
