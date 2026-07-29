@@ -502,15 +502,26 @@ ported over unchanged - drawing tools are additive, not a replacement.
             return redrawArrows();
         }).then(function() {
             applyToolStyle();
-            // Fixed, not measured from the DOM (e.g. scrollHeight) -
-            // a measured height fed back into another setFrameHeight
-            // call is exactly the kind of feedback loop that made an
-            // early prototype of this component's iframe grow to
-            // over a million pixels tall. +40 for the OHLC summary
-            // line, +90 for the toolbar (a bit more than it usually
-            // needs, in case its buttons wrap to a second row in a
-            // narrower window).
-            setFrameHeight((figure.layout.height || 500) + 40 + 90);
+            // The toolbar and OHLC summary line are measured directly
+            // (getBoundingClientRect) rather than using a fixed guess -
+            // a flat "+40 for the summary line, +90 for the toolbar"
+            // used to noticeably overestimate both (the toolbar is a
+            // single ~35px row unless its buttons wrap to a second
+            // line on a narrow screen, and the summary line is one
+            // ~22px line of text), leaving a visible gap of unused
+            // space at the BOTTOM of the iframe below the actual chart
+            // - the fixed total was still reserved even though the
+            // real content came in shorter. This is safe to measure
+            // (unlike what caused the earlier "grew to a million
+            // pixels tall" bug that fixed-height comment used to warn
+            // about): these two elements are fixed, static content
+            // that doesn't change size AS A RESULT of the iframe's own
+            // height changing - only the toolbar's wrap state affects
+            // it, which settles immediately rather than growing every
+            // time this runs.
+            var toolbarHeight = document.getElementById("toolbar").getBoundingClientRect().height;
+            var summaryHeight = document.getElementById("summary").getBoundingClientRect().height;
+            setFrameHeight((figure.layout.height || 500) + toolbarHeight + summaryHeight);
 
             gd.on("plotly_hover", function(eventData) {
                 if (!eventData.points || !eventData.points.length) return;
