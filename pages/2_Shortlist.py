@@ -546,26 +546,14 @@ def render_lists_section(conn):
                         entry["symbol"], key=f"wl_{list_id}_{entry['symbol']}", width="stretch",
                     ):
                         st.session_state["watchlist_selected"] = {"symbol": entry["symbol"], "source": "watchlist"}
-                    # Two clicks, not one - this button is clicked far more
-                    # often than "Remove All" (day-to-day list grooming) and
-                    # sits directly next to the ticker-select button above,
-                    # so a stray tap here used to silently drop a ticker
-                    # with no undo. Same armed-then-confirm pattern as
-                    # "Remove All" just above, but there's no room in this
-                    # narrow column for a relabeled button - the "✕" itself
-                    # turns into a highlighted primary button once armed,
-                    # instead.
-                    remove_confirm_key = f"_confirm_remove_{list_id}_{entry['symbol']}"
-                    is_armed = st.session_state.get(remove_confirm_key, False)
-                    if ticker_cols[1].button(
-                        "✕", key=f"wlx_{list_id}_{entry['symbol']}",
-                        type="primary" if is_armed else "secondary",
-                    ):
-                        if not is_armed:
-                            st.session_state[remove_confirm_key] = True
-                            st.rerun()
+                    # One click, not two - removing a single ticker this
+                    # way is common day-to-day list grooming (unlike
+                    # "Remove All" above, which stays a two-click confirm
+                    # since it drops an entire list at once). Its Logbook
+                    # history is kept either way, so a wrong click here
+                    # isn't a real loss - just re-add the ticker.
+                    if ticker_cols[1].button("✕", key=f"wlx_{list_id}_{entry['symbol']}"):
                         database.remove_from_watchlist(conn, entry["symbol"])
-                        del st.session_state[remove_confirm_key]
                         selected = st.session_state.get("watchlist_selected")
                         if selected and selected.get("source") == "watchlist" and selected.get("symbol") == entry["symbol"]:
                             del st.session_state["watchlist_selected"]
