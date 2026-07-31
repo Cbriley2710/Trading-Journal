@@ -190,13 +190,30 @@ def render_trade_chart(conn, trade, key_prefix, anchor_id=None):
 
 def _trade_key(trade):
     """The natural-key tuple that identifies one closed trade -
-    symbol/entry_date/exit_date/direction, all as plain strings/values
-    so it's usable as both a dict key and a JSON-safe persisted value.
-    NOT trades.id - see trade_reviews' own schema comment in
-    database.py for why a trade's id isn't a stable identifier across
-    an import (database.rebuild_trades() regenerates it from scratch
-    every time)."""
-    return (trade["symbol"], trade["entry_date"].date().isoformat(), trade["date"].date().isoformat(), trade["direction"])
+    symbol/entry_date/exit_date/direction/quantity/buy_price/sell_price,
+    all as plain values so it's usable as both a dict key and a
+    JSON-safe persisted value. NOT trades.id - see trade_reviews' own
+    schema comment in database.py for why a trade's id isn't a stable
+    identifier across an import (database.rebuild_trades() regenerates
+    it from scratch every time).
+
+    Includes quantity/buy_price/sell_price, not just symbol/dates/
+    direction - LIFO matching can legitimately produce two SEPARATE
+    closed trades for the same symbol with the identical entry AND
+    exit date (e.g. a sell that filled in two separate executions the
+    same day, matched against the same buy lot) - confirmed for real
+    against production data (two DOCN trades, both 06/01 to 06/05
+    LONG, one for 210 shares at $169.51, the other for 2 shares at
+    $169.75). Without these extra fields, both collided onto the same
+    key and crashed the selection checklist with a duplicate widget
+    key. These fields are exactly what rebuild_trades() recomputes
+    identically from the same transaction history, so this stays valid
+    across an import the same way symbol/dates/direction already do.
+    """
+    return (
+        trade["symbol"], trade["entry_date"].date().isoformat(), trade["date"].date().isoformat(),
+        trade["direction"], trade["quantity"], trade["buy_price"], trade["sell_price"],
+    )
 
 
 def _queue_natural_keys(queue):
@@ -205,9 +222,15 @@ def _queue_natural_keys(queue):
     database.py for why the full trade dicts (datetimes, floats)
     aren't stored as-is."""
     return [
-        {"symbol": s, "entry_date": e, "exit_date": x, "direction": d}
-        for s, e, x, d in (_trade_key(t) for t in queue)
+        {"symbol": s, "entry_date": e, "exit_date": x, "direction": d, "quantity": q, "buy_price": b, "sell_price": sp}
+        for s, e, x, d, q, b, sp in (_trade_key(t) for t in queue)
     ]
+
+
+def _saved_key_tuple(s):
+    """The comparable tuple form of one saved natural-key dict (from
+    _queue_natural_keys()) - shared by _reorder_for_resume() below."""
+    return (s["symbol"], s["entry_date"], s["exit_date"], s["direction"], s["quantity"], s["buy_price"], s["sell_price"])
 
 
 def _reorder_for_resume(trades, saved_order):
@@ -218,11 +241,7 @@ def _reorder_for_resume(trades, saved_order):
     is silently dropped, same as Journal Session's own
     _reorder_for_resume() in pages/2_Shortlist.py."""
     by_key = {_trade_key(t): t for t in trades}
-    return [
-        by_key[(s["symbol"], s["entry_date"], s["exit_date"], s["direction"])]
-        for s in saved_order
-        if (s["symbol"], s["entry_date"], s["exit_date"], s["direction"]) in by_key
-    ]
+    return [by_key[_saved_key_tuple(s)] for s in saved_order if _saved_key_tuple(s) in by_key]
 
 
 def _advance_review_session(conn, session):
@@ -381,9 +400,12 @@ def render_review_selection(conn, trades):
 
     checked = []
     with st.container(height=300):
-        for t in filtered:
-            key = _trade_key(t)
-            if st.checkbox(trade_label(t), key=f"review_pick_{key}"):
+        # Keyed by loop position, not just _trade_key(t) - belt and
+        # suspenders on top of that key already being strengthened to
+        # include quantity/prices (see _trade_key()'s own docstring for
+        # the real duplicate-trade case that motivated both fixes).
+        for i, t in enumerate(filtered):
+            if st.checkbox(trade_label(t), key=f"review_pick_{i}_{_trade_key(t)}"):
                 checked.append(t)
 
     action_cols = st.columns([1, 1, 3])
