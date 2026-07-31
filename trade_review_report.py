@@ -32,6 +32,7 @@ from PIL import Image
 
 import charting
 import database
+from analyze_trades import trade_stats
 from report_utils import get_secret, hex_to_rgb, safe_text
 
 PAGE_MARGIN_MM = 15
@@ -79,7 +80,7 @@ def _write_snapshot_page(pdf, symbol, timeframe, chart_image):
 
 def _write_trade_review_page(pdf, review):
     """One reviewed trade's header page (symbol/direction, entry/exit
-    dates, notes), followed by one additional page per captured
+    dates, stats, notes), followed by one additional page per captured
     timeframe snapshot."""
     pdf.add_page()
     short_tag = " (Short)" if review["direction"] == "SHORT" else ""
@@ -92,6 +93,33 @@ def _write_trade_review_page(pdf, review):
     pdf.set_font("Helvetica", size=11)
     pdf.cell(
         0, 7, safe_text(f"{review['entry_date']:%m/%d/%Y} to {review['exit_date']:%m/%d/%Y}"),
+        new_x="LMARGIN", new_y="NEXT",
+    )
+
+    # Same numbers as Trade Analyzer's fact tiles (see
+    # analyze_trades.trade_stats()), just as two plain text lines
+    # instead of side-by-side tiles - a landscape PDF page has plenty
+    # of width but fpdf2 has no equivalent "column of tiles" widget.
+    stats = trade_stats(
+        review["direction"], review["buy_price"], review["sell_price"], review["quantity"],
+        review["profit_loss"], review["entry_date"], review["exit_date"],
+    )
+    entry_label = "Short Entry" if stats["is_short"] else "Entry"
+    exit_label = "Cover" if stats["is_short"] else "Exit"
+    pdf.set_text_color(*MUTED_TEXT_RGB)
+    pdf.cell(
+        0, 7,
+        safe_text(
+            f"{entry_label}: ${stats['entry_price']:,.2f}   {exit_label}: ${stats['exit_price']:,.2f}   "
+            f"Shares: {review['quantity']:,.0f}   Days Held: {stats['days_held']}"
+        ),
+        new_x="LMARGIN", new_y="NEXT",
+    )
+    outcome_rgb = hex_to_rgb(charting.win_loss_color(review["profit_loss"] >= 0))
+    pdf.set_text_color(*outcome_rgb)
+    pdf.set_font("Helvetica", style="B", size=11)
+    pdf.cell(
+        0, 7, safe_text(f"P/L: ${review['profit_loss']:,.2f}  ({stats['pct_change']:,.2f}%)"),
         new_x="LMARGIN", new_y="NEXT",
     )
     pdf.ln(4)

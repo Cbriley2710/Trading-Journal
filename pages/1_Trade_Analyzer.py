@@ -43,7 +43,7 @@ import charting
 import database
 import nav
 import ui
-from analyze_trades import trade_label
+from analyze_trades import trade_label, trade_stats
 
 st.set_page_config(page_title="Trade Analyzer", page_icon="📈", layout="wide", initial_sidebar_state="collapsed")
 
@@ -69,30 +69,24 @@ def fact_tile(column, label, value, color=None):
 
 
 def render_trade_facts(trade):
-    """The five fact tiles (entry/exit, shares, P/L, % change) for one
-    closed trade - shared by the plain single-trade view and each step
-    of the Review Session below."""
-    is_short = trade["direction"] == "SHORT"
-    # For a short, "sell_price" is the short sale (the entry event) and
-    # "buy_price" is the cover (the exit event) - the opposite pairing
-    # from a long trade. See match_trades_lifo() in analyze_trades.py.
-    entry_price, exit_price = (trade["sell_price"], trade["buy_price"]) if is_short \
-        else (trade["buy_price"], trade["sell_price"])
-
+    """The fact tiles (entry/exit, shares, P/L, % change, days held) for
+    one closed trade - shared by the plain single-trade view and each
+    step of the Review Session below. The actual numbers come from
+    analyze_trades.trade_stats(), so the PDF/Logbook display of the
+    same trade always agrees with what's shown here."""
+    stats = trade_stats(
+        trade["direction"], trade["buy_price"], trade["sell_price"], trade["quantity"],
+        trade["profit_loss"], trade["entry_date"].date(), trade["date"].date(),
+    )
     outcome_color = charting.win_loss_color(trade["profit_loss"] >= 0)
-    # Expressed as % of entry price, using the actual (correctly-signed)
-    # profit_loss rather than a raw price ratio - a profitable short
-    # would otherwise show a misleading negative % (cover price fell
-    # below the entry price, which is the whole point of a profitable
-    # short).
-    pct_change = (trade["profit_loss"] / (entry_price * trade["quantity"])) * 100 if entry_price else 0.0
 
-    cols = st.columns(5)
-    fact_tile(cols[0], "Short Entry" if is_short else "Entry", f"${entry_price:,.2f}")
-    fact_tile(cols[1], "Cover" if is_short else "Exit", f"${exit_price:,.2f}")
+    cols = st.columns(6)
+    fact_tile(cols[0], "Short Entry" if stats["is_short"] else "Entry", f"${stats['entry_price']:,.2f}")
+    fact_tile(cols[1], "Cover" if stats["is_short"] else "Exit", f"${stats['exit_price']:,.2f}")
     fact_tile(cols[2], "Shares", f"{trade['quantity']:,.0f}")
     fact_tile(cols[3], "P/L", f"${trade['profit_loss']:,.2f}", outcome_color)
-    fact_tile(cols[4], "% Change", f"{pct_change:,.2f}%", outcome_color)
+    fact_tile(cols[4], "% Change", f"{stats['pct_change']:,.2f}%", outcome_color)
+    fact_tile(cols[5], "Days Held", f"{stats['days_held']:,.0f}")
 
 
 def render_trade_chart(conn, trade, key_prefix, anchor_id=None):

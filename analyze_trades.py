@@ -436,6 +436,33 @@ def trade_label(trade):
     )
 
 
+def trade_stats(direction, buy_price, sell_price, quantity, profit_loss, entry_date, exit_date):
+    """
+    The numbers behind one closed trade's fact tiles: which price was
+    the entry vs the exit (a short's pairing is reversed - see
+    match_trades_lifo()'s own docstring), % change (of entry price,
+    using the actual signed profit_loss so a profitable short doesn't
+    show a misleading negative %), and days held. Shared by Trade
+    Analyzer's fact tiles, the Trade Review Report PDF's per-trade
+    page, and the Logbook page's Trade Reviews section, so all three
+    compute these exactly the same way instead of three separate copies
+    of this math drifting apart.
+
+    `entry_date`/`exit_date` must be plain date objects, not datetime -
+    database.get_trades()' own dicts (entry_date/date) need `.date()`
+    called on them first; database.get_review_report()'s reviews
+    already store plain dates.
+    """
+    is_short = direction == "SHORT"
+    entry_price, exit_price = (sell_price, buy_price) if is_short else (buy_price, sell_price)
+    pct_change = (profit_loss / (entry_price * quantity)) * 100 if entry_price else 0.0
+    days_held = (exit_date - entry_date).days
+    return {
+        "is_short": is_short, "entry_price": entry_price, "exit_price": exit_price,
+        "pct_change": pct_change, "days_held": days_held,
+    }
+
+
 def build_report(closed_trades, open_long_lots, open_short_lots):
     """
     Takes the list of closed (matched) trades and prints a summary

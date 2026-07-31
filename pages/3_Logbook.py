@@ -41,11 +41,14 @@ by clicking the button below, whenever you actually want one.
 import streamlit as st
 
 import auth
+import charting
 import daily_report
 import database
 import nav
 import timeutil
 import trade_review_report
+import ui
+from analyze_trades import trade_stats
 
 st.set_page_config(page_title="Logbook", page_icon="📈", layout="wide", initial_sidebar_state="collapsed")
 
@@ -141,6 +144,25 @@ else:
         st.subheader(
             f"{review['symbol']}{short_tag}: {review['entry_date']:%m/%d/%Y} to {review['exit_date']:%m/%d/%Y}"
         )
+
+        # Same numbers as Trade Analyzer's fact tiles, computed the same
+        # way (see analyze_trades.trade_stats()) - the trade's own
+        # numbers were saved on the review itself, not re-looked-up from
+        # database.get_trades(), so this still shows correctly even if
+        # trades have since been re-imported.
+        stats = trade_stats(
+            review["direction"], review["buy_price"], review["sell_price"], review["quantity"],
+            review["profit_loss"], review["entry_date"], review["exit_date"],
+        )
+        outcome_color = charting.win_loss_color(review["profit_loss"] >= 0)
+        stat_cols = st.columns(6)
+        ui.stat_tile(stat_cols[0], "Short Entry" if stats["is_short"] else "Entry", f"${stats['entry_price']:,.2f}")
+        ui.stat_tile(stat_cols[1], "Cover" if stats["is_short"] else "Exit", f"${stats['exit_price']:,.2f}")
+        ui.stat_tile(stat_cols[2], "Shares", f"{review['quantity']:,.0f}")
+        ui.stat_tile(stat_cols[3], "P/L", f"${review['profit_loss']:,.2f}", outcome_color)
+        ui.stat_tile(stat_cols[4], "% Change", f"{stats['pct_change']:,.2f}%", outcome_color)
+        ui.stat_tile(stat_cols[5], "Days Held", f"{stats['days_held']:,.0f}")
+
         if review["snapshots"]:
             snapshot_cols = st.columns(len(review["snapshots"]))
             for col, (timeframe, chart_image) in zip(snapshot_cols, review["snapshots"].items()):

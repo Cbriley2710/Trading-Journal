@@ -465,6 +465,20 @@ def init_db(conn):
             reviewed_at TIMESTAMP NOT NULL
         )
     """)
+    # The trade's own numbers, saved alongside the review rather than
+    # re-looked-up later - lets the Trade Review Report PDF and the
+    # Logbook's Trade Reviews section show entry/exit price, shares,
+    # P/L, and days held (see analyze_trades.trade_stats()) without
+    # depending on database.get_trades() still having a matching row
+    # later (rebuild_trades() could have changed things since).
+    if not _column_exists(cur, "trade_reviews", "buy_price"):
+        cur.execute("ALTER TABLE trade_reviews ADD COLUMN buy_price DOUBLE PRECISION")
+    if not _column_exists(cur, "trade_reviews", "sell_price"):
+        cur.execute("ALTER TABLE trade_reviews ADD COLUMN sell_price DOUBLE PRECISION")
+    if not _column_exists(cur, "trade_reviews", "quantity"):
+        cur.execute("ALTER TABLE trade_reviews ADD COLUMN quantity DOUBLE PRECISION")
+    if not _column_exists(cur, "trade_reviews", "profit_loss"):
+        cur.execute("ALTER TABLE trade_reviews ADD COLUMN profit_loss DOUBLE PRECISION")
     # A chart snapshot captured during a trade's review, at whichever
     # timeframe was on screen when "Save this timeframe" was clicked -
     # one trade can have several (Hourly, Daily, Weekly, ...), which is
@@ -1182,16 +1196,25 @@ def save_trade_review(conn, report_id, trade, notes, snapshots):
     {timeframe_label: png_bytes} for whichever timeframes were captured
     with "Save this timeframe" during the review (can be empty - a note
     with no snapshots is still a valid review).
+
+    buy_price/sell_price/quantity/profit_loss are saved too (not just
+    the identifying fields) so the PDF/Logbook display (see
+    analyze_trades.trade_stats()) never has to re-look-up this trade
+    from database.get_trades() later - which might not even find a
+    matching row anymore if trades were re-imported since.
     """
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT INTO trade_reviews (report_id, symbol, entry_date, exit_date, direction, notes, reviewed_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO trade_reviews
+            (report_id, symbol, entry_date, exit_date, direction, notes, reviewed_at,
+             buy_price, sell_price, quantity, profit_loss)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
         (report_id, trade["symbol"], trade["entry_date"].date(), trade["date"].date(),
-         trade["direction"], notes, timeutil.now_eastern()),
+         trade["direction"], notes, timeutil.now_eastern(),
+         trade["buy_price"], trade["sell_price"], trade["quantity"], trade["profit_loss"]),
     )
     review_id = cur.fetchone()[0]
     for timeframe, chart_image in snapshots.items():
@@ -1231,7 +1254,8 @@ def get_review_report(conn, report_id):
     Returns one Trade Review Report's full detail:
     {"id", "created_at", "range_start", "range_end", "sent_at",
     "reviews": [{"symbol", "entry_date", "exit_date", "direction",
-    "notes", "reviewed_at", "snapshots": {timeframe: chart_image}}, ...]}
+    "notes", "reviewed_at", "buy_price", "sell_price", "quantity",
+    "profit_loss", "snapshots": {timeframe: chart_image}}, ...]}
     or None if this report doesn't exist. Two queries (reviews, then
     every snapshot for those reviews in one batch), not one join per
     review - same "batch it, don't N+1" reasoning as
@@ -1248,7 +1272,8 @@ def get_review_report(conn, report_id):
 
     cur.execute(
         """
-        SELECT id, symbol, entry_date, exit_date, direction, notes, reviewed_at
+        SELECT id, symbol, entry_date, exit_date, direction, notes, reviewed_at,
+               buy_price, sell_price, quantity, profit_loss
         FROM trade_reviews WHERE report_id = %s ORDER BY reviewed_at
         """,
         (report_id,),
@@ -1271,7 +1296,9 @@ def get_review_report(conn, report_id):
         "reviews": [
             {
                 "symbol": row[1], "entry_date": row[2], "exit_date": row[3], "direction": row[4],
-                "notes": row[5], "reviewed_at": row[6], "snapshots": snapshots_by_review[row[0]],
+                "notes": row[5], "reviewed_at": row[6],
+                "buy_price": row[7], "sell_price": row[8], "quantity": row[9], "profit_loss": row[10],
+                "snapshots": snapshots_by_review[row[0]],
             }
             for row in review_rows
         ],
