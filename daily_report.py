@@ -31,17 +31,16 @@ never your actual account password.
 """
 
 import io
-import os
 import smtplib
 from email.message import EmailMessage
 
-import streamlit as st
 from fpdf import FPDF
 from PIL import Image
 
 import archiving
 import charting
 import database
+from report_utils import get_secret, hex_to_rgb, safe_text
 
 PAGE_MARGIN_MM = 15
 # A4 LANDSCAPE is 297mm x 210mm (width and height swapped from the
@@ -49,17 +48,9 @@ PAGE_MARGIN_MM = 15
 # several narrower ones stacked on a tall portrait page.
 CONTENT_WIDTH_MM = 297 - 2 * PAGE_MARGIN_MM
 
-
-def _hex_to_rgb(hex_color):
-    """"#RRGGBB" -> (r, g, b) ints - fpdf2's set_fill_color()/
-    set_text_color() want separate 0-255 numbers, not a hex string."""
-    hex_color = hex_color.lstrip("#")
-    return tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
-
-
-PAGE_BACKGROUND_RGB = _hex_to_rgb(charting.CHART_BACKGROUND)
-TEXT_COLOR_RGB = _hex_to_rgb(charting.CHART_TEXT_COLOR)
-MUTED_TEXT_RGB = _hex_to_rgb(charting.MUTED_COLOR)
+PAGE_BACKGROUND_RGB = hex_to_rgb(charting.CHART_BACKGROUND)
+TEXT_COLOR_RGB = hex_to_rgb(charting.CHART_TEXT_COLOR)
+MUTED_TEXT_RGB = hex_to_rgb(charting.MUTED_COLOR)
 
 
 class DarkReportPDF(FPDF):
@@ -75,34 +66,6 @@ class DarkReportPDF(FPDF):
     def header(self):
         self.set_fill_color(*PAGE_BACKGROUND_RGB)
         self.rect(0, 0, self.w, self.h, "F")
-
-
-def _get_secret(key):
-    """Reads a secret from st.secrets first, falling back to a plain
-    environment variable - the same dual lookup
-    database._get_database_url() uses, needed here too since this
-    code runs both inside Streamlit (the button) and inside the plain
-    nightly_archive.py script (GitHub Actions, no st.secrets file)."""
-    try:
-        return st.secrets[key]
-    except Exception:
-        pass
-
-    value = os.environ.get(key)
-    if value:
-        return value
-
-    raise RuntimeError(
-        f"No {key} found. Add it to .streamlit/secrets.toml (see "
-        f"secrets.toml.example) or set it as an environment variable."
-    )
-
-
-def _safe_text(text):
-    """fpdf2's built-in fonts only support Latin-1 - if a journal note
-    ever has a character outside that (an emoji, say), swap it for a
-    "?" instead of crashing the whole report over one character."""
-    return text.encode("latin-1", "replace").decode("latin-1")
 
 
 def _position_label(position):
@@ -124,11 +87,11 @@ def _write_ticker_page(pdf, section_label, symbol, entry):
 
     pdf.set_text_color(*MUTED_TEXT_RGB)
     pdf.set_font("Helvetica", size=11)
-    pdf.cell(0, 7, _safe_text(section_label), new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 7, safe_text(section_label), new_x="LMARGIN", new_y="NEXT")
 
     pdf.set_text_color(*TEXT_COLOR_RGB)
     pdf.set_font("Helvetica", style="B", size=18)
-    pdf.cell(0, 11, _safe_text(symbol), new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 11, safe_text(symbol), new_x="LMARGIN", new_y="NEXT")
     pdf.ln(2)
 
     if entry is None:
@@ -161,7 +124,7 @@ def _write_ticker_page(pdf, section_label, symbol, entry):
 
     notes_text = entry["notes"].strip() if entry["notes"] else ""
     pdf.set_font("Helvetica", style="I", size=10)
-    pdf.multi_cell(0, 6, _safe_text(notes_text or "No notes recorded for this day."))
+    pdf.multi_cell(0, 6, safe_text(notes_text or "No notes recorded for this day."))
 
 
 def build_report_pdf(conn, report_date):
@@ -189,7 +152,7 @@ def build_report_pdf(conn, report_date):
 
     pdf.set_text_color(*TEXT_COLOR_RGB)
     pdf.set_font("Helvetica", style="B", size=24)
-    pdf.cell(0, 16, _safe_text(f"Daily Report - {report_date:%B %d, %Y}"), new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 16, safe_text(f"Daily Report - {report_date:%B %d, %Y}"), new_x="LMARGIN", new_y="NEXT")
 
     # The general, not-tied-to-any-ticker note from the guided Journal
     # Session's first step (see pages/2_Shortlist.py's
@@ -204,7 +167,7 @@ def build_report_pdf(conn, report_date):
         pdf.set_font("Helvetica", style="B", size=13)
         pdf.cell(0, 8, "Today's Thoughts", new_x="LMARGIN", new_y="NEXT")
         pdf.set_font("Helvetica", size=11)
-        pdf.multi_cell(0, 6, _safe_text(thoughts.strip()))
+        pdf.multi_cell(0, 6, safe_text(thoughts.strip()))
 
     for list_id in range(1, 5):
         symbols = [w["symbol"] for w in watchlist if w["list_id"] == list_id]
@@ -226,9 +189,9 @@ def send_report_email(pdf_bytes, report_date):
     failure - generate_and_send_report() below is what turns that into
     a plain success/failure result instead of a crash.
     """
-    from_addr = _get_secret("REPORT_EMAIL_FROM")
-    app_password = _get_secret("REPORT_EMAIL_APP_PASSWORD")
-    recipients = [addr.strip() for addr in _get_secret("REPORT_EMAIL_RECIPIENTS").split(",") if addr.strip()]
+    from_addr = get_secret("REPORT_EMAIL_FROM")
+    app_password = get_secret("REPORT_EMAIL_APP_PASSWORD")
+    recipients = [addr.strip() for addr in get_secret("REPORT_EMAIL_RECIPIENTS").split(",") if addr.strip()]
     if not recipients:
         raise RuntimeError("REPORT_EMAIL_RECIPIENTS has no valid email addresses in it.")
 

@@ -428,6 +428,72 @@ def init_db(conn):
             fetched_for_date DATE NOT NULL
         )
     """)
+    # A Trade Review Report: one batch of CLOSED trades reviewed together
+    # in one guided session (see pages/1_Trade_Analyzer.py's Review
+    # Session) - `range_start`/`range_end` are just the date-range filter
+    # the session was started with, for display; `sent_at` mirrors
+    # daily_reports.generated_at (see get_review_report_sent_status()/
+    # mark_review_report_sent() below), NULL until the PDF's actually
+    # been generated and emailed.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS trade_review_reports (
+            id SERIAL PRIMARY KEY,
+            created_at TIMESTAMP NOT NULL,
+            range_start DATE,
+            range_end DATE,
+            sent_at TIMESTAMP
+        )
+    """)
+    # One reviewed trade within a report. Deliberately NOT a foreign key
+    # into `trades.id` - rebuild_trades() (run after every import) does a
+    # full DELETE + re-insert of that whole table, regenerating fresh
+    # ids every time, so an id saved here today could point at a
+    # completely different trade (or nothing) after the next import. The
+    # natural fields below (symbol/entry_date/exit_date/direction) are
+    # exactly what rebuild_trades() recomputes identically from the same
+    # transaction history, so they stay valid across a rebuild the same
+    # way logbook_entries staying keyed by (symbol, entry_date) does.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS trade_reviews (
+            id SERIAL PRIMARY KEY,
+            report_id INTEGER NOT NULL REFERENCES trade_review_reports(id) ON DELETE CASCADE,
+            symbol TEXT NOT NULL,
+            entry_date DATE NOT NULL,
+            exit_date DATE NOT NULL,
+            direction TEXT NOT NULL,
+            notes TEXT,
+            reviewed_at TIMESTAMP NOT NULL
+        )
+    """)
+    # A chart snapshot captured during a trade's review, at whichever
+    # timeframe was on screen when "Save this timeframe" was clicked -
+    # one trade can have several (Hourly, Daily, Weekly, ...), which is
+    # why this is its own one-row-per-image table rather than a single
+    # column, the same "many rows per parent" shape chart_drawings
+    # already uses instead of a JSON blob.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS trade_review_snapshots (
+            id SERIAL PRIMARY KEY,
+            review_id INTEGER NOT NULL REFERENCES trade_reviews(id) ON DELETE CASCADE,
+            timeframe TEXT NOT NULL,
+            chart_image BYTEA NOT NULL
+        )
+    """)
+    # The guided Review Session's progress - same idea and shape as
+    # journal_session_progress above, just for a queue of closed trades
+    # instead of positions/watchlist tickers. `queue` stores each
+    # trade's natural-key fields (symbol/entry_date/exit_date/direction),
+    # for the same rebuild_trades()-stability reason trade_reviews above
+    # doesn't use a trades.id foreign key.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS trade_review_session_progress (
+            id INTEGER PRIMARY KEY DEFAULT 1,
+            report_id INTEGER NOT NULL,
+            queue JSONB NOT NULL,
+            current_index INTEGER NOT NULL,
+            CONSTRAINT single_row CHECK (id = 1)
+        )
+    """)
     conn.commit()
 
 
@@ -1072,6 +1138,208 @@ def clear_journal_session_progress(conn):
     skipped), since there's nothing left to offer to resume."""
     cur = conn.cursor()
     cur.execute("DELETE FROM journal_session_progress WHERE id = 1")
+    conn.commit()
+
+
+def create_review_report(conn, range_start, range_end):
+    """Starts a new Trade Review Report - called once, at the moment a
+    Review Session begins (see pages/1_Trade_Analyzer.py), before any
+    individual trade has actually been reviewed yet. Returns the new
+    report's id, which the session then threads through every
+    save_trade_review() call and the resumable progress row below.
+    `range_start`/`range_end` are just the date-range filter the
+    session was started with - for display only, since the actual
+    trades reviewed are whatever got checked off, not necessarily every
+    trade in that range."""
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO trade_review_reports (created_at, range_start, range_end) VALUES (%s, %s, %s) RETURNING id",
+        (timeutil.now_eastern(), range_start, range_end),
+    )
+    report_id = cur.fetchone()[0]
+    conn.commit()
+    return report_id
+
+
+def delete_review_report(conn, report_id):
+    """Deletes a Trade Review Report and everything under it (cascades
+    to its trade_reviews and their trade_review_snapshots) - used when a
+    session ends with nothing actually saved (every trade in it was
+    Skipped), so an empty report doesn't clutter the Logbook's review
+    list."""
+    cur = conn.cursor()
+    cur.execute("DELETE FROM trade_review_reports WHERE id = %s", (report_id,))
+    conn.commit()
+
+
+def save_trade_review(conn, report_id, trade, notes, snapshots):
+    """
+    Saves one reviewed trade into a report: `trade` is a dict from
+    get_trades() (its symbol/entry_date/date/direction identify WHICH
+    closed trade this is - see trade_reviews' own schema comment for
+    why that's natural-key fields, not a trades.id foreign key),
+    `notes` is the free-text review, and `snapshots` is
+    {timeframe_label: png_bytes} for whichever timeframes were captured
+    with "Save this timeframe" during the review (can be empty - a note
+    with no snapshots is still a valid review).
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO trade_reviews (report_id, symbol, entry_date, exit_date, direction, notes, reviewed_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+        """,
+        (report_id, trade["symbol"], trade["entry_date"].date(), trade["date"].date(),
+         trade["direction"], notes, timeutil.now_eastern()),
+    )
+    review_id = cur.fetchone()[0]
+    for timeframe, chart_image in snapshots.items():
+        cur.execute(
+            "INSERT INTO trade_review_snapshots (review_id, timeframe, chart_image) VALUES (%s, %s, %s)",
+            (review_id, timeframe, chart_image),
+        )
+    conn.commit()
+
+
+def get_review_reports(conn):
+    """Returns every Trade Review Report, newest first, as
+    {"id", "created_at", "range_start", "range_end", "sent_at",
+    "trade_count"} - trade_count is how many trades were actually
+    reviewed and saved in it (0 shouldn't normally happen - see
+    delete_review_report() - but is possible if a report was created
+    and the session was abandoned before this cleanup ran)."""
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT r.id, r.created_at, r.range_start, r.range_end, r.sent_at, COUNT(tr.id)
+        FROM trade_review_reports r
+        LEFT JOIN trade_reviews tr ON tr.report_id = r.id
+        GROUP BY r.id
+        ORDER BY r.created_at DESC
+    """)
+    return [
+        {
+            "id": row[0], "created_at": row[1], "range_start": row[2],
+            "range_end": row[3], "sent_at": row[4], "trade_count": row[5],
+        }
+        for row in cur.fetchall()
+    ]
+
+
+def get_review_report(conn, report_id):
+    """
+    Returns one Trade Review Report's full detail:
+    {"id", "created_at", "range_start", "range_end", "sent_at",
+    "reviews": [{"symbol", "entry_date", "exit_date", "direction",
+    "notes", "reviewed_at", "snapshots": {timeframe: chart_image}}, ...]}
+    or None if this report doesn't exist. Two queries (reviews, then
+    every snapshot for those reviews in one batch), not one join per
+    review - same "batch it, don't N+1" reasoning as
+    get_logbook_entries_for_date().
+    """
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, created_at, range_start, range_end, sent_at FROM trade_review_reports WHERE id = %s",
+        (report_id,),
+    )
+    report_row = cur.fetchone()
+    if report_row is None:
+        return None
+
+    cur.execute(
+        """
+        SELECT id, symbol, entry_date, exit_date, direction, notes, reviewed_at
+        FROM trade_reviews WHERE report_id = %s ORDER BY reviewed_at
+        """,
+        (report_id,),
+    )
+    review_rows = cur.fetchall()
+    review_ids = [row[0] for row in review_rows]
+
+    snapshots_by_review = {review_id: {} for review_id in review_ids}
+    if review_ids:
+        cur.execute(
+            "SELECT review_id, timeframe, chart_image FROM trade_review_snapshots WHERE review_id = ANY(%s)",
+            (review_ids,),
+        )
+        for review_id, timeframe, chart_image in cur.fetchall():
+            snapshots_by_review[review_id][timeframe] = bytes(chart_image)
+
+    return {
+        "id": report_row[0], "created_at": report_row[1], "range_start": report_row[2],
+        "range_end": report_row[3], "sent_at": report_row[4],
+        "reviews": [
+            {
+                "symbol": row[1], "entry_date": row[2], "exit_date": row[3], "direction": row[4],
+                "notes": row[5], "reviewed_at": row[6], "snapshots": snapshots_by_review[row[0]],
+            }
+            for row in review_rows
+        ],
+    }
+
+
+def get_review_report_sent_status(conn, report_id):
+    """Returns when a Trade Review Report's PDF was generated/emailed,
+    or None if it hasn't been yet - same idea as get_daily_report_status()."""
+    cur = conn.cursor()
+    cur.execute("SELECT sent_at FROM trade_review_reports WHERE id = %s", (report_id,))
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def mark_review_report_sent(conn, report_id):
+    """Records that a Trade Review Report's PDF has been generated and
+    emailed - same idea as mark_daily_report_generated(), just keyed by
+    report id instead of a calendar date since a review report isn't
+    one-per-day."""
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE trade_review_reports SET sent_at = %s WHERE id = %s",
+        (timeutil.now_eastern(), report_id),
+    )
+    conn.commit()
+
+
+def save_review_session_progress(conn, report_id, queue, current_index):
+    """Persists the guided Review Session's progress - same shape and
+    purpose as save_journal_session_progress(), just for a queue of
+    closed trades. `queue` is a list of {"symbol", "entry_date",
+    "exit_date", "direction"} dicts (a trade's natural-key fields, not
+    a trades.id - see trade_reviews' own schema comment for why),
+    `current_index` is how far into it you'd gotten."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO trade_review_session_progress (id, report_id, queue, current_index)
+        VALUES (1, %s, %s, %s)
+        ON CONFLICT (id) DO UPDATE SET
+            report_id = EXCLUDED.report_id,
+            queue = EXCLUDED.queue,
+            current_index = EXCLUDED.current_index
+        """,
+        (report_id, Json(queue), current_index),
+    )
+    conn.commit()
+
+
+def get_review_session_progress(conn):
+    """Returns the saved Review Session progress as {"report_id",
+    "queue": [{"symbol", "entry_date", "exit_date", "direction"}, ...],
+    "current_index": N}, or None if there's no session in progress."""
+    cur = conn.cursor()
+    cur.execute("SELECT report_id, queue, current_index FROM trade_review_session_progress WHERE id = 1")
+    row = cur.fetchone()
+    if row is None:
+        return None
+    return {"report_id": row[0], "queue": row[1], "current_index": row[2]}
+
+
+def clear_review_session_progress(conn):
+    """Deletes the saved Review Session progress - called once a
+    session finishes normally (every trade in it got reviewed or
+    skipped)."""
+    cur = conn.cursor()
+    cur.execute("DELETE FROM trade_review_session_progress WHERE id = 1")
     conn.commit()
 
 

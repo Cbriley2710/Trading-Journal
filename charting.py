@@ -798,6 +798,62 @@ def build_archive_snapshot(symbol, entry_date, buy_price, entry_label, as_of, di
     return render_png(fig)
 
 
+def build_trade_review_snapshot(symbol, entry_date, exit_date, buy_price, sell_price, direction, timeframe_label, settings):
+    """
+    Builds a chart snapshot for the Trade Review Session (see
+    pages/1_Trade_Analyzer.py), at whichever timeframe was on screen
+    when "Save this timeframe" was clicked - a DIFFERENT shape from
+    build_archive_snapshot() above, which is anchored to "today" and
+    fixed to Daily for the nightly Logbook archive. This one is
+    anchored to the TRADE's own entry/exit dates instead, at a
+    caller-chosen timeframe (Hourly/Daily/Weekly/Monthly - see
+    TIMEFRAMES), since a review is about what happened around that
+    specific trade, not a rolling window ending today. The visible-range/
+    fetch-window math mirrors pages/1_Trade_Analyzer.py's own
+    interactive chart exactly, just extracted so it can run once per
+    timeframe instead of once per page load.
+
+    `settings` is whatever the review session's Timeframe/Chart Settings
+    controls currently show (MA periods/type, price scale) - the
+    snapshot captures what's actually on screen, not a separately-saved
+    preference set. Unlike build_archive_snapshot(), this doesn't
+    include an overlay ticker - a review snapshot is about this trade's
+    own price action, and keeping this simple avoids a second live fetch
+    per snapshot. Saved drawings for the symbol ARE included, same as
+    every other chart in this app. Returns PNG bytes, or None if no
+    price data was found for this timeframe/window.
+    """
+    conn = database.get_connection()
+    drawings = database.get_drawings(conn, symbol)
+
+    interval, padding_days = TIMEFRAMES[timeframe_label]
+    visible_start = entry_date - timedelta(days=padding_days)
+    visible_end = exit_date + timedelta(days=padding_days)
+
+    fetch_padding_days = padding_days * FETCH_BUFFER_MULTIPLIER
+    wide_start = entry_date - timedelta(days=fetch_padding_days)
+    wide_end = exit_date + timedelta(days=fetch_padding_days)
+
+    max_ma_period = max(settings["ma_periods"], default=0)
+    lookback_days = max_ma_period * LOOKBACK_DAYS_PER_PERIOD[interval]
+    fetch_start = wide_start - timedelta(days=lookback_days)
+
+    history = fetch_history(symbol, fetch_start, wide_start, wide_end, interval, settings["ma_periods"], settings["ma_type"])
+    if history.empty:
+        return None
+
+    entry_point = {
+        "entry_date": entry_date, "buy_price": buy_price,
+        "exit_date": exit_date, "sell_price": sell_price, "direction": direction,
+    }
+    entry_label = "Short Entry" if direction == "SHORT" else "Entry"
+
+    fig, _fit_payload = build_figure(
+        symbol, history, entry_point, settings, entry_label=entry_label, interval=interval,
+        visible_range=(visible_start, visible_end), drawings=drawings)
+    return render_png(fig)
+
+
 def color_input(container, label, default_color, key):
     """
     A hex-code text box with a small color-swatch preview underneath,

@@ -30,6 +30,12 @@ click Generate yourself, nightly_archive.py sends it automatically as
 a fallback once the night's archiving is done, the same "manual action
 is primary, the nightly script is the fallback" pattern already used
 for per-ticker chart archiving.
+
+Also here: "Trade Reviews" - past guided Review Sessions from the
+Trade Analyzer page (see pages/1_Trade_Analyzer.py's
+render_review_session()). Unlike the Daily Report, there's no nightly
+fallback for these - a Review Session's PDF only ever gets generated
+by clicking the button below, whenever you actually want one.
 """
 
 import streamlit as st
@@ -39,6 +45,7 @@ import daily_report
 import database
 import nav
 import timeutil
+import trade_review_report
 
 st.set_page_config(page_title="Logbook", page_icon="📈", layout="wide", initial_sidebar_state="collapsed")
 
@@ -81,6 +88,68 @@ if st.button("Generate & Email Report"):
         st.success(message)
     else:
         st.error(message)
+
+st.divider()
+
+st.header("Trade Reviews")
+st.caption(
+    "Past guided Review Sessions from the Trade Analyzer page - each "
+    "closed trade you reviewed, your notes, and every chart timeframe "
+    "you saved for it. Generate a PDF here any time, even for an old one."
+)
+
+review_reports = database.get_review_reports(conn)
+if not review_reports:
+    st.info("No trade reviews yet - start one from the Trade Analyzer page.")
+else:
+    def review_report_label(r):
+        if r["range_start"] and r["range_end"]:
+            range_text = f"{r['range_start']:%m/%d/%Y} to {r['range_end']:%m/%d/%Y}"
+        else:
+            range_text = "All trades"
+        return f"{r['created_at']:%m/%d/%Y %I:%M %p} - {range_text} - {r['trade_count']} trade(s)"
+
+    review_index = st.selectbox(
+        "Choose a review report", options=range(len(review_reports)),
+        format_func=lambda i: review_report_label(review_reports[i]),
+        key="review_report_picker",
+    )
+    selected_report_summary = review_reports[review_index]
+
+    sent_cols = st.columns([2, 1])
+    if selected_report_summary["sent_at"]:
+        sent_cols[0].caption(
+            f"Already generated and emailed, at {selected_report_summary['sent_at']:%m/%d/%Y %I:%M %p}."
+        )
+    else:
+        sent_cols[0].caption("Not generated/emailed yet.")
+
+    if sent_cols[1].button("Generate & Email PDF", key="send_review_report"):
+        with st.spinner("Building the PDF and sending it..."):
+            success, message = trade_review_report.generate_and_send_review_report(
+                conn, selected_report_summary["id"])
+        if success:
+            st.success(message)
+        else:
+            st.error(message)
+
+    report_detail = database.get_review_report(conn, selected_report_summary["id"])
+    if not report_detail["reviews"]:
+        st.caption("Nothing was saved in this report.")
+    for review in report_detail["reviews"]:
+        short_tag = " (Short)" if review["direction"] == "SHORT" else ""
+        st.subheader(
+            f"{review['symbol']}{short_tag}: {review['entry_date']:%m/%d/%Y} to {review['exit_date']:%m/%d/%Y}"
+        )
+        if review["snapshots"]:
+            snapshot_cols = st.columns(len(review["snapshots"]))
+            for col, (timeframe, chart_image) in zip(snapshot_cols, review["snapshots"].items()):
+                col.caption(timeframe)
+                col.image(chart_image, width="stretch")
+        else:
+            st.caption("No chart snapshots were saved for this trade.")
+        st.write(review["notes"] if review["notes"] else "_No notes recorded for this trade._")
+        st.divider()
 
 st.divider()
 

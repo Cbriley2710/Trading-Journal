@@ -418,6 +418,24 @@ def match_trades_lifo(transactions):
     return closed_trades, open_long_lots, open_short_lots
 
 
+def trade_label(trade):
+    """
+    One line of text summarizing a closed trade - "AAPL: 01/05/2026 to
+    01/12/2026 (+$500.00)", with " (Short)" added for a short. Shared by
+    pages/1_Trade_Analyzer.py's trade picker and its Review Session's
+    checkbox list, so both show a trade the same way. Lives here (not
+    on that page) since it only needs the plain dict shape
+    match_trades_lifo()/database.get_trades() already produce - no
+    Streamlit import required.
+    """
+    sign = "+" if trade["profit_loss"] >= 0 else ""
+    short_tag = " (Short)" if trade["direction"] == "SHORT" else ""
+    return (
+        f"{trade['symbol']}{short_tag}: {trade['entry_date']:%m/%d/%Y} to "
+        f"{trade['date']:%m/%d/%Y} ({sign}${trade['profit_loss']:,.2f})"
+    )
+
+
 def build_report(closed_trades, open_long_lots, open_short_lots):
     """
     Takes the list of closed (matched) trades and prints a summary
