@@ -34,11 +34,20 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # SNAPTRADE_USER_SECRET was missing from this env block from the
+      # very start - every scheduled run has been crashing with
+      # "SnapTrade user isn't registered yet" (confirmed via the actual
+      # run logs) since this workflow's first commit. It's a real repo
+      # secret (Settings > Secrets and variables > Actions), separate
+      # from the SNAPTRADE_USER_SECRET already sitting in Streamlit
+      # Cloud's own secrets - those are two different secret stores, so
+      # having it in one doesn't put it in the other.
       - name: Run SnapTrade sync
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           SNAPTRADE_CLIENT_ID: ${{ secrets.SNAPTRADE_CLIENT_ID }}
           SNAPTRADE_CONSUMER_KEY: ${{ secrets.SNAPTRADE_CONSUMER_KEY }}
+          SNAPTRADE_USER_SECRET: ${{ secrets.SNAPTRADE_USER_SECRET }}
         run: python snaptrade_daily_sync.py
 
       # Same script, same repo, but pointed at a second person's own
@@ -54,4 +63,5 @@ jobs:
           DATABASE_URL: ${{ secrets.FRIEND_DATABASE_URL }}
           SNAPTRADE_CLIENT_ID: ${{ secrets.FRIEND_SNAPTRADE_CLIENT_ID }}
           SNAPTRADE_CONSUMER_KEY: ${{ secrets.FRIEND_SNAPTRADE_CONSUMER_KEY }}
+          SNAPTRADE_USER_SECRET: ${{ secrets.FRIEND_SNAPTRADE_USER_SECRET }}
         run: python snaptrade_daily_sync.py
