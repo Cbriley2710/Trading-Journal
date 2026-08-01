@@ -261,30 +261,6 @@ def _advance_review_session(conn, session):
     st.rerun()
 
 
-def render_review_notes_box(key_prefix):
-    """Trade Review's own note box + Save & Next/Skip buttons - modeled
-    on Shortlist's render_journal_box() (same form/Ctrl+Enter/
-    clear_on_submit reasoning), but its own function since the wording
-    and backing store (a trade_reviews row, not a logbook_entries one)
-    are different enough that sharing code would need more
-    parameterization than it's worth.
-
-    Three columns, matching render_review_session()'s own [3, 1, 1]
-    split above (see its comment on why this is two separate
-    st.columns() calls, not one): notes box (left, widest), nothing
-    (middle - that column's real content, Save this timeframe/
-    Timeframe, is rendered pre-form), Save & Next over Skip (right)."""
-    clicked = None
-    with st.form(key=f"{key_prefix}_review_form", clear_on_submit=True, border=False):
-        box_col, _, button_col = st.columns([3, 1, 1])
-        notes = box_col.text_area("Trade Review Notes", height=68, key=f"{key_prefix}_notes")
-        if button_col.form_submit_button("Save & Next →", type="primary", width="stretch"):
-            clicked = "Save & Next →"
-        if button_col.form_submit_button("Skip", width="stretch"):
-            clicked = "Skip"
-    return clicked, notes
-
-
 def render_review_session(conn):
     """
     The guided Review Session: walks through every checked trade one at
@@ -364,20 +340,15 @@ def render_review_session(conn):
 
     pending = session.setdefault("pending_snapshots", {})
 
-    # Three columns, left to right: notes box (widest - rendered inside
-    # the form below, this column just reserves its width here), Save
-    # this timeframe + Timeframe selector, Save & Next/Skip (rendered
-    # inside the form below - same reservation). A regular button/radio
-    # can't live inside the st.form() the notes box needs (only
-    # form_submit_button can), so this row and the form's own matching
-    # [3, 1, 1] row in render_review_notes_box() are two separate
-    # st.columns() calls, not one - which leaves a small gap above the
-    # notes box, roughly this row's own height, since Streamlit lays
-    # the form out as a new block below this one regardless of column.
-    # Kept to just a button + a single-line dropdown (a multi-row radio
-    # plus a caption made that gap noticeably bigger) to keep this row
-    # as short as this layout constraint allows.
-    _, timeframe_col, _ = st.columns([3, 1, 1])
+    # One single row, left to right: notes box (widest), Save this
+    # timeframe + Timeframe selector, Save & Next/Skip. Nothing here
+    # needs to be inside an st.form() anymore (see _advance_review_
+    # session() - Save & Next/Skip both move to a new trade with a
+    # fresh key_prefix, so there's nothing to "clear on submit"; this
+    # widget instance just never renders again), which is what makes a
+    # single st.columns() band - and true flush alignment with no gap -
+    # possible at all.
+    notes_col, timeframe_col, buttons_col = st.columns([3, 1, 1])
 
     if timeframe_col.button("📸 Save this timeframe", key=f"{key_prefix}_capture"):
         with st.spinner(f"Saving {timeframe_label.lower()} snapshot..."):
@@ -396,7 +367,13 @@ def render_review_session(conn):
     if should_scroll:
         ui.focus_textarea("Trade Review Notes")
 
-    clicked, notes = render_review_notes_box(key_prefix)
+    notes = notes_col.text_area("Trade Review Notes", height=68, key=f"{key_prefix}_notes")
+
+    clicked = None
+    if buttons_col.button("Save & Next →", type="primary", width="stretch", key=f"{key_prefix}_save_next"):
+        clicked = "Save & Next →"
+    if buttons_col.button("Skip", width="stretch", key=f"{key_prefix}_skip_btn"):
+        clicked = "Skip"
 
     if clicked == "Save & Next →":
         # Daily is always saved, even if never explicitly captured above -
