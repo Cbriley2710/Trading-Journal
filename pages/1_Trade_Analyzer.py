@@ -455,6 +455,7 @@ def render_review_selection(conn, trades):
         st.session_state["_applied_week_choice"] = week_choice
         monday = week_options[week_choice]
         st.session_state["review_date_range"] = clamped_preset(monday, monday + timedelta(days=6))
+        st.session_state["_review_precheck"] = True
         st.rerun()
 
     month_choice = preset_cols[1].selectbox(
@@ -463,6 +464,7 @@ def render_review_selection(conn, trades):
         st.session_state["_applied_month_choice"] = month_choice
         first_of_month = month_options[month_choice]
         st.session_state["review_date_range"] = clamped_preset(first_of_month, month_end(first_of_month))
+        st.session_state["_review_precheck"] = True
         st.rerun()
 
     date_range = st.date_input(
@@ -483,6 +485,17 @@ def render_review_selection(conn, trades):
     else:
         st.caption(f"{len(filtered)} trade(s) in this range - check the ones you want to review.")
 
+    # Only true for the ONE render right after a week/month dropdown
+    # just filled in the range above - pop (not get) so it applies
+    # exactly once, not to every trade that ever shows up under this
+    # filter afterward (a later manual widening of the date range, or
+    # even just toggling some OTHER checkbox, also reruns this whole
+    # script). A checkbox's `value=` only matters the very first time
+    # its own key is instantiated anyway (see the key comment just
+    # below), which is exactly this same one render - after that,
+    # Streamlit remembers whatever the user actually left it at.
+    precheck = st.session_state.pop("_review_precheck", False)
+
     checked = []
     with st.container(height=300):
         # Keyed by loop position, not just _trade_key(t) - belt and
@@ -490,7 +503,7 @@ def render_review_selection(conn, trades):
         # include quantity/prices (see _trade_key()'s own docstring for
         # the real duplicate-trade case that motivated both fixes).
         for i, t in enumerate(filtered):
-            if st.checkbox(trade_label(t), key=f"review_pick_{i}_{_trade_key(t)}"):
+            if st.checkbox(trade_label(t), value=precheck, key=f"review_pick_{i}_{_trade_key(t)}"):
                 checked.append(t)
 
     action_cols = st.columns([1, 1, 3])
