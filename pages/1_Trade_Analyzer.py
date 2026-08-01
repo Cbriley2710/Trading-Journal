@@ -578,7 +578,7 @@ trades = load_trades()
 if not trades:
     st.info("No trades found yet.")
     st.page_link(
-        "pages/0_Import_Trades.py",
+        "pages/5_Settings.py",
         label="Import your trade history to get started.",
         icon="↗️",
     )

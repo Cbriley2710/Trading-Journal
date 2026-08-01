@@ -714,7 +714,7 @@ def import_transactions_snaptrade(conn, start_date, end_date):
     snaptrade_sync.py) for the given date range and adds any
     transactions that aren't already stored - the SnapTrade
     equivalent of import_transactions() above, sharing the same
-    dedup-safe insert. See pages/0_Import_Trades.py (manual "Sync
+    dedup-safe insert. See pages/5_Settings.py (manual "Sync
     Now") and snaptrade_daily_sync.py (the automatic daily version)
     for where this gets called from.
 

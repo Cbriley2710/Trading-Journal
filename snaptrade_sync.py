@@ -4,7 +4,7 @@ SnapTrade Sync
 Pulls your Fidelity trade history straight from SnapTrade (a service
 that connects to your brokerage on your behalf) instead of you having
 to manually export and upload a CSV every time. See:
-  - pages/0_Import_Trades.py for the one-time "Register" and "Connect
+  - pages/5_Settings.py for the one-time "Register" and "Connect
     Fidelity" steps, and the "Sync Now" button.
   - snaptrade_daily_sync.py for the automatic version of that same
     sync, run once a day after market close.

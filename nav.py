@@ -30,7 +30,6 @@ import database
 # button be renamed without breaking "which page am I on" tracking.
 PAGES = [
     ("dashboard", "Dashboard", "dashboard.py"),
-    ("import_trades", "Import Trades", "pages/0_Import_Trades.py"),
     ("trade_analyzer", "Trade Analyzer", "pages/1_Trade_Analyzer.py"),
     ("shortlist", "Shortlist", "pages/2_Shortlist.py"),
     ("open_positions", "Open Positions", "pages/4_Open_Positions.py"),
