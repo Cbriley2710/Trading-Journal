@@ -115,12 +115,15 @@ def render_trade_chart(conn, trade, key_prefix, anchor_id=None, timeframe_label=
     radio in its usual spot right above the chart, which the plain
     single-trade view below still does.
 
-    Returns (timeframe_label, settings, chart_rendered) - the caller
-    needs `timeframe_label`/`settings` to capture a matching snapshot
-    via charting.build_trade_review_snapshot() when "Save this
-    timeframe" is clicked, and `chart_rendered` (False when there's no
+    Returns (timeframe_label, settings, chart_rendered, view_range) -
+    the caller needs `timeframe_label`/`settings` to capture a matching
+    snapshot via charting.build_trade_review_snapshot() when "Save this
+    timeframe" is clicked, `chart_rendered` (False when there's no
     price data) to know whether to skip straight past the review
-    controls instead of showing them against a chart that isn't there.
+    controls instead of showing them against a chart that isn't there,
+    and `view_range` (see charting.render_interactive_chart()) so that
+    same snapshot can match wherever the chart's actually been panned/
+    zoomed to instead of always resetting to the default view.
     """
     if timeframe_label is None:
         timeframe_options = list(charting.TIMEFRAMES.keys())
@@ -139,7 +142,9 @@ def render_trade_chart(conn, trade, key_prefix, anchor_id=None, timeframe_label=
     # on the chart reveals real history instead of hitting an empty
     # edge immediately.
     visible_start = trade["entry_date"] - timedelta(days=padding_days)
-    visible_end = trade["date"] + timedelta(days=padding_days)
+    # + right_margin_timedelta() so the last real candle doesn't sit
+    # jammed against the right edge of the chart - see its own docstring.
+    visible_end = trade["date"] + timedelta(days=padding_days) + charting.right_margin_timedelta(interval)
 
     fetch_padding_days = padding_days * charting.FETCH_BUFFER_MULTIPLIER
     wide_start = trade["entry_date"] - timedelta(days=fetch_padding_days)
@@ -159,7 +164,7 @@ def render_trade_chart(conn, trade, key_prefix, anchor_id=None, timeframe_label=
 
     if history.empty:
         st.warning(charting.history_error_message(history, trade["symbol"]))
-        return timeframe_label, settings, False
+        return timeframe_label, settings, False, None
 
     overlay_history = None
     if settings["overlay_symbol"]:
@@ -187,7 +192,8 @@ def render_trade_chart(conn, trade, key_prefix, anchor_id=None, timeframe_label=
     fig, fit_payload = charting.build_figure(
         trade["symbol"], history, entry_point, settings, overlay_history, interval=interval,
         visible_range=(visible_start, visible_end), drawings=saved_drawings, bake_arrow_traces=False)
-    current_drawings = charting.render_interactive_chart(fig, fit_payload, saved_drawings, key=key_prefix)
+    chart_result = charting.render_interactive_chart(fig, fit_payload, saved_drawings, key=key_prefix)
+    current_drawings = chart_result["drawings"]
 
     # Only writes to the database when something's actually different
     # from what's saved - see pages/2_Shortlist.py's own
@@ -195,7 +201,7 @@ def render_trade_chart(conn, trade, key_prefix, anchor_id=None, timeframe_label=
     if current_drawings != saved_drawings:
         database.save_drawings(conn, trade["symbol"], current_drawings)
 
-    return timeframe_label, settings, True
+    return timeframe_label, settings, True, chart_result["view_range"]
 
 
 # --- Review Session ---------------------------------------------------
@@ -372,7 +378,7 @@ def render_review_session(conn):
     timeframe_options = list(charting.TIMEFRAMES.keys())
     timeframe_label = st.session_state.get(timeframe_key, "Daily")
 
-    _timeframe_label, settings, chart_rendered = render_trade_chart(
+    _timeframe_label, settings, chart_rendered, current_view_range = render_trade_chart(
         conn, trade, key_prefix, anchor_id=anchor_id, timeframe_label=timeframe_label)
 
     if should_scroll:
@@ -399,10 +405,14 @@ def render_review_session(conn):
     notes_col, timeframe_col, buttons_col = st.columns([3, 1, 1])
 
     if timeframe_col.button("📸 Save this timeframe", key=f"{key_prefix}_capture"):
+        # Passing current_view_range means this captures wherever the
+        # chart's actually been panned/zoomed to (if at all) instead of
+        # always resetting to the default entry/exit-date-derived view -
+        # see charting.build_trade_review_snapshot()'s own docstring.
         with st.spinner(f"Saving {timeframe_label.lower()} snapshot..."):
             snapshot = charting.build_trade_review_snapshot(
                 trade["symbol"], trade["entry_date"], trade["date"], trade["buy_price"], trade["sell_price"],
-                trade["direction"], timeframe_label, settings)
+                trade["direction"], timeframe_label, settings, view_range_override=current_view_range)
         if snapshot is not None:
             pending[timeframe_label] = snapshot
         else:
@@ -654,6 +664,6 @@ else:
     render_trade_facts(conn, trade)
     st.divider()
 
-    _timeframe_label, _settings, chart_rendered = render_trade_chart(conn, trade, "trade_analyzer")
+    _timeframe_label, _settings, chart_rendered, _view_range = render_trade_chart(conn, trade, "trade_analyzer")
     if not chart_rendered:
         st.stop()

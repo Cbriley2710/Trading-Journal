@@ -182,15 +182,24 @@ def _component_theme_colors():
     return colors
 
 # Timeframes offered, and the default VISIBLE calendar-day window when
-# the chart first opens (30 Min/Hourly 5 days, Daily 120, Weekly ~2
-# years, Monthly a year) - a coarser timeframe needs much more of a window to
+# the chart first opens (30 Min 8 days, Hourly 15, Daily 120, Weekly
+# ~2 years, Monthly a year) - a coarser timeframe needs much more of a window to
 # show a meaningful number of bars. There's no user-adjustable slider for
 # this anymore - scroll-to-zoom on the chart itself replaces it. This is
 # NOT how much data gets fetched - see FETCH_BUFFER_MULTIPLIER below -
 # just what's shown by default before you zoom/pan.
 TIMEFRAMES = {
-    "30 Min": ("30m", 5),
-    "Hourly": ("1h", 5),
+    # 30 Min's padding is deliberately smaller than Hourly's - Yahoo
+    # Finance hard-caps 30-minute data at 60 days back from TODAY (all
+    # or nothing, not a graceful truncation - confirmed directly), and
+    # this padding feeds into how far back the fetch window reaches
+    # (see FETCH_BUFFER_MULTIPLIER/LOOKBACK_DAYS_PER_PERIOD below), so
+    # too generous a number here makes 30-min charts go completely
+    # empty for any trade older than just a week or two. 8 keeps a
+    # trade up to ~30 days old safely inside that 60-day budget; Hourly
+    # has a much bigger 730-day budget, so 15 there is no real risk.
+    "30 Min": ("30m", 8),
+    "Hourly": ("1h", 15),
     "Daily": ("1d", 120),
     "Weekly": ("1wk", 720),
     "Monthly": ("1mo", 365),
@@ -212,6 +221,22 @@ FETCH_BUFFER_MULTIPLIER = 3
 # Rough calendar-days-per-bar for each timeframe, with some buffer for
 # weekends/holidays/off-hours.
 LOOKBACK_DAYS_PER_PERIOD = {"30m": 0.125, "1h": 0.25, "1d": 1.6, "1wk": 8, "1mo": 32}
+
+# How many blank candle-widths of room to leave after the last real bar
+# when a chart first opens, so it doesn't sit jammed against the right
+# edge - a fixed CANDLE count rather than a fixed number of days, since
+# how many calendar days that works out to varies a lot by timeframe
+# (10 daily candles is 2 weeks; 10 monthly candles is most of a year).
+RIGHT_MARGIN_CANDLES = 10
+
+
+def right_margin_timedelta(interval):
+    """The extra calendar-day span RIGHT_MARGIN_CANDLES actually works
+    out to for a given interval - add this to whatever a chart's own
+    visible_end would otherwise be. Reuses LOOKBACK_DAYS_PER_PERIOD's
+    existing calendar-days-per-bar figures rather than a second set of
+    numbers that could drift out of sync with those."""
+    return timedelta(days=RIGHT_MARGIN_CANDLES * LOOKBACK_DAYS_PER_PERIOD[interval])
 
 # Used by the nightly archive script, which has no interactive toolbar to
 # pull settings from - a plain, consistent snapshot for every ticker.
@@ -810,7 +835,10 @@ def build_archive_snapshot(symbol, entry_date, buy_price, entry_label, as_of, di
     return render_png(fig)
 
 
-def build_trade_review_snapshot(symbol, entry_date, exit_date, buy_price, sell_price, direction, timeframe_label, settings):
+def build_trade_review_snapshot(
+    symbol, entry_date, exit_date, buy_price, sell_price, direction, timeframe_label, settings,
+    view_range_override=None,
+):
     """
     Builds a chart snapshot for the Trade Review Session (see
     pages/1_Trade_Analyzer.py), at whichever timeframe was on screen
@@ -834,24 +862,45 @@ def build_trade_review_snapshot(symbol, entry_date, exit_date, buy_price, sell_p
     per snapshot. Saved drawings for the symbol ARE included, same as
     every other chart in this app. Returns PNG bytes, or None if no
     price data was found for this timeframe/window.
+
+    `view_range_override`, if given, is a (visible_start, visible_end)
+    pair of real datetimes - whatever the interactive chart's OWN
+    x-axis range currently is (see render_interactive_chart()'s
+    "view_range" in its returned dict) - used INSTEAD of the usual
+    entry/exit-date-derived default below. This is what lets "Save this
+    timeframe" (pages/1_Trade_Analyzer.py's Review Session) capture
+    wherever you've actually panned/zoomed to, rather than always
+    resetting to the default view.
     """
     conn = database.get_connection()
     drawings = database.get_drawings(conn, symbol)
 
     interval, padding_days = TIMEFRAMES[timeframe_label]
-    visible_start = entry_date - timedelta(days=padding_days)
-    visible_end = exit_date + timedelta(days=padding_days)
-
-    # Fetched (not necessarily DISPLAYED - see below) starting this much
-    # further back, so the longest selected moving average already has
-    # a full real warm-up window by the time visible_start begins,
-    # instead of only "warming up" partway through the visible chart.
-    fetch_padding_days = padding_days * FETCH_BUFFER_MULTIPLIER
-    wide_start = entry_date - timedelta(days=fetch_padding_days)
-
     max_ma_period = max(settings["ma_periods"], default=0)
     lookback_days = max_ma_period * LOOKBACK_DAYS_PER_PERIOD[interval]
-    fetch_start = wide_start - timedelta(days=lookback_days)
+
+    if view_range_override is not None:
+        visible_start, visible_end = view_range_override
+        # No FETCH_BUFFER_MULTIPLIER-wide fetch needed here - that
+        # buffer exists to support panning/zooming a FRESH default view
+        # on the interactive chart; this is reproducing an already-
+        # chosen view for a static image, so only real moving-average
+        # warm-up before visible_start is needed, nothing wider.
+        fetch_start = visible_start - timedelta(days=lookback_days)
+    else:
+        visible_start = entry_date - timedelta(days=padding_days)
+        # + right_margin_timedelta() so the last real candle doesn't sit
+        # jammed against the right edge of the chart - see its own docstring.
+        visible_end = exit_date + timedelta(days=padding_days) + right_margin_timedelta(interval)
+
+        # Fetched (not necessarily DISPLAYED - see below) starting this
+        # much further back, so the longest selected moving average
+        # already has a full real warm-up window by the time
+        # visible_start begins, instead of only "warming up" partway
+        # through the visible chart.
+        fetch_padding_days = padding_days * FETCH_BUFFER_MULTIPLIER
+        wide_start = entry_date - timedelta(days=fetch_padding_days)
+        fetch_start = wide_start - timedelta(days=lookback_days)
 
     # Trimmed to just outside the visible window here (a 1-day margin,
     # not all the way out to wide_start/FETCH_BUFFER_MULTIPLIER) - this
@@ -1494,17 +1543,28 @@ def render_interactive_chart(fig, fit_payload, drawings, key):
     (see chart_component/index.html and this module's own
     _chart_component declaration up top) - a real bidirectional
     Streamlit component, not a plain st.iframe embed, since drawing
-    tools need to send data back to Python (what you drew), which a
-    plain iframe has no way to do.
+    tools (and the current pan/zoom position - see below) need to send
+    data back to Python, which a plain iframe has no way to do.
 
     `drawings` is this symbol's current saved shapes (see
     database.get_drawings()) - baked into the chart on load via
     build_figure()'s own `drawings` parameter, and editable from there
-    (move/resize/erase existing ones, or add new). Returns the drawings
-    list reflecting whatever's on the chart right now; it's the
-    CALLER's job to compare that against what's saved and call
+    (move/resize/erase existing ones, or add new).
+
+    Returns {"drawings": [...], "view_range": (start, end) datetimes or
+    None}. `drawings` reflects whatever's on the chart right now; it's
+    the CALLER's job to compare that against what's saved and call
     database.save_drawings() if it's different - this function only
     renders and reports, it doesn't decide when to persist anything.
+    `view_range` is the chart's current x-axis range (None until the
+    component's first report arrives, or if the user hasn't panned/
+    zoomed) - lets a caller capture "whatever's on screen right now"
+    (see pages/1_Trade_Analyzer.py's Review Session "Save this
+    timeframe") instead of always re-deriving a fresh default view.
+    Parsed here (the raw values from the browser are date strings,
+    not always the same format Python's own datetime.fromisoformat()
+    can parse pre-3.11) so every caller gets plain datetimes, not one
+    more string format to handle itself.
 
     `key` must be unique per chart on the page, same rules as any other
     Streamlit widget key.
@@ -1516,6 +1576,11 @@ def render_interactive_chart(fig, fit_payload, drawings, key):
         chart_signature=_chart_signature(fig),
         colors=_component_theme_colors(),
         key=key,
-        default=drawings,
+        default={"drawings": drawings, "view_range": None},
     )
-    return result
+    raw_range = result.get("view_range")
+    view_range = (
+        (pd.Timestamp(raw_range[0]).to_pydatetime(), pd.Timestamp(raw_range[1]).to_pydatetime())
+        if raw_range else None
+    )
+    return {"drawings": result.get("drawings", []), "view_range": view_range}

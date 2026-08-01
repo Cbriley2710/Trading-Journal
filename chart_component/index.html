@@ -98,6 +98,14 @@ ported over unchanged - drawing tools are additive, not a replacement.
     var figure = null, fitPayload = null, drawings = [];
     var lastSignature = null;
 
+    // The chart's current x-axis range (whatever the user has panned/
+    // zoomed to), kept in sync by the plotly_relayout listener below and
+    // included in every report back to Python (see reportDrawings()) -
+    // so a caller that wants "capture whatever's on screen right now"
+    // (the Review Session's "Save this timeframe") has it, without a
+    // separate round-trip.
+    var currentXRange = null;
+
     // ---- Theme colors - see this file's own header comment. Defaults
     // here match the <style> block's :root fallback; both get replaced
     // by charting.py's actual palette (via applyTheme() below) as soon
@@ -179,7 +187,10 @@ ported over unchanged - drawing tools are additive, not a replacement.
     var reportPending = null;
     function reportDrawings() {
         if (reportPending) { clearTimeout(reportPending); reportPending = null; }
-        sendToStreamlit("streamlit:setComponentValue", {value: currentDrawingsList(), dataType: "json"});
+        sendToStreamlit("streamlit:setComponentValue", {
+            value: {drawings: currentDrawingsList(), view_range: currentXRange},
+            dataType: "json",
+        });
     }
     function reportDrawingsDebounced() {
         if (reportPending) clearTimeout(reportPending);
@@ -491,6 +502,11 @@ ported over unchanged - drawing tools are additive, not a replacement.
             if (initialRange && initialRange.length === 2) {
                 fitYAxes(new Date(initialRange[0]).getTime(), new Date(initialRange[1]).getTime());
             }
+            // A brand new chart_signature (new symbol/timeframe/settings)
+            // means a fresh default view, not whatever was panned/zoomed
+            // to before - reset the tracked range to match, so a stale
+            // range from a PREVIOUS timeframe never leaks into this one.
+            currentXRange = initialRange;
 
             arrowUpIndex = null;
             arrowDownIndex = null;
@@ -568,6 +584,8 @@ ported over unchanged - drawing tools are additive, not a replacement.
                 if (eventData["xaxis.range[0]"] !== undefined && eventData["xaxis.range[1]"] !== undefined) {
                     var xmin = new Date(eventData["xaxis.range[0]"]).getTime();
                     var xmax = new Date(eventData["xaxis.range[1]"]).getTime();
+                    currentXRange = [eventData["xaxis.range[0]"], eventData["xaxis.range[1]"]];
+                    reportDrawingsDebounced();
                     if (pending) clearTimeout(pending);
                     pending = setTimeout(function() { fitYAxes(xmin, xmax); }, 120);
                 } else if (eventData["xaxis.autorange"]) {

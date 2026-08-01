@@ -102,10 +102,15 @@ def render_price_chart(conn, symbol, entry_point, entry_label, key_prefix, stop_
     # The chart opens showing just this default window (visible_start
     # through today), but fetches further back than that (wide_start -
     # see FETCH_BUFFER_MULTIPLIER) so scrolling/zooming out reveals real
-    # history instead of hitting an empty edge immediately. There's no
-    # future data to extend into on the right, so that side is unchanged.
+    # history instead of hitting an empty edge immediately. The extra
+    # right_margin_timedelta() past today is blank (no future data
+    # exists to fill it) - that's the point, so today's candle doesn't
+    # sit jammed against the right edge of the chart.
     visible_start = entry_point["entry_date"] - timedelta(days=padding_days)
-    display_end = datetime.combine(timeutil.today_eastern(), datetime.min.time()) + timedelta(days=1)
+    display_end = (
+        datetime.combine(timeutil.today_eastern(), datetime.min.time())
+        + timedelta(days=1) + charting.right_margin_timedelta(interval)
+    )
 
     fetch_padding_days = padding_days * charting.FETCH_BUFFER_MULTIPLIER
     wide_start = entry_point["entry_date"] - timedelta(days=fetch_padding_days)
@@ -151,7 +156,7 @@ def render_price_chart(conn, symbol, entry_point, entry_label, key_prefix, stop_
         symbol, history, entry_point, settings, overlay_history, entry_label=entry_label, interval=interval,
         visible_range=(visible_start, display_end), stop_loss=stop_loss, drawings=saved_drawings,
         bake_arrow_traces=False)
-    current_drawings = charting.render_interactive_chart(fig, fit_payload, saved_drawings, key=key_prefix)
+    current_drawings = charting.render_interactive_chart(fig, fit_payload, saved_drawings, key=key_prefix)["drawings"]
 
     # Only writes to the database when the chart component reports
     # something actually different from what's saved - every pan/zoom
