@@ -252,6 +252,12 @@ with tab_reviews:
         report_detail = database.get_review_report(conn, selected_report_summary["id"])
         if not report_detail["reviews"]:
             st.caption("Nothing was saved in this report.")
+
+        if report_detail["predictions_notes"]:
+            st.caption("Before You Begin")
+            st.write(report_detail["predictions_notes"])
+            st.divider()
+
         # Fetched once outside the loop below - same Jan 1 baseline every
         # review in this report would divide by, see trade_stats()'s own
         # docstring for why this (not today's fully-calculated account
@@ -296,3 +302,7 @@ with tab_reviews:
                 st.caption("No chart snapshots were saved for this trade.")
             st.write(review["notes"] if review["notes"] else "_No notes recorded for this trade._")
             st.divider()
+
+        if report_detail["reflections_notes"]:
+            st.caption("Reflections")
+            st.write(report_detail["reflections_notes"])

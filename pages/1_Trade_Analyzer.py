@@ -269,28 +269,68 @@ def _advance_review_session(conn, session):
     st.rerun()
 
 
+def _render_review_intro(conn, session):
+    """The Review Session's opening journal entry, shown once before
+    the first trade - "predictions_notes" being NULL is what signals
+    this hasn't been written yet (see database.get_review_report()),
+    so resuming an in-progress session never asks again."""
+    st.subheader("Before You Begin")
+    with st.form(key="review_intro_form", clear_on_submit=True, border=False):
+        notes = st.text_area(
+            "How do you feel about the upcoming review session, and what are your predictions?",
+            height=100, key="review_intro_notes",
+        )
+        if st.form_submit_button("Continue →", type="primary"):
+            database.save_review_predictions_notes(conn, session["report_id"], notes)
+            st.rerun()
+
+
+def _render_review_outro(conn, session, trade_count):
+    """The Review Session's closing journal entry, shown once after the
+    last trade (only when at least one trade was actually saved - see
+    caller) - same NULL-means-not-written-yet signal as the intro
+    above."""
+    st.subheader("Reflections")
+    with st.form(key="review_outro_form", clear_on_submit=True, border=False):
+        notes = st.text_area("Reflections", height=100, key="review_outro_notes")
+        if st.form_submit_button("Finish →", type="primary"):
+            database.save_review_reflections_notes(conn, session["report_id"], notes)
+            st.rerun()
+
+
 def render_review_session(conn):
     """
     The guided Review Session: walks through every checked trade one at
     a time, full-screen, so reviewing all of them in one sitting is
     click-write-Save & Next instead of hunting for the next trade to
     look at every time. Mirrors pages/2_Shortlist.py's
-    render_journal_session() closely.
+    render_journal_session() closely. Bookended by a one-time journal
+    entry before the first trade and after the last (see
+    _render_review_intro()/_render_review_outro() above).
     """
     session = st.session_state["review_session"]
     queue, index = session["queue"], session["index"]
 
+    report = database.get_review_report(conn, session["report_id"])
+    if report["predictions_notes"] is None:
+        _render_review_intro(conn, session)
+        return
+
     if index >= len(queue):
-        database.clear_review_session_progress(conn)
-        report = database.get_review_report(conn, session["report_id"])
-        trade_count = len(report["reviews"]) if report else 0
+        trade_count = len(report["reviews"])
         if trade_count == 0:
             # Every trade in the queue was Skipped - nothing worth
             # keeping, so don't leave an empty report cluttering the
-            # Logbook's Trade Reviews list.
+            # Logbook's Trade Reviews list. No point asking for
+            # Reflections on a session with nothing reviewed in it.
+            database.clear_review_session_progress(conn)
             database.delete_review_report(conn, session["report_id"])
             st.info("Session ended - nothing was saved, so no report was kept.")
+        elif report["reflections_notes"] is None:
+            _render_review_outro(conn, session, trade_count)
+            return
         else:
+            database.clear_review_session_progress(conn)
             st.success(
                 f"Review complete - {trade_count} trade(s) saved. "
                 "See the Logbook page's Trade Reviews section to browse or email it."

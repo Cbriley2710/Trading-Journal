@@ -487,6 +487,17 @@ def init_db(conn):
             sent_at TIMESTAMP
         )
     """)
+    # A journal entry before the first trade ("how do you feel about
+    # this session, what are your predictions?") and one after the
+    # last ("Reflections") - see render_review_session()'s intro/outro
+    # screens. NULL means "not written yet", which is exactly the
+    # signal that function uses to decide whether to show that prompt
+    # at all (so resuming a session, or re-opening a finished report
+    # on the Logbook page, doesn't ask again).
+    if not _column_exists(cur, "trade_review_reports", "predictions_notes"):
+        cur.execute("ALTER TABLE trade_review_reports ADD COLUMN predictions_notes TEXT")
+    if not _column_exists(cur, "trade_review_reports", "reflections_notes"):
+        cur.execute("ALTER TABLE trade_review_reports ADD COLUMN reflections_notes TEXT")
     # One reviewed trade within a report. Deliberately NOT a foreign key
     # into `trades.id` - rebuild_trades() (run after every import) does a
     # full DELETE + re-insert of that whole table, regenerating fresh
@@ -1264,6 +1275,31 @@ def create_review_report(conn, range_start, range_end):
     return report_id
 
 
+def save_review_predictions_notes(conn, report_id, notes):
+    """Saves the Review Session's opening journal entry ("how do you
+    feel about this session, what are your predictions?") - written
+    once, before the first trade. See render_review_session()'s intro
+    screen."""
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE trade_review_reports SET predictions_notes = %s WHERE id = %s",
+        (notes, report_id),
+    )
+    conn.commit()
+
+
+def save_review_reflections_notes(conn, report_id, notes):
+    """Saves the Review Session's closing journal entry ("Reflections") -
+    written once, after the last trade. See render_review_session()'s
+    outro screen."""
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE trade_review_reports SET reflections_notes = %s WHERE id = %s",
+        (notes, report_id),
+    )
+    conn.commit()
+
+
 def delete_review_report(conn, report_id):
     """Deletes a Trade Review Report and everything under it (cascades
     to its trade_reviews and their trade_review_snapshots) - used when a
@@ -1342,6 +1378,7 @@ def get_review_report(conn, report_id):
     """
     Returns one Trade Review Report's full detail:
     {"id", "created_at", "range_start", "range_end", "sent_at",
+    "predictions_notes", "reflections_notes",
     "reviews": [{"symbol", "entry_date", "exit_date", "direction",
     "notes", "reviewed_at", "buy_price", "sell_price", "quantity",
     "profit_loss", "snapshots": {timeframe: chart_image}}, ...]}
@@ -1352,7 +1389,10 @@ def get_review_report(conn, report_id):
     """
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, created_at, range_start, range_end, sent_at FROM trade_review_reports WHERE id = %s",
+        """
+        SELECT id, created_at, range_start, range_end, sent_at, predictions_notes, reflections_notes
+        FROM trade_review_reports WHERE id = %s
+        """,
         (report_id,),
     )
     report_row = cur.fetchone()
@@ -1382,6 +1422,7 @@ def get_review_report(conn, report_id):
     return {
         "id": report_row[0], "created_at": report_row[1], "range_start": report_row[2],
         "range_end": report_row[3], "sent_at": report_row[4],
+        "predictions_notes": report_row[5], "reflections_notes": report_row[6],
         "reviews": [
             {
                 "symbol": row[1], "entry_date": row[2], "exit_date": row[3], "direction": row[4],

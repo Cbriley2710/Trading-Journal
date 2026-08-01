@@ -174,9 +174,34 @@ def build_review_report_pdf(conn, report_id):
         new_x="LMARGIN", new_y="NEXT",
     )
 
+    # The session's opening journal entry (see database.
+    # save_review_predictions_notes()) - on the cover page rather than
+    # its own page, since it's a quick "how did I feel going in" note,
+    # not something that needs a whole page the way Reflections does.
+    if report["predictions_notes"]:
+        pdf.ln(4)
+        pdf.set_text_color(*MUTED_TEXT_RGB)
+        pdf.set_font("Helvetica", style="I", size=11)
+        pdf.cell(0, 7, safe_text("Before You Begin"), new_x="LMARGIN", new_y="NEXT")
+        pdf.set_text_color(*TEXT_COLOR_RGB)
+        pdf.multi_cell(0, 7, safe_text(report["predictions_notes"]))
+
     jan1_balance = database.get_account_value(conn)
     for review in report["reviews"]:
         _write_trade_review_page(pdf, review, jan1_balance)
+
+    # The session's closing journal entry (see database.
+    # save_review_reflections_notes()) - its own page at the end, same
+    # treatment as a per-trade review page, since it's meant to be a
+    # real look-back over the whole session, not a quick aside.
+    if report["reflections_notes"]:
+        pdf.add_page()
+        pdf.set_text_color(*TEXT_COLOR_RGB)
+        pdf.set_font("Helvetica", style="B", size=18)
+        pdf.cell(0, 11, safe_text("Reflections"), new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(4)
+        pdf.set_font("Helvetica", style="I", size=12)
+        pdf.multi_cell(0, 7, safe_text(report["reflections_notes"]))
 
     return bytes(pdf.output())
 
