@@ -166,6 +166,16 @@ def init_db(conn):
             UNIQUE (date, symbol, action, price, quantity)
         )
     """)
+    # Which importer produced this row ("csv" or "snaptrade") - added
+    # after `transactions` already existed, so CREATE TABLE IF NOT
+    # EXISTS above won't retroactively add it (guarded like the other
+    # migrations here). Existing rows stay NULL ("unknown origin") -
+    # see _insert_transactions()'s is_duplicate() for why that's the
+    # safe default rather than guessing.
+    if not _column_exists(cur, "transactions", "source"):
+        cur.execute("""
+            ALTER TABLE transactions ADD COLUMN source TEXT
+        """)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS trades (
             id SERIAL PRIMARY KEY,
@@ -514,7 +524,7 @@ def init_db(conn):
 def _insert_transactions(conn, transactions):
     """
     Adds any of these normalized transaction dicts ({"date", "symbol",
-    "action", "price", "quantity"} - see analyze_trades.load_
+    "action", "price", "quantity", "source"} - see analyze_trades.load_
     transactions()) that aren't already stored. Shared by every import
     path (CSV upload, SnapTrade sync) so there's exactly one place
     that knows how a transaction gets deduplicated and inserted.
@@ -530,10 +540,24 @@ def _insert_transactions(conn, transactions):
          of the same execution - which is close enough to defeat #1's
          exact match, and would otherwise double-count that trade
          (inflating a position's share count) every time it shows up
-         from a second source. So a row is also treated as a duplicate
-         whenever an existing one already matches on date/symbol/
-         action/quantity and its price is within a cent (or 0.2%,
-         whichever is bigger, for pricier stocks).
+         from a second source. So a row is ALSO treated as a duplicate
+         whenever an existing row from a DIFFERENT source already
+         matches on date/symbol/action/quantity and its price is within
+         a cent (or 0.2%, whichever is bigger, for pricier stocks).
+
+    That fuzzy price check in #2 is deliberately source-aware (only
+    kicks in when the two rows come from different places - "csv" vs
+    "snaptrade") - it used to apply no matter where either row came
+    from, which meant two genuinely SEPARATE fills from the SAME
+    source (e.g. one order filled in two 100-share chunks a few cents
+    apart, which is completely normal) could get mistaken for "the same
+    fill reported twice" and one of them silently thrown away forever -
+    confirmed happening for real (a 500-share sale where only 400
+    shares of matching buys survived, permanently losing 100 shares of
+    profit/loss). Within a single source (or when either row's source
+    isn't known - see init_db's migration note on this column), a real
+    duplicate report of the same execution would carry the exact same
+    price, not just a close one, so an exact match is required instead.
 
     Since a CSV export always contains your FULL history, and a
     SnapTrade sync re-fetches a recent overlapping window every time
@@ -553,9 +577,10 @@ def _insert_transactions(conn, transactions):
     Returns how many new rows were actually added.
     """
     cur = conn.cursor()
-    cur.execute("SELECT date, symbol, action, price, quantity FROM transactions")
+    cur.execute("SELECT date, symbol, action, price, quantity, source FROM transactions")
     existing = [
-        {"date": row[0], "symbol": row[1], "action": row[2], "price": row[3], "quantity": row[4]}
+        {"date": row[0], "symbol": row[1], "action": row[2], "price": row[3],
+         "quantity": row[4], "source": row[5]}
         for row in cur.fetchall()
     ]
 
@@ -567,14 +592,27 @@ def _insert_transactions(conn, transactions):
         # have to be normalized the same way before comparing.
         return d.date() if isinstance(d, datetime) else d
 
-    def is_duplicate(t, others):
+    def same_fill(t, e):
         t_date = as_date(t["date"])
-        return any(
-            as_date(e["date"]) == t_date and e["symbol"] == t["symbol"]
-            and e["action"] == t["action"] and e["quantity"] == t["quantity"]
-            and abs(e["price"] - t["price"]) <= max(0.01, e["price"] * 0.002)
-            for e in others
-        )
+        if (as_date(e["date"]) != t_date or e["symbol"] != t["symbol"]
+                or e["action"] != t["action"] or e["quantity"] != t["quantity"]):
+            return False
+
+        if t["source"] and e["source"] and t["source"] != e["source"]:
+            # Different sources reporting what might be the same real
+            # fill - allow the small rounding-level price gap that
+            # comes from two platforms displaying the same execution
+            # slightly differently.
+            return abs(e["price"] - t["price"]) <= max(0.01, e["price"] * 0.002)
+
+        # Same source (or one/both unknown, e.g. rows from before this
+        # column existed) - two truly separate fills essentially never
+        # land on the identical price, so require an exact match rather
+        # than the loose tolerance above.
+        return e["price"] == t["price"]
+
+    def is_duplicate(t, others):
+        return any(same_fill(t, e) for e in others)
 
     to_insert = []
     for t in transactions:
@@ -594,12 +632,13 @@ def _insert_transactions(conn, transactions):
     inserted = execute_values(
         cur,
         """
-        INSERT INTO transactions (date, symbol, action, price, quantity)
+        INSERT INTO transactions (date, symbol, action, price, quantity, source)
         VALUES %s
         ON CONFLICT DO NOTHING
         RETURNING id
         """,
-        [(t["date"].date(), t["symbol"], t["action"], t["price"], t["quantity"]) for t in to_insert],
+        [(t["date"].date(), t["symbol"], t["action"], t["price"], t["quantity"], t["source"])
+         for t in to_insert],
         fetch=True,
     )
     conn.commit()

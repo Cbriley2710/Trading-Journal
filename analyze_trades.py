@@ -73,7 +73,12 @@ def load_transactions(filename):
 
     Returns a list of dictionaries, one per buy/sell, like:
         {"date": datetime, "symbol": "AAPL", "action": "BUY",
-         "price": 150.0, "quantity": 100}
+         "price": 150.0, "quantity": 100, "source": "csv"}
+    "source" tells database._insert_transactions() where this row came
+    from, so it knows when two close-but-not-identical prices are
+    worth treating as "the same fill, reported slightly differently" -
+    see that function's own docstring for why that only makes sense
+    when comparing two DIFFERENT sources.
     """
     transactions = []
 
@@ -115,6 +120,7 @@ def load_transactions(filename):
                 "action": trade_action,
                 "price": float(price),
                 "quantity": abs(float(quantity)),
+                "source": "csv",
             })
 
     return transactions
@@ -188,8 +194,8 @@ def load_transactions_schwab(filename):
 
     Returns the same shape as load_transactions(): a list of
     {"date": datetime, "symbol": ..., "action": "BUY"/"SELL"/"SELL_SHORT",
-     "price": float, "quantity": float} dictionaries - "SELL_SHORT" is
-    the one new action Fidelity's file never produces.
+     "price": float, "quantity": float, "source": "csv"} dictionaries -
+    "SELL_SHORT" is the one new action Fidelity's file never produces.
     """
     transactions = []
 
@@ -211,6 +217,7 @@ def load_transactions_schwab(filename):
                 "action": trade_action,
                 "price": float(price.replace("$", "").replace(",", "")),
                 "quantity": abs(float(quantity.replace(",", ""))),
+                "source": "csv",
             })
 
     return transactions

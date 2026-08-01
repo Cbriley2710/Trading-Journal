@@ -296,7 +296,7 @@ def fetch_activities(start_date, end_date):
     analyze_trades.py's load_transactions()/load_transactions_schwab()
     produce:
         {"date": datetime, "symbol": "AAPL", "action": "BUY",
-         "price": 150.0, "quantity": 100}
+         "price": 150.0, "quantity": 100, "source": "snaptrade"}
     so the result can go straight into database.py's shared insert
     helper alongside CSV-imported rows, with the exact same
     duplicate-safe behavior (see database._insert_transactions()).
@@ -357,6 +357,7 @@ def fetch_activities(start_date, end_date):
                     "action": row["type"],  # already "BUY" or "SELL", matching the CSV importers
                     "price": float(row["price"]),
                     "quantity": abs(float(row["units"])),
+                    "source": "snaptrade",
                 })
 
             if len(rows) < 1000:
