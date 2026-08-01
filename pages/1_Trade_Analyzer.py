@@ -374,6 +374,9 @@ def render_review_session(conn):
     # st.columns() calls, not one - which leaves a small gap above the
     # notes box, roughly this row's own height, since Streamlit lays
     # the form out as a new block below this one regardless of column.
+    # Kept to just a button + a single-line dropdown (a multi-row radio
+    # plus a caption made that gap noticeably bigger) to keep this row
+    # as short as this layout constraint allows.
     _, timeframe_col, _ = st.columns([3, 1, 1])
 
     if timeframe_col.button("📸 Save this timeframe", key=f"{key_prefix}_capture"):
@@ -386,15 +389,9 @@ def render_review_session(conn):
         else:
             st.warning(f"No price data available to save a {timeframe_label.lower()} snapshot right now.")
 
-    timeframe_col.radio(
+    timeframe_col.selectbox(
         "Timeframe", options=timeframe_options, index=timeframe_options.index(timeframe_label),
-        key=timeframe_key, horizontal=True)
-
-    if pending:
-        timeframe_col.caption(f"Captured: {', '.join(pending.keys())} (Daily is saved automatically too).")
-    else:
-        timeframe_col.caption(
-            'Daily is saved automatically - use "Save this timeframe" for any other timeframe worth keeping too.')
+        key=timeframe_key)
 
     if should_scroll:
         ui.focus_textarea("Trade Review Notes")
