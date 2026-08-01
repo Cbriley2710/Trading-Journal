@@ -338,6 +338,23 @@ def init_db(conn):
             amount DOUBLE PRECISION NOT NULL
         )
     """)
+    # One row per goal the user is actually tracking (see goals.py and
+    # pages/6_Goals.py) - `goal_key` is a GOAL_LIBRARY key (e.g.
+    # "win_rate"), not a foreign key into any table, since the library
+    # itself lives in Python code, not the database. A goal_key/
+    # timeframe no longer present in GOAL_LIBRARY (the code changed
+    # since this row was added) is handled at read time, not enforced
+    # here - see get_tracked_goals()'s own note.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS tracked_goals (
+            id SERIAL PRIMARY KEY,
+            goal_key TEXT NOT NULL,
+            timeframe TEXT NOT NULL,
+            target_value DOUBLE PRECISION NOT NULL,
+            comparison TEXT NOT NULL,
+            created_at TIMESTAMP NOT NULL
+        )
+    """)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS chart_drawings (
             id SERIAL PRIMARY KEY,
@@ -2130,4 +2147,60 @@ def mark_daily_report_generated(conn, report_date):
         """,
         (report_date, timeutil.now_eastern()),
     )
+    conn.commit()
+
+
+def get_tracked_goals(conn):
+    """
+    Every goal currently being tracked (see pages/6_Goals.py), oldest
+    first, as {"id", "goal_key", "timeframe", "target_value",
+    "comparison"} dictionaries. Not joined against goals.GOAL_LIBRARY
+    here - a row whose goal_key/timeframe no longer matches anything in
+    the library (the code changed since it was added) is still
+    returned as-is; it's the PAGE's job to notice that and show it as
+    stale rather than this function silently hiding it.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, goal_key, timeframe, target_value, comparison FROM tracked_goals ORDER BY created_at"
+    )
+    return [
+        {"id": row[0], "goal_key": row[1], "timeframe": row[2], "target_value": row[3], "comparison": row[4]}
+        for row in cur.fetchall()
+    ]
+
+
+def add_tracked_goal(conn, goal_key, timeframe, target_value, comparison):
+    """Starts tracking one goal - see get_tracked_goals() for the shape
+    this later comes back as."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO tracked_goals (goal_key, timeframe, target_value, comparison, created_at)
+        VALUES (%s, %s, %s, %s, %s)
+        """,
+        (goal_key, timeframe, target_value, comparison, timeutil.now_eastern()),
+    )
+    conn.commit()
+
+
+def update_tracked_goal(conn, goal_id, target_value, comparison):
+    """Changes an already-tracked goal's target/comparison in place -
+    used when you want to raise the bar on a goal without losing its
+    history of being tracked (re-adding it would look identical today,
+    but this is clearer about what actually happened)."""
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE tracked_goals SET target_value = %s, comparison = %s WHERE id = %s",
+        (target_value, comparison, goal_id),
+    )
+    conn.commit()
+
+
+def delete_tracked_goal(conn, goal_id):
+    """Stops tracking one goal - permanent, no undo (nothing else in
+    the database references a tracked goal, so there's nothing else to
+    clean up alongside it)."""
+    cur = conn.cursor()
+    cur.execute("DELETE FROM tracked_goals WHERE id = %s", (goal_id,))
     conn.commit()

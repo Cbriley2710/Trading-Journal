@@ -27,7 +27,8 @@ import json
 import math
 import re
 import time
-from datetime import time, timedelta
+from datetime import date, timedelta
+from datetime import time as dtime
 from pathlib import Path
 
 import pandas as pd
@@ -617,6 +618,47 @@ def fetch_latest_price(symbol):
         return None if recent.empty else recent["Close"].iloc[-1]
 
 
+def get_calculated_account_value(conn):
+    """
+    Today's account value, built up from the Jan 1 baseline (database.
+    get_account_value()) plus everything that's happened since:
+    deposits, closed-trade P/L, and every open position's unrealized
+    P/L right now - rather than needing the real number typed in and
+    kept up to date by hand. Returns None if no Jan 1 baseline has been
+    set yet (database.set_account_value()).
+
+    Extracted from what used to be dashboard.py's own inline
+    calculation (its Account Performance section) so goals.py's
+    "Account Growth" goal computes this exactly the same way, instead
+    of a second copy of this math drifting apart from the original.
+    Always anchored at Jan 1 specifically - not a general "value as of
+    any date" function, since unrealized P/L only means anything for
+    RIGHT NOW (a past date's open positions would need historical
+    prices this app doesn't track - see project notes on why a true
+    historical account-value curve isn't built yet).
+    """
+    jan1_balance = database.get_account_value(conn)
+    if not jan1_balance:
+        return None
+
+    jan1_date = date(timeutil.today_eastern().year, 1, 1)
+    deposits = database.get_deposits(conn)
+    deposits_this_year = sum(d["amount"] for d in deposits if d["deposit_date"] >= jan1_date)
+    realized_pl_this_year = database.get_realized_pl_since(conn, jan1_date)
+
+    total_unrealized_pl_now = 0.0
+    for position in database.get_open_positions(conn):
+        current_price = fetch_latest_price(position["symbol"])
+        if current_price is None:
+            continue
+        cost_basis = position["avg_price"] * position["quantity"]
+        current_value = current_price * position["quantity"]
+        is_short = position["direction"] == "SHORT"
+        total_unrealized_pl_now += (cost_basis - current_value) if is_short else (current_value - cost_basis)
+
+    return jan1_balance + deposits_this_year + realized_pl_this_year + total_unrealized_pl_now
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_daily_closes(symbol, start, end):
     """
@@ -1069,7 +1111,7 @@ def _format_trade_moment(dt):
     trade essentially never executes at literally 00:00:00, so that's
     used as the signal that no genuine time is known here, rather than
     tracking a separate has-time flag alongside every date."""
-    if dt.time() == time(0, 0):
+    if dt.time() == dtime(0, 0):
         return f"{dt:%b %d, %Y}"
     return f"{dt:%b %d, %Y %I:%M %p}"
 

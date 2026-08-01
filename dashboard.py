@@ -69,30 +69,20 @@ conn = database.get_connection()
 # year - see the Account Settings expander at the bottom of this page)
 # plus everything that's happened since: deposits, closed-trade P/L, and
 # open positions' unrealized P/L right now. Dollar figures further down
-# this page are shown as a % of this calculated value.
+# this page are shown as a % of this calculated value. The actual math
+# lives in charting.get_calculated_account_value() now (shared with
+# goals.py's "Account Growth" goal), not duplicated here.
 jan1_balance = database.get_account_value(conn)
 deposits = database.get_deposits(conn)
 jan1_date = date(timeutil.today_eastern().year, 1, 1)
 deposits_this_year = sum(d["amount"] for d in deposits if d["deposit_date"] >= jan1_date)
 realized_pl_this_year = database.get_realized_pl_since(conn, jan1_date)
 
-total_unrealized_pl_now = 0.0
 if jan1_balance:
-    open_positions_now = database.get_open_positions(conn)
-    if open_positions_now:
-        with st.spinner("Fetching current prices for account value..."):
-            for position in open_positions_now:
-                current_price = charting.fetch_latest_price(position["symbol"])
-                if current_price is None:
-                    continue
-                cost_basis = position["avg_price"] * position["quantity"]
-                current_value = current_price * position["quantity"]
-                is_short = position["direction"] == "SHORT"
-                total_unrealized_pl_now += (cost_basis - current_value) if is_short else (current_value - cost_basis)
-
-account_value = (
-    jan1_balance + deposits_this_year + realized_pl_this_year + total_unrealized_pl_now
-) if jan1_balance else None
+    with st.spinner("Fetching current prices for account value..."):
+        account_value = charting.get_calculated_account_value(conn)
+else:
+    account_value = None
 
 st.divider()
 
