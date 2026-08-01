@@ -842,15 +842,31 @@ def build_trade_review_snapshot(symbol, entry_date, exit_date, buy_price, sell_p
     visible_start = entry_date - timedelta(days=padding_days)
     visible_end = exit_date + timedelta(days=padding_days)
 
+    # Fetched (not necessarily DISPLAYED - see below) starting this much
+    # further back, so the longest selected moving average already has
+    # a full real warm-up window by the time visible_start begins,
+    # instead of only "warming up" partway through the visible chart.
     fetch_padding_days = padding_days * FETCH_BUFFER_MULTIPLIER
     wide_start = entry_date - timedelta(days=fetch_padding_days)
-    wide_end = exit_date + timedelta(days=fetch_padding_days)
 
     max_ma_period = max(settings["ma_periods"], default=0)
     lookback_days = max_ma_period * LOOKBACK_DAYS_PER_PERIOD[interval]
     fetch_start = wide_start - timedelta(days=lookback_days)
 
-    history = fetch_history(symbol, fetch_start, wide_start, wide_end, interval, settings["ma_periods"], settings["ma_type"])
+    # Trimmed to just outside the visible window here (a 1-day margin,
+    # not all the way out to wide_start/FETCH_BUFFER_MULTIPLIER) - this
+    # is a STATIC snapshot, never scrolled/panned like the interactive
+    # chart, so it doesn't need the wider buffer that exists for that.
+    # Keeping it anyway was a real bug: a candlestick trace holding much
+    # more data than the figure's xaxis "range" actually shows, combined
+    # with the rangebreaks that hide weekends/overnight hours, confused
+    # Plotly/Kaleido's static rendering into leaving a large blank gap
+    # (moving-average lines visible, candlesticks missing) on the left
+    # side of the image - confirmed by comparing a wide-trimmed render
+    # against this same tightly-trimmed one.
+    history = fetch_history(
+        symbol, fetch_start, visible_start - timedelta(days=1), visible_end + timedelta(days=1),
+        interval, settings["ma_periods"], settings["ma_type"])
     if history.empty:
         return None
 
