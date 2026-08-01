@@ -184,6 +184,9 @@ with tab_reviews:
         "you saved for it. Generate a PDF here any time, even for an old one."
     )
 
+    if "review_report_message" in st.session_state:
+        st.info(st.session_state.pop("review_report_message"))
+
     review_reports = database.get_review_reports(conn)
     if not review_reports:
         st.info("No trade reviews yet - start one from the Trade Analyzer page.")
@@ -202,7 +205,7 @@ with tab_reviews:
         )
         selected_report_summary = review_reports[review_index]
 
-        sent_cols = st.columns([2, 1])
+        sent_cols = st.columns([2, 1, 1])
         if selected_report_summary["sent_at"]:
             sent_cols[0].caption(
                 f"Already generated and emailed, at {selected_report_summary['sent_at']:%m/%d/%Y %I:%M %p}."
@@ -218,6 +221,33 @@ with tab_reviews:
                 st.success(message)
             else:
                 st.error(message)
+
+        # Two clicks, not one - same reasoning as Shortlist's "Remove
+        # All": deleting a report permanently takes its saved chart
+        # snapshots and notes with it (database.delete_review_report()
+        # cascades to trade_reviews/trade_review_snapshots), with no
+        # undo. The confirm flag is keyed per report id so switching to
+        # a different report in the picker above doesn't leave a stale
+        # "Confirm Delete" armed against the wrong one.
+        delete_confirm_key = f"_confirm_delete_review_{selected_report_summary['id']}"
+        delete_armed = st.session_state.get(delete_confirm_key, False)
+        delete_label = "Confirm Delete" if delete_armed else "Delete Report"
+        if sent_cols[2].button(delete_label, key="delete_review_report", type="primary" if delete_armed else "secondary"):
+            if not delete_armed:
+                st.session_state[delete_confirm_key] = True
+                st.rerun()
+            else:
+                database.delete_review_report(conn, selected_report_summary["id"])
+                del st.session_state[delete_confirm_key]
+                # The picker's stored index may no longer be valid (or
+                # may now point at a different report) now that the
+                # list is shorter - clearing it resets to the default
+                # (first report) instead of risking an out-of-range
+                # selection.
+                if "review_report_picker" in st.session_state:
+                    del st.session_state["review_report_picker"]
+                st.session_state["review_report_message"] = "Deleted the review report."
+                st.rerun()
 
         report_detail = database.get_review_report(conn, selected_report_summary["id"])
         if not report_detail["reviews"]:
