@@ -182,7 +182,7 @@ def _component_theme_colors():
     return colors
 
 # Timeframes offered, and the default VISIBLE calendar-day window when
-# the chart first opens (30 Min 8 days, Hourly 15, Daily 120, Weekly
+# the chart first opens (30 Min 5 days, Hourly 15, Daily 120, Weekly
 # ~2 years, Monthly a year) - a coarser timeframe needs much more of a window to
 # show a meaningful number of bars. There's no user-adjustable slider for
 # this anymore - scroll-to-zoom on the chart itself replaces it. This is
@@ -195,10 +195,13 @@ TIMEFRAMES = {
     # this padding feeds into how far back the fetch window reaches
     # (see FETCH_BUFFER_MULTIPLIER/LOOKBACK_DAYS_PER_PERIOD below), so
     # too generous a number here makes 30-min charts go completely
-    # empty for any trade older than just a week or two. 8 keeps a
-    # trade up to ~30 days old safely inside that 60-day budget; Hourly
-    # has a much bigger 730-day budget, so 15 there is no real risk.
-    "30 Min": ("30m", 8),
+    # empty for any trade older than just a week or two. Kept at 5
+    # (rather than a wider default window) specifically to prioritize
+    # how OLD a trade can still be and show something at all - 5 keeps
+    # a trade up to ~39 days old inside that 60-day budget (~30 days at
+    # 8, the value this was briefly bumped to and then reverted from).
+    # Hourly has a much bigger 730-day budget, so 15 there is no risk.
+    "30 Min": ("30m", 5),
     "Hourly": ("1h", 15),
     "Daily": ("1d", 120),
     "Weekly": ("1wk", 720),
