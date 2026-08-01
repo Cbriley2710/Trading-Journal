@@ -252,6 +252,11 @@ with tab_reviews:
         report_detail = database.get_review_report(conn, selected_report_summary["id"])
         if not report_detail["reviews"]:
             st.caption("Nothing was saved in this report.")
+        # Fetched once outside the loop below - same Jan 1 baseline every
+        # review in this report would divide by, see trade_stats()'s own
+        # docstring for why this (not today's fully-calculated account
+        # value) is the right number to use.
+        jan1_balance = database.get_account_value(conn)
         for review in report_detail["reviews"]:
             short_tag = " (Short)" if review["direction"] == "SHORT" else ""
             st.subheader(
@@ -266,9 +271,11 @@ with tab_reviews:
             stats = trade_stats(
                 review["direction"], review["buy_price"], review["sell_price"], review["quantity"],
                 review["profit_loss"], review["entry_date"], review["exit_date"],
+                account_value=jan1_balance,
             )
             outcome_color = charting.win_loss_color(review["profit_loss"] >= 0)
-            stat_cols = st.columns(6)
+            show_equity = stats["equity_contribution"] is not None
+            stat_cols = st.columns(7 if show_equity else 6)
             ui.stat_tile(
                 stat_cols[0], "Short Entry" if stats["is_short"] else "Entry", f"${stats['entry_price']:,.2f}")
             ui.stat_tile(stat_cols[1], "Cover" if stats["is_short"] else "Exit", f"${stats['exit_price']:,.2f}")
@@ -276,6 +283,9 @@ with tab_reviews:
             ui.stat_tile(stat_cols[3], "P/L", f"${review['profit_loss']:,.2f}", outcome_color)
             ui.stat_tile(stat_cols[4], "% Change", f"{stats['pct_change']:,.2f}%", outcome_color)
             ui.stat_tile(stat_cols[5], "Days Held", f"{stats['days_held']:,.0f}")
+            if show_equity:
+                ui.stat_tile(
+                    stat_cols[6], "Equity Contribution", f"{stats['equity_contribution']:,.2f}%", outcome_color)
 
             if review["snapshots"]:
                 snapshot_cols = st.columns(len(review["snapshots"]))

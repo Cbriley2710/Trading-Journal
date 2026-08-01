@@ -459,30 +459,43 @@ def trade_label(trade):
     )
 
 
-def trade_stats(direction, buy_price, sell_price, quantity, profit_loss, entry_date, exit_date):
+def trade_stats(direction, buy_price, sell_price, quantity, profit_loss, entry_date, exit_date, account_value=None):
     """
     The numbers behind one closed trade's fact tiles: which price was
     the entry vs the exit (a short's pairing is reversed - see
     match_trades_lifo()'s own docstring), % change (of entry price,
     using the actual signed profit_loss so a profitable short doesn't
-    show a misleading negative %), and days held. Shared by Trade
-    Analyzer's fact tiles, the Trade Review Report PDF's per-trade
-    page, and the Logbook page's Trade Reviews section, so all three
-    compute these exactly the same way instead of three separate copies
-    of this math drifting apart.
+    show a misleading negative %), days held, and equity contribution.
+    Shared by Trade Analyzer's fact tiles, the Trade Review Report
+    PDF's per-trade page, and the Logbook page's Trade Reviews section,
+    so all three compute these exactly the same way instead of three
+    separate copies of this math drifting apart.
 
     `entry_date`/`exit_date` must be plain date objects, not datetime -
     database.get_trades()' own dicts (entry_date/date) need `.date()`
     called on them first; database.get_review_report()'s reviews
     already store plain dates.
+
+    `account_value`, if given, is what this trade's profit_loss is
+    divided by for "equity_contribution" - how much of a full year's
+    worth of gain/loss this one trade represents. Pass the Jan 1
+    baseline (database.get_account_value()), the same fixed anchor the
+    Dashboard's own Account Performance % already divides by (see that
+    page's notes on why NOT today's fully-calculated account value -
+    it self-inflates as the year goes on, understating every trade's
+    real contribution). None (the default) if the caller doesn't have
+    a baseline to divide by, or hasn't set one yet - equity_contribution
+    comes back None too rather than a division-by-zero or a misleading
+    number.
     """
     is_short = direction == "SHORT"
     entry_price, exit_price = (sell_price, buy_price) if is_short else (buy_price, sell_price)
     pct_change = (profit_loss / (entry_price * quantity)) * 100 if entry_price else 0.0
     days_held = (exit_date - entry_date).days
+    equity_contribution = (profit_loss / account_value) * 100 if account_value else None
     return {
         "is_short": is_short, "entry_price": entry_price, "exit_price": exit_price,
-        "pct_change": pct_change, "days_held": days_held,
+        "pct_change": pct_change, "days_held": days_held, "equity_contribution": equity_contribution,
     }
 
 

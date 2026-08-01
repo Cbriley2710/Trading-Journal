@@ -78,10 +78,14 @@ def _write_snapshot_page(pdf, symbol, timeframe, chart_image):
     pdf.image(image, x=x, w=image_width_mm)
 
 
-def _write_trade_review_page(pdf, review):
+def _write_trade_review_page(pdf, review, jan1_balance):
     """One reviewed trade's header page (symbol/direction, entry/exit
     dates, stats, notes), followed by one additional page per captured
-    timeframe snapshot."""
+    timeframe snapshot. `jan1_balance` (database.get_account_value())
+    is what Equity Contribution divides this trade's profit_loss by -
+    see trade_stats()'s own docstring for why; left off the stats line
+    entirely if it hasn't been set yet, same as the other two places
+    this same math is shown (Trade Analyzer, Logbook)."""
     pdf.add_page()
     short_tag = " (Short)" if review["direction"] == "SHORT" else ""
 
@@ -103,6 +107,7 @@ def _write_trade_review_page(pdf, review):
     stats = trade_stats(
         review["direction"], review["buy_price"], review["sell_price"], review["quantity"],
         review["profit_loss"], review["entry_date"], review["exit_date"],
+        account_value=jan1_balance,
     )
     entry_label = "Short Entry" if stats["is_short"] else "Entry"
     exit_label = "Cover" if stats["is_short"] else "Exit"
@@ -118,10 +123,10 @@ def _write_trade_review_page(pdf, review):
     outcome_rgb = hex_to_rgb(charting.win_loss_color(review["profit_loss"] >= 0))
     pdf.set_text_color(*outcome_rgb)
     pdf.set_font("Helvetica", style="B", size=11)
-    pdf.cell(
-        0, 7, safe_text(f"P/L: ${review['profit_loss']:,.2f}  ({stats['pct_change']:,.2f}%)"),
-        new_x="LMARGIN", new_y="NEXT",
-    )
+    pl_line = f"P/L: ${review['profit_loss']:,.2f}  ({stats['pct_change']:,.2f}%)"
+    if stats["equity_contribution"] is not None:
+        pl_line += f"   Equity Contribution: {stats['equity_contribution']:,.2f}%"
+    pdf.cell(0, 7, safe_text(pl_line), new_x="LMARGIN", new_y="NEXT")
     pdf.ln(4)
 
     notes_text = review["notes"].strip() if review["notes"] else ""
@@ -169,8 +174,9 @@ def build_review_report_pdf(conn, report_id):
         new_x="LMARGIN", new_y="NEXT",
     )
 
+    jan1_balance = database.get_account_value(conn)
     for review in report["reviews"]:
-        _write_trade_review_page(pdf, review)
+        _write_trade_review_page(pdf, review, jan1_balance)
 
     return bytes(pdf.output())
 
