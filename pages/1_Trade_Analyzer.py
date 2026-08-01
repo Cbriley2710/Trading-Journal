@@ -42,6 +42,7 @@ import auth
 import charting
 import database
 import nav
+import timeutil
 import ui
 from analyze_trades import trade_label, trade_stats
 
@@ -417,6 +418,42 @@ def render_review_selection(conn, trades):
 
     exit_dates = [t["date"].date() for t in trades]
     min_exit, max_exit = min(exit_dates), max(exit_dates)
+
+    # Quick-select shortcuts for the two periodic reviews someone
+    # actually does regularly (last week, last calendar month) - set
+    # the date_input's OWN session_state value (its key, below) and
+    # rerun, rather than a separate widget, so these are just a faster
+    # way to fill in the same picker instead of a second, parallel
+    # source of truth for the range.
+    today = timeutil.today_eastern()
+    this_monday = today - timedelta(days=today.weekday())
+    last_week_start, last_week_end = this_monday - timedelta(days=7), this_monday - timedelta(days=1)
+
+    first_of_this_month = today.replace(day=1)
+    last_month_end = first_of_this_month - timedelta(days=1)
+    last_month_start = last_month_end.replace(day=1)
+
+    def clamped_preset(start, end):
+        """Clamps a preset range to the actual trade history's bounds
+        (date_input raises if given a value outside its min/max) -
+        None if the whole preset falls entirely outside that history,
+        so the caller can just skip offering it instead of setting an
+        inverted range."""
+        start, end = max(start, min_exit), min(end, max_exit)
+        return (start, end) if start <= end else None
+
+    preset_cols = st.columns([2, 2, 3])
+    last_week_range = clamped_preset(last_week_start, last_week_end)
+    if last_week_range and preset_cols[0].button(
+        f"Review Last Week's Trades ({last_week_start:%m/%d} - {last_week_end:%m/%d})"
+    ):
+        st.session_state["review_date_range"] = last_week_range
+        st.rerun()
+    last_month_range = clamped_preset(last_month_start, last_month_end)
+    if last_month_range and preset_cols[1].button(f"Review {last_month_end:%B}'s Trades"):
+        st.session_state["review_date_range"] = last_month_range
+        st.rerun()
+
     date_range = st.date_input(
         "Filter by exit date", value=(min_exit, max_exit),
         min_value=min_exit, max_value=max_exit, key="review_date_range",
