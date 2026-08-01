@@ -89,15 +89,23 @@ def render_trade_facts(trade):
     fact_tile(cols[5], "Days Held", f"{stats['days_held']:,.0f}")
 
 
-def render_trade_chart(conn, trade, key_prefix, anchor_id=None):
+def render_trade_chart(conn, trade, key_prefix, anchor_id=None, timeframe_label=None):
     """
-    The Timeframe/Chart-Settings controls plus the interactive price
-    chart for one closed trade - extracted from what used to be this
-    page's own inline, one-shot code so the Review Session below can
-    render several different trades (and re-render the SAME trade at a
-    freshly picked timeframe) within one script run, the same reason
-    Shortlist's render_price_chart() exists as a real function instead
-    of inline page code.
+    The Chart-Settings controls plus the interactive price chart for one
+    closed trade - extracted from what used to be this page's own
+    inline, one-shot code so the Review Session below can render several
+    different trades (and re-render the SAME trade at a freshly picked
+    timeframe) within one script run, the same reason Shortlist's
+    render_price_chart() exists as a real function instead of inline
+    page code.
+
+    `timeframe_label`, if given, skips rendering the Timeframe radio
+    here entirely and fetches/shows that timeframe instead - the Review
+    Session renders its OWN Timeframe control further down the page
+    (see render_review_session()), alongside Save & Next/Skip, instead
+    of above the chart here. Leave it None (the default) to render the
+    radio in its usual spot right above the chart, which the plain
+    single-trade view below still does.
 
     Returns (timeframe_label, settings, chart_rendered) - the caller
     needs `timeframe_label`/`settings` to capture a matching snapshot
@@ -106,10 +114,11 @@ def render_trade_chart(conn, trade, key_prefix, anchor_id=None):
     price data) to know whether to skip straight past the review
     controls instead of showing them against a chart that isn't there.
     """
-    timeframe_options = list(charting.TIMEFRAMES.keys())
-    timeframe_label = st.radio(
-        "Timeframe", options=timeframe_options, index=timeframe_options.index("Daily"),
-        horizontal=True, key=f"{key_prefix}_timeframe")
+    if timeframe_label is None:
+        timeframe_options = list(charting.TIMEFRAMES.keys())
+        timeframe_label = st.radio(
+            "Timeframe", options=timeframe_options, index=timeframe_options.index("Daily"),
+            horizontal=True, key=f"{key_prefix}_timeframe")
     interval, padding_days = charting.TIMEFRAMES[timeframe_label]
 
     control_cols = st.columns([4, 1])
@@ -258,10 +267,15 @@ def render_review_notes_box(key_prefix):
     clear_on_submit reasoning), but its own function since the wording
     and backing store (a trade_reviews row, not a logbook_entries one)
     are different enough that sharing code would need more
-    parameterization than it's worth."""
+    parameterization than it's worth. Column ratio matches the capture/
+    timeframe controls above it (see render_review_session()) so the
+    notes box and the Timeframe radio line up as one visual two-column
+    region, even though they're two separate st.columns() calls (a
+    form's own submit buttons can't live in columns created outside
+    that form)."""
     clicked = None
     with st.form(key=f"{key_prefix}_review_form", clear_on_submit=True, border=False):
-        box_col, button_col = st.columns([4, 1])
+        box_col, button_col = st.columns([3, 1])
         notes = box_col.text_area("Trade Review Notes", height=68, key=f"{key_prefix}_notes")
         if button_col.form_submit_button("Save & Next →", type="primary", width="stretch"):
             clicked = "Save & Next →"
@@ -319,7 +333,22 @@ def render_review_session(conn):
     render_trade_facts(trade)
     st.divider()
 
-    timeframe_label, settings, chart_rendered = render_trade_chart(conn, trade, key_prefix, anchor_id=anchor_id)
+    # The Timeframe control itself is rendered further down, alongside
+    # Save & Next/Skip (see controls_right below), not above the chart
+    # like the plain single-trade view still does - but the chart needs
+    # to know which timeframe to fetch/show before that widget renders.
+    # This reads whatever was chosen on a PRIOR run (default "Daily" the
+    # very first time this trade is shown) straight from session_state,
+    # under the exact same key the radio widget itself uses further
+    # down - reading a widget's key before that widget renders this run
+    # is fine, it's only ASSIGNING to it after creation that Streamlit
+    # rejects.
+    timeframe_key = f"{key_prefix}_timeframe"
+    timeframe_options = list(charting.TIMEFRAMES.keys())
+    timeframe_label = st.session_state.get(timeframe_key, "Daily")
+
+    _timeframe_label, settings, chart_rendered = render_trade_chart(
+        conn, trade, key_prefix, anchor_id=anchor_id, timeframe_label=timeframe_label)
 
     if should_scroll:
         ui.scroll_to_anchor(anchor_id)
@@ -333,8 +362,14 @@ def render_review_session(conn):
         return
 
     pending = session.setdefault("pending_snapshots", {})
-    capture_cols = st.columns([1, 3])
-    if capture_cols[0].button("📸 Save this timeframe", key=f"{key_prefix}_capture"):
+
+    # Left: capture button + status. Right: the Timeframe picker, lined
+    # up with Save & Next/Skip below it (see render_review_notes_box()'s
+    # own matching column ratio) - a deliberate change from the plain
+    # single-trade view, which still keeps Timeframe above the chart.
+    controls_left, controls_right = st.columns([3, 1])
+
+    if controls_left.button("📸 Save this timeframe", key=f"{key_prefix}_capture"):
         with st.spinner(f"Saving {timeframe_label.lower()} snapshot..."):
             snapshot = charting.build_trade_review_snapshot(
                 trade["symbol"], trade["entry_date"], trade["date"], trade["buy_price"], trade["sell_price"],
@@ -345,10 +380,14 @@ def render_review_session(conn):
             st.warning(f"No price data available to save a {timeframe_label.lower()} snapshot right now.")
 
     if pending:
-        capture_cols[1].caption(f"Captured: {', '.join(pending.keys())} (Daily is saved automatically too).")
+        controls_left.caption(f"Captured: {', '.join(pending.keys())} (Daily is saved automatically too).")
     else:
-        capture_cols[1].caption(
+        controls_left.caption(
             'Daily is saved automatically - use "Save this timeframe" for any other timeframe worth keeping too.')
+
+    controls_right.radio(
+        "Timeframe", options=timeframe_options, index=timeframe_options.index(timeframe_label),
+        key=timeframe_key)
 
     if should_scroll:
         ui.focus_textarea("Trade Review Notes")
