@@ -560,7 +560,12 @@ def fetch_latest_price(symbol):
     Also returns None if the lookup itself blows up (a network hiccup,
     Yahoo rate-limiting, etc.) - every caller already handles None as
     "no price available right now," which beats crashing a whole page
-    over one symbol's failed lookup.
+    over one symbol's failed lookup. One retry on a rate limit (same
+    reasoning as warm_price_cache_for_symbol() above - it often clears
+    within a couple seconds) before giving up, since with no retry at
+    all a single passing rate-limit blip on one symbol showed up as a
+    permanent-looking "no current price available" for that symbol
+    until the minute-long cache below expired.
 
     Cached for just a minute, not the hour fetch_history() uses - this
     IS the still-moving "right now" price, so it needs to stay fresh.
@@ -568,13 +573,17 @@ def fetch_latest_price(symbol):
     Next from re-fetching a position's current price on every unrelated
     rerun while you're still looking at the same ticker.
     """
-    try:
-        recent = yf.Ticker(symbol).history(period="5d")
-    except Exception:
-        return None
-    if recent.empty:
-        return None
-    return recent["Close"].iloc[-1]
+    for attempt in range(2):
+        try:
+            recent = yf.Ticker(symbol).history(period="5d")
+        except YFRateLimitError:
+            if attempt == 0:
+                time.sleep(2)
+                continue
+            return None
+        except Exception:
+            return None
+        return None if recent.empty else recent["Close"].iloc[-1]
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
