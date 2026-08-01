@@ -24,12 +24,6 @@ the closest logged day after it - is what you see first), and a "Hide
 days with no notes" toggle skips days that only ever got an
 auto-archived chart with nothing written.
 
-This page also has a "Daily Report" section - one PDF covering every
-list, emailed to a mailing list automatically by nightly_archive.py
-once the night's archiving is done (see daily_report.py). This page
-only shows whether it's gone out yet for a given date - there's no
-manual generate button here.
-
 Also here: "Trade Reviews" - past guided Review Sessions from the
 Trade Analyzer page (see pages/1_Trade_Analyzer.py's
 render_review_session()). Unlike the Daily Report, there's no nightly
@@ -58,23 +52,6 @@ nav.render_top_nav("logbook")
 st.title("Logbook")
 
 conn = database.get_connection()
-
-st.header("Daily Report")
-st.caption(
-    "One PDF covering every list (each ticker's archived chart + notes for "
-    "that day), emailed to your configured recipients automatically once "
-    "the nightly archive run finishes. This just shows whether it's gone "
-    "out yet for a given date."
-)
-report_date = st.date_input("Report date", value=timeutil.today_eastern(), key="report_date")
-
-already_sent_at = database.get_daily_report_status(conn, report_date)
-if already_sent_at:
-    st.caption(f"Already generated and emailed for this date, at {already_sent_at:%I:%M %p}.")
-else:
-    st.caption("Not generated yet for this date.")
-
-st.divider()
 
 st.header("Trade Reviews")
 st.caption(
