@@ -235,19 +235,25 @@ PARTIAL_FILL_THRESHOLD = 0.15
 def merge_partial_fills(transactions, threshold=PARTIAL_FILL_THRESHOLD):
     """
     Combines partial fills into a single transaction. A "partial fill"
-    is a buy (or sell) of the same stock, on the same day, in a chain
-    of prices no more than `threshold` apart from one neighbor to the
-    next - for example five separate sells of AAPL on the same day at
-    $150.01, $150.03, and $150.06 are really just one sell order that
+    is a buy (or sell) of the same stock, on the same CALENDAR DAY, in a
+    chain of prices no more than `threshold` apart from one neighbor to
+    the next - for example five separate sells of AAPL on the same day
+    at $150.01, $150.03, and $150.06 are really just one sell order that
     got filled in pieces.
 
     The combined transaction's price is the volume-weighted average
     price (bigger fills count more toward the average), and its
-    quantity is the total of all the pieces.
+    quantity is the total of all the pieces. Its "date" is the EARLIEST
+    real timestamp among the pieces (see _combine_fills below) - a
+    SnapTrade-sourced fill carries its actual execution time-of-day
+    (see snaptrade_sync.fetch_activities()), and individual fills of one
+    order can each land at a slightly different second, so grouping by
+    the calendar day alone (not the exact timestamp) is what lets them
+    still merge into one trade the way they always have.
     """
     groups = {}
     for t in transactions:
-        key = (t["date"], t["symbol"], t["action"])
+        key = (t["date"].date(), t["symbol"], t["action"])
         groups.setdefault(key, []).append(t)
 
     merged = []
@@ -268,11 +274,15 @@ def merge_partial_fills(transactions, threshold=PARTIAL_FILL_THRESHOLD):
 
 
 def _combine_fills(fills):
-    """Averages a cluster of partial fills into one transaction."""
+    """Averages a cluster of partial fills into one transaction. `fills`
+    is sorted by PRICE (see merge_partial_fills above), not by time, so
+    "date" is deliberately the EARLIEST timestamp among the cluster
+    (min(), not fills[0]) - the moment the order actually started
+    filling, not whichever fill happened to land at the lowest price."""
     total_quantity = sum(f["quantity"] for f in fills)
     total_cost = sum(f["price"] * f["quantity"] for f in fills)
     return {
-        "date": fills[0]["date"],
+        "date": min(f["date"] for f in fills),
         "symbol": fills[0]["symbol"],
         "action": fills[0]["action"],
         "price": total_cost / total_quantity,
@@ -319,15 +329,21 @@ def match_trades_lifo(transactions):
     transactions = merge_partial_fills(transactions)
 
     # Sort transactions oldest-first so we process them in the order
-    # they actually happened. There's no time-of-day in this data, only
-    # a date, so same-day trades are also sorted with BUY/SELL_SHORT
-    # before SELL - a same-day round trip almost always opens before it
-    # closes, and some brokers don't reliably label a same-day short
-    # sale as "Sell Short", so without this tiebreaker a same-day
-    # SELL-then-BUY pair (in whatever order the export happened to list
-    # them) can get processed as "sell with nothing to close" (silently
-    # dropped) followed by a same-day BUY that wrongly opens a brand
-    # new, never-closed position instead of the two matching each other.
+    # they actually happened. A SnapTrade-sourced transaction's "date"
+    # is a real timestamp (see snaptrade_sync.fetch_activities()), so
+    # two same-day fills almost always sort into their true execution
+    # order on their own. A CSV-imported transaction has no time-of-day
+    # at all though (Fidelity/Schwab exports are date-only), which
+    # makes two same-day transactions genuinely tied on "date" alone -
+    # the (..., t["action"] == "SELL") tiebreaker below is what decides
+    # those: BUY/SELL_SHORT sorts before SELL, since a same-day round
+    # trip almost always opens before it closes, and some brokers don't
+    # reliably label a same-day short sale as "Sell Short". Without
+    # this tiebreaker, a same-day SELL-then-BUY pair (in whatever order
+    # the export happened to list them) can get processed as "sell with
+    # nothing to close" (silently dropped) followed by a same-day BUY
+    # that wrongly opens a brand new, never-closed position instead of
+    # the two matching each other.
     transactions = sorted(transactions, key=lambda t: (t["date"], t["action"] == "SELL"))
 
     # For each ticker, we keep a "line" (list) of batches that haven't

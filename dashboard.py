@@ -254,13 +254,24 @@ def build_mark_to_market_curve(trades_records, open_positions, daily_index):
     only ever have MORE valid data behind any given day, never less),
     just far fewer live Yahoo Finance calls.
     """
+    # .normalize() (here and at every other pd.Timestamp(...) conversion
+    # in this function) drops entry_date/date down to midnight before
+    # using it as a lookup key against daily_index/symbol_closes, which
+    # are always midnight-stamped, one entry per calendar day. Without
+    # it, a SnapTrade-sourced trade's now-real execution time (see
+    # database.get_trades()) would shift every day-level slice/lookup
+    # below by however many hours past midnight the trade happened -
+    # e.g. losing an entire day's contribution off either end of a
+    # .loc[entry:exit_] slice, or writing the real booked profit_loss
+    # onto a timestamp that doesn't exist in the index instead of
+    # actually overwriting the exit day's estimate (see below).
     symbol_windows = {}
     for trade in trades_records:
-        entry, exit_ = pd.Timestamp(trade["entry_date"]), pd.Timestamp(trade["date"])
+        entry, exit_ = pd.Timestamp(trade["entry_date"]).normalize(), pd.Timestamp(trade["date"]).normalize()
         lo, hi = symbol_windows.get(trade["symbol"], (entry, exit_))
         symbol_windows[trade["symbol"]] = (min(lo, entry), max(hi, exit_))
     for position in open_positions:
-        entry = pd.Timestamp(position["entry_date"])
+        entry = pd.Timestamp(position["entry_date"]).normalize()
         lo, hi = symbol_windows.get(position["symbol"], (entry, daily_index.max()))
         symbol_windows[position["symbol"]] = (min(lo, entry), max(hi, daily_index.max()))
 
@@ -272,8 +283,8 @@ def build_mark_to_market_curve(trades_records, open_positions, daily_index):
     total = pd.Series(0.0, index=daily_index)
 
     for trade in trades_records:
-        entry = pd.Timestamp(trade["entry_date"])
-        exit_ = pd.Timestamp(trade["date"])
+        entry = pd.Timestamp(trade["entry_date"]).normalize()
+        exit_ = pd.Timestamp(trade["date"]).normalize()
         is_short = trade["direction"] == "SHORT"
         entry_price = trade["sell_price"] if is_short else trade["buy_price"]
 
@@ -308,7 +319,7 @@ def build_mark_to_market_curve(trades_records, open_positions, daily_index):
         total += contribution
 
     for position in open_positions:
-        entry = pd.Timestamp(position["entry_date"])
+        entry = pd.Timestamp(position["entry_date"]).normalize()
         is_short = position["direction"] == "SHORT"
 
         closes = symbol_closes[position["symbol"]].loc[entry:daily_index.max()]
@@ -369,7 +380,10 @@ if "Equity Curve" in visible_sections:
         # expensive part (fetching each symbol's price history) is cached in
         # charting.fetch_daily_closes(), so switching windows doesn't
         # re-fetch anything, it just re-slices numbers already in hand.
-        full_start = filtered["entry_date"].min()
+        # .normalize() so a real (non-midnight) entry_date doesn't shift
+        # every day in full_daily_index by that same offset - see
+        # build_mark_to_market_curve()'s own note on this same pattern.
+        full_start = filtered["entry_date"].min().normalize()
         full_daily_index = pd.date_range(start=full_start, end=today, freq="D")
         open_positions_for_curve = [
             p for p in database.get_open_positions(conn) if p["symbol"] in selected_symbols
@@ -404,7 +418,15 @@ if "Holding Period vs. Return" in visible_sections:
     st.header("Holding Period vs. Return")
 
     scatter_data = filtered.copy()
-    scatter_data["holding_days"] = (scatter_data["date"] - scatter_data["entry_date"]).dt.days
+    # Normalized to whole calendar days before subtracting - same
+    # definition analyze_trades.trade_stats() uses for "days held"
+    # elsewhere in the app. Without this, a trade's now-real execution
+    # time (see database.get_trades()) would make this a precise
+    # elapsed-time count instead, which could shave a day off for a
+    # trade entered/exited hours apart across midnight.
+    scatter_data["holding_days"] = (
+        scatter_data["date"].dt.normalize() - scatter_data["entry_date"].dt.normalize()
+    ).dt.days
     # Same entry-price convention as the trade table below: for a SHORT
     # trade, the stored buy_price is the cover (exit) and sell_price is
     # the short sale (entry) - the opposite pairing from a LONG trade.

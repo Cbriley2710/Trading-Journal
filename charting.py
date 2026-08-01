@@ -27,7 +27,7 @@ import json
 import math
 import re
 import time
-from datetime import timedelta
+from datetime import time, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -989,6 +989,20 @@ def render_settings_toolbar(container, key_prefix):
     }
 
 
+def _format_trade_moment(dt):
+    """Formats an entry/exit datetime for a marker's hover text - just
+    the date if `dt` has no real time-of-day attached, otherwise the
+    date AND the actual execution time. A CSV import (Fidelity/Schwab
+    exports are date-only) or anything recorded before SnapTrade's real
+    timestamps existed always lands on exact midnight - a real stock
+    trade essentially never executes at literally 00:00:00, so that's
+    used as the signal that no genuine time is known here, rather than
+    tracking a separate has-time flag alongside every date."""
+    if dt.time() == time(0, 0):
+        return f"{dt:%b %d, %Y}"
+    return f"{dt:%b %d, %Y %I:%M %p}"
+
+
 def build_figure(symbol, history, entry_point, settings, overlay_history=None, entry_label="Entry", interval="1d",
                   visible_range=None, stop_loss=None, drawings=None, bake_arrow_traces=True):
     """
@@ -1215,16 +1229,16 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
             marker=dict(size=14, symbol=[entry_symbol, exit_symbol], color=outcome_color),
             name="Entry / Exit", showlegend=False, meta="entry_exit_marker",
             text=[
-                f"{entry_label}<br>{entry_date:%b %d, %Y} · ${entry_value:,.2f}",
-                f"Exit<br>{exit_date:%b %d, %Y} · ${exit_value:,.2f}<br>"
+                f"{entry_label}<br>{_format_trade_moment(entry_date)} · ${entry_value:,.2f}",
+                f"Exit<br>{_format_trade_moment(exit_date)} · ${exit_value:,.2f}<br>"
                 f"{'+' if pl_per_share >= 0 else ''}${pl_per_share:,.2f}/share",
             ],
             hovertemplate="%{text}<extra></extra>",
         ), row=1, col=1)
     else:
         hover_text = (
-            f"Added to watchlist<br>{entry_date:%b %d, %Y}" if entry_label == "Added"
-            else f"{entry_label}<br>{entry_date:%b %d, %Y} · ${buy_price:,.2f}"
+            f"Added to watchlist<br>{_format_trade_moment(entry_date)}" if entry_label == "Added"
+            else f"{entry_label}<br>{_format_trade_moment(entry_date)} · ${buy_price:,.2f}"
         )
         fig.add_trace(go.Scatter(
             x=[entry_date], y=[marker_y], mode="markers",

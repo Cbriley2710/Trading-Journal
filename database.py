@@ -148,6 +148,19 @@ def _column_exists(cur, table, column):
     return cur.fetchone() is not None
 
 
+def _column_type(cur, table, column):
+    """The Postgres data type of an existing column (e.g. "date",
+    "timestamp without time zone") - same idea as _column_exists above,
+    but for the ALTER COLUMN TYPE migrations below, which need to know
+    what a column currently is rather than just whether it exists."""
+    cur.execute(
+        "SELECT data_type FROM information_schema.columns WHERE table_name = %s AND column_name = %s",
+        (table, column),
+    )
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
 def init_db(conn):
     """
     Creates the `transactions` and `trades` tables if they don't
@@ -158,7 +171,7 @@ def init_db(conn):
     cur.execute("""
         CREATE TABLE IF NOT EXISTS transactions (
             id SERIAL PRIMARY KEY,
-            date DATE NOT NULL,
+            date TIMESTAMP NOT NULL,
             symbol TEXT NOT NULL,
             action TEXT NOT NULL,
             price DOUBLE PRECISION NOT NULL,
@@ -176,14 +189,25 @@ def init_db(conn):
         cur.execute("""
             ALTER TABLE transactions ADD COLUMN source TEXT
         """)
+    # Widened from DATE to TIMESTAMP so a transaction pulled from
+    # SnapTrade can keep its real execution time-of-day instead of
+    # being flattened to midnight - see snaptrade_sync.fetch_
+    # activities()'s own notes on where that time already comes from.
+    # A DATE->TIMESTAMP widening is safe: every existing row just
+    # becomes a midnight timestamp, the same moment it already meant.
+    # Fidelity/Schwab CSV exports never had a time of day to begin
+    # with (see analyze_trades.load_transactions()), so CSV-imported
+    # rows stay at midnight regardless of this column's type.
+    if _column_type(cur, "transactions", "date") == "date":
+        cur.execute("ALTER TABLE transactions ALTER COLUMN date TYPE TIMESTAMP")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS trades (
             id SERIAL PRIMARY KEY,
             symbol TEXT NOT NULL,
-            entry_date DATE NOT NULL,
+            entry_date TIMESTAMP NOT NULL,
             buy_price DOUBLE PRECISION NOT NULL,
             quantity DOUBLE PRECISION NOT NULL,
-            exit_date DATE NOT NULL,
+            exit_date TIMESTAMP NOT NULL,
             sell_price DOUBLE PRECISION NOT NULL,
             profit_loss DOUBLE PRECISION NOT NULL
         )
@@ -200,6 +224,15 @@ def init_db(conn):
         cur.execute("""
             ALTER TABLE trades ADD COLUMN direction TEXT NOT NULL DEFAULT 'LONG'
         """)
+    # Same DATE->TIMESTAMP widening as transactions.date above, and for
+    # the same reason - rebuild_trades() carries entry_date/exit_date
+    # straight through from a transaction's own timestamp, so `trades`
+    # needs to be able to hold real time-of-day too, not just flatten
+    # it back to midnight on the way in.
+    if _column_type(cur, "trades", "entry_date") == "date":
+        cur.execute("ALTER TABLE trades ALTER COLUMN entry_date TYPE TIMESTAMP")
+    if _column_type(cur, "trades", "exit_date") == "date":
+        cur.execute("ALTER TABLE trades ALTER COLUMN exit_date TYPE TIMESTAMP")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS logbook_entries (
             id SERIAL PRIMARY KEY,
@@ -637,7 +670,11 @@ def _insert_transactions(conn, transactions):
         ON CONFLICT DO NOTHING
         RETURNING id
         """,
-        [(t["date"].date(), t["symbol"], t["action"], t["price"], t["quantity"], t["source"])
+        # The full datetime, not t["date"].date() - transactions.date is
+        # a TIMESTAMP now (see init_db()'s migration note) specifically
+        # so a SnapTrade-sourced row's real execution time-of-day
+        # survives being stored, not just its calendar date.
+        [(t["date"], t["symbol"], t["action"], t["price"], t["quantity"], t["source"])
          for t in to_insert],
         fetch=True,
     )
@@ -710,9 +747,14 @@ def rebuild_trades(conn):
     """
     cur = conn.cursor()
     cur.execute("SELECT date, symbol, action, price, quantity FROM transactions")
+    # `date` is a real datetime already (see init_db()'s DATE->TIMESTAMP
+    # migration note) - no need to reconstruct one the way this used to
+    # when the column only ever held a plain date, since that would
+    # silently flatten a SnapTrade-sourced row's real time-of-day back
+    # to midnight right before match_trades_lifo() ever saw it.
     transactions = [
         {
-            "date": datetime.combine(row[0], datetime.min.time()),
+            "date": row[0],
             "symbol": row[1],
             "action": row[2],
             "price": row[3],
@@ -733,10 +775,10 @@ def rebuild_trades(conn):
         [
             (
                 t["symbol"],
-                t["entry_date"].date(),
+                t["entry_date"],
                 t["buy_price"],
                 t["quantity"],
-                t["date"].date(),
+                t["date"],
                 t["sell_price"],
                 t["profit_loss"],
                 t["direction"],
@@ -773,13 +815,18 @@ def get_trades(_conn):
         ORDER BY entry_date
     """)
 
+    # entry_date/exit_date come back as real datetimes already (see
+    # init_db()'s DATE->TIMESTAMP migration note) - reconstructing them
+    # via datetime.combine(row, datetime.min.time()) the way this used
+    # to would silently flatten a SnapTrade-sourced trade's real
+    # execution time back to midnight on every single read.
     return [
         {
             "symbol": row[0],
-            "entry_date": datetime.combine(row[1], datetime.min.time()),
+            "entry_date": row[1],
             "buy_price": row[2],
             "quantity": row[3],
-            "date": datetime.combine(row[4], datetime.min.time()),
+            "date": row[4],
             "sell_price": row[5],
             "profit_loss": row[6],
             "direction": row[7],
@@ -833,9 +880,12 @@ def get_open_positions(_conn):
     """
     cur = _conn.cursor()
     cur.execute("SELECT date, symbol, action, price, quantity FROM transactions")
+    # `date` is a real datetime already - see rebuild_trades()'s own
+    # note on this same pattern for why no datetime.combine() is needed
+    # (or wanted) here anymore.
     transactions = [
         {
-            "date": datetime.combine(row[0], datetime.min.time()),
+            "date": row[0],
             "symbol": row[1],
             "action": row[2],
             "price": row[3],
