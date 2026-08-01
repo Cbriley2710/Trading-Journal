@@ -106,8 +106,9 @@ def render_trade_chart(conn, trade, key_prefix, anchor_id=None):
     price data) to know whether to skip straight past the review
     controls instead of showing them against a chart that isn't there.
     """
+    timeframe_options = list(charting.TIMEFRAMES.keys())
     timeframe_label = st.radio(
-        "Timeframe", options=list(charting.TIMEFRAMES.keys()), index=1,
+        "Timeframe", options=timeframe_options, index=timeframe_options.index("Daily"),
         horizontal=True, key=f"{key_prefix}_timeframe")
     interval, padding_days = charting.TIMEFRAMES[timeframe_label]
 
@@ -344,9 +345,10 @@ def render_review_session(conn):
             st.warning(f"No price data available to save a {timeframe_label.lower()} snapshot right now.")
 
     if pending:
-        capture_cols[1].caption(f"Captured: {', '.join(pending.keys())}")
+        capture_cols[1].caption(f"Captured: {', '.join(pending.keys())} (Daily is saved automatically too).")
     else:
-        capture_cols[1].caption('No timeframes captured yet - use "Save this timeframe" for any worth keeping.')
+        capture_cols[1].caption(
+            'Daily is saved automatically - use "Save this timeframe" for any other timeframe worth keeping too.')
 
     if should_scroll:
         ui.focus_textarea("Trade Review Notes")
@@ -354,6 +356,19 @@ def render_review_session(conn):
     clicked, notes = render_review_notes_box(key_prefix)
 
     if clicked == "Save & Next →":
+        # Daily is always saved, even if never explicitly captured above -
+        # every other timeframe stays opt-in, on top of this guaranteed
+        # baseline. Skipped if it's already in `pending` (either captured
+        # this trade, or - since "Daily" is a fixed key regardless of
+        # which timeframe was on screen - already saved by this exact step
+        # moments ago, though that shouldn't normally happen twice).
+        if "Daily" not in pending:
+            with st.spinner("Saving Daily snapshot..."):
+                daily_snapshot = charting.build_trade_review_snapshot(
+                    trade["symbol"], trade["entry_date"], trade["date"], trade["buy_price"], trade["sell_price"],
+                    trade["direction"], "Daily", settings)
+            if daily_snapshot is not None:
+                pending["Daily"] = daily_snapshot
         database.save_trade_review(conn, session["report_id"], trade, notes, pending)
         _advance_review_session(conn, session)
     elif clicked == "Skip":

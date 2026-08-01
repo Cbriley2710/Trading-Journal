@@ -89,8 +89,9 @@ def render_price_chart(conn, symbol, entry_point, entry_label, key_prefix, stop_
     screen - not higher up at "Reviewing X of Y," which still left the
     chart itself below the fold.
     """
+    timeframe_options = list(charting.TIMEFRAMES.keys())
     timeframe_label = st.radio(
-        "Timeframe", options=list(charting.TIMEFRAMES.keys()), index=1,
+        "Timeframe", options=timeframe_options, index=timeframe_options.index("Daily"),
         horizontal=True, key=f"{key_prefix}_timeframe")
     interval, padding_days = charting.TIMEFRAMES[timeframe_label]
 

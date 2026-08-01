@@ -25,11 +25,10 @@ days with no notes" toggle skips days that only ever got an
 auto-archived chart with nothing written.
 
 This page also has a "Daily Report" section - one PDF covering every
-list, emailed to a mailing list. See daily_report.py. If you don't
-click Generate yourself, nightly_archive.py sends it automatically as
-a fallback once the night's archiving is done, the same "manual action
-is primary, the nightly script is the fallback" pattern already used
-for per-ticker chart archiving.
+list, emailed to a mailing list automatically by nightly_archive.py
+once the night's archiving is done (see daily_report.py). This page
+only shows whether it's gone out yet for a given date - there's no
+manual generate button here.
 
 Also here: "Trade Reviews" - past guided Review Sessions from the
 Trade Analyzer page (see pages/1_Trade_Analyzer.py's
@@ -42,7 +41,6 @@ import streamlit as st
 
 import auth
 import charting
-import daily_report
 import database
 import nav
 import timeutil
@@ -64,33 +62,17 @@ conn = database.get_connection()
 st.header("Daily Report")
 st.caption(
     "One PDF covering every list (each ticker's archived chart + notes for "
-    "the day you pick), emailed to your configured recipients. Choosing "
-    "today's date first archives a fresh chart for every open position and "
-    "watchlist ticker, so the report doesn't depend on tonight's automated "
-    "archive run having happened yet. If you don't generate it yourself, "
-    "that automated run sends it for you as a fallback."
+    "that day), emailed to your configured recipients automatically once "
+    "the nightly archive run finishes. This just shows whether it's gone "
+    "out yet for a given date."
 )
-report_cols = st.columns([1, 2])
-report_date = report_cols[0].date_input("Report date", value=timeutil.today_eastern(), key="report_date")
+report_date = st.date_input("Report date", value=timeutil.today_eastern(), key="report_date")
 
 already_sent_at = database.get_daily_report_status(conn, report_date)
 if already_sent_at:
-    report_cols[1].caption(f"Already generated and emailed for this date, at {already_sent_at:%I:%M %p}.")
+    st.caption(f"Already generated and emailed for this date, at {already_sent_at:%I:%M %p}.")
 else:
-    report_cols[1].caption("Not generated yet for this date.")
-
-if st.button("Generate & Email Report"):
-    is_today = report_date == timeutil.today_eastern()
-    spinner_text = (
-        "Archiving fresh charts and building/sending the report..." if is_today
-        else "Building the PDF and sending it..."
-    )
-    with st.spinner(spinner_text):
-        success, message = daily_report.generate_and_send_report(conn, report_date, archive_first=is_today)
-    if success:
-        st.success(message)
-    else:
-        st.error(message)
+    st.caption("Not generated yet for this date.")
 
 st.divider()
 

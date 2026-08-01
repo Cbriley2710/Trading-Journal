@@ -182,13 +182,14 @@ def _component_theme_colors():
     return colors
 
 # Timeframes offered, and the default VISIBLE calendar-day window when
-# the chart first opens (Hourly 5 days, Daily 120, Weekly ~2 years,
-# Monthly a year) - a coarser timeframe needs much more of a window to
+# the chart first opens (30 Min/Hourly 5 days, Daily 120, Weekly ~2
+# years, Monthly a year) - a coarser timeframe needs much more of a window to
 # show a meaningful number of bars. There's no user-adjustable slider for
 # this anymore - scroll-to-zoom on the chart itself replaces it. This is
 # NOT how much data gets fetched - see FETCH_BUFFER_MULTIPLIER below -
 # just what's shown by default before you zoom/pan.
 TIMEFRAMES = {
+    "30 Min": ("30m", 5),
     "Hourly": ("1h", 5),
     "Daily": ("1d", 120),
     "Weekly": ("1wk", 720),
@@ -210,7 +211,7 @@ FETCH_BUFFER_MULTIPLIER = 3
 # (otherwise its line would only "warm up" partway through the chart).
 # Rough calendar-days-per-bar for each timeframe, with some buffer for
 # weekends/holidays/off-hours.
-LOOKBACK_DAYS_PER_PERIOD = {"1h": 0.25, "1d": 1.6, "1wk": 8, "1mo": 32}
+LOOKBACK_DAYS_PER_PERIOD = {"30m": 0.125, "1h": 0.25, "1d": 1.6, "1wk": 8, "1mo": 32}
 
 # Used by the nightly archive script, which has no interactive toolbar to
 # pull settings from - a plain, consistent snapshot for every ticker.
@@ -440,9 +441,10 @@ def fetch_history(symbol, fetch_start, display_start, display_end, interval, ma_
     the very FIRST time this hour's st.cache_data is empty for a given
     symbol (e.g. the first chart you open in an evening Journal
     Session), there's still a good chance this doesn't hit the network
-    at all. Hourly/Weekly/Monthly aren't pre-warmed - Daily is the
-    default view (see TIMEFRAMES), so it covers the common case without
-    the warming job needing to fetch four times as much per symbol.
+    at all. 30 Min/Hourly/Weekly/Monthly aren't pre-warmed - Daily is
+    the default view (see TIMEFRAMES), so it covers the common case
+    without the warming job needing to fetch several times as much per
+    symbol.
     """
     history = None
     if interval == "1d":
@@ -508,7 +510,7 @@ def history_error_message(history, symbol):
 def _compute_rangebreaks(history, interval):
     """
     Returns Plotly x-axis "rangebreaks" that hide non-trading gaps -
-    weekends, holidays, and (for hourly data) overnight hours - so
+    weekends, holidays, and (for intraday data) overnight hours - so
     candles/bars sit next to each other instead of leaving a visible
     blank stretch on the chart for every day the market was closed.
 
@@ -516,8 +518,9 @@ def _compute_rangebreaks(history, interval):
     missing weekday (a holiday) is found by comparing the full business-day
     range against the dates actually present in `history` - computed fresh
     from the real data each time, rather than maintaining a holiday
-    calendar by hand. For hourly bars, the hours outside roughly 9:30am-4pm
-    are hidden too, since a trading day is only open part of each day.
+    calendar by hand. For intraday bars (Hourly, 30 Min), the hours
+    outside roughly 9:30am-4pm are hidden too, since a trading day is
+    only open part of each day.
     """
     breaks = [dict(bounds=["sat", "mon"])]
 
@@ -528,7 +531,7 @@ def _compute_rangebreaks(history, interval):
             # Plotly/kaleido's JSON serialization can't handle pandas
             # Timestamp objects directly - plain datetimes only.
             breaks.append(dict(values=list(missing.to_pydatetime())))
-    elif interval == "1h":
+    elif interval in ("1h", "30m"):
         breaks.append(dict(bounds=[16, 9.5], pattern="hour"))
 
     return breaks
@@ -815,7 +818,7 @@ def build_trade_review_snapshot(symbol, entry_date, exit_date, buy_price, sell_p
     build_archive_snapshot() above, which is anchored to "today" and
     fixed to Daily for the nightly Logbook archive. This one is
     anchored to the TRADE's own entry/exit dates instead, at a
-    caller-chosen timeframe (Hourly/Daily/Weekly/Monthly - see
+    caller-chosen timeframe (30 Min/Hourly/Daily/Weekly/Monthly - see
     TIMEFRAMES), since a review is about what happened around that
     specific trade, not a rolling window ending today. The visible-range/
     fetch-window math mirrors pages/1_Trade_Analyzer.py's own
