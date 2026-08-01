@@ -42,7 +42,6 @@ import auth
 import charting
 import database
 import nav
-import timeutil
 import ui
 from analyze_trades import trade_label, trade_stats
 
@@ -419,39 +418,51 @@ def render_review_selection(conn, trades):
     exit_dates = [t["date"].date() for t in trades]
     min_exit, max_exit = min(exit_dates), max(exit_dates)
 
-    # Quick-select shortcuts for the two periodic reviews someone
-    # actually does regularly (last week, last calendar month) - set
-    # the date_input's OWN session_state value (its key, below) and
-    # rerun, rather than a separate widget, so these are just a faster
-    # way to fill in the same picker instead of a second, parallel
-    # source of truth for the range.
-    today = timeutil.today_eastern()
-    this_monday = today - timedelta(days=today.weekday())
-    last_week_start, last_week_end = this_monday - timedelta(days=7), this_monday - timedelta(days=1)
-
-    first_of_this_month = today.replace(day=1)
-    last_month_end = first_of_this_month - timedelta(days=1)
-    last_month_start = last_month_end.replace(day=1)
-
     def clamped_preset(start, end):
         """Clamps a preset range to the actual trade history's bounds
         (date_input raises if given a value outside its min/max) -
-        None if the whole preset falls entirely outside that history,
-        so the caller can just skip offering it instead of setting an
-        inverted range."""
-        start, end = max(start, min_exit), min(end, max_exit)
-        return (start, end) if start <= end else None
+        every week/month option below is built FROM a real exit date,
+        so this only ever narrows a range that already contains at
+        least one trade, never invalidates it."""
+        return max(start, min_exit), min(end, max_exit)
 
+    def month_end(first_of_month):
+        next_month = (
+            first_of_month.replace(year=first_of_month.year + 1, month=1) if first_of_month.month == 12
+            else first_of_month.replace(month=first_of_month.month + 1)
+        )
+        return next_month - timedelta(days=1)
+
+    # Every distinct Monday-Sunday week, and every distinct calendar
+    # month, that actually has at least one trade closed in it - most
+    # recent first - so these dropdowns only ever offer a period worth
+    # reviewing, not a blind calendar grid full of empty stretches.
+    week_starts = sorted({d - timedelta(days=d.weekday()) for d in exit_dates}, reverse=True)
+    month_starts = sorted({d.replace(day=1) for d in exit_dates}, reverse=True)
+    week_options = {f"{w:%m/%d/%Y} - {w + timedelta(days=6):%m/%d/%Y}": w for w in week_starts}
+    month_options = {f"{m:%B %Y}": m for m in month_starts}
+
+    # Each dropdown applies to the date_input's OWN session_state value
+    # (its key, below) and reruns - a faster way to fill in the same
+    # picker, not a second, parallel source of truth for the range.
+    # Compared against the last label actually applied (not just
+    # "isn't the placeholder") so re-rendering after that rerun doesn't
+    # re-trigger the exact same apply-and-rerun forever.
     preset_cols = st.columns([2, 2, 3])
-    last_week_range = clamped_preset(last_week_start, last_week_end)
-    if last_week_range and preset_cols[0].button(
-        f"Review Last Week's Trades ({last_week_start:%m/%d} - {last_week_end:%m/%d})"
-    ):
-        st.session_state["review_date_range"] = last_week_range
+    week_choice = preset_cols[0].selectbox(
+        "Jump to a week", options=["Choose a week..."] + list(week_options), key="review_week_picker")
+    if week_choice != "Choose a week..." and week_choice != st.session_state.get("_applied_week_choice"):
+        st.session_state["_applied_week_choice"] = week_choice
+        monday = week_options[week_choice]
+        st.session_state["review_date_range"] = clamped_preset(monday, monday + timedelta(days=6))
         st.rerun()
-    last_month_range = clamped_preset(last_month_start, last_month_end)
-    if last_month_range and preset_cols[1].button(f"Review {last_month_end:%B}'s Trades"):
-        st.session_state["review_date_range"] = last_month_range
+
+    month_choice = preset_cols[1].selectbox(
+        "Jump to a month", options=["Choose a month..."] + list(month_options), key="review_month_picker")
+    if month_choice != "Choose a month..." and month_choice != st.session_state.get("_applied_month_choice"):
+        st.session_state["_applied_month_choice"] = month_choice
+        first_of_month = month_options[month_choice]
+        st.session_state["review_date_range"] = clamped_preset(first_of_month, month_end(first_of_month))
         st.rerun()
 
     date_range = st.date_input(
