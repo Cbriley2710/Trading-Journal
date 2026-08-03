@@ -451,6 +451,15 @@ ported over unchanged - drawing tools are additive, not a replacement.
                 + "Chg " + sign + formatPrice(chg)
                 + "&nbsp;&nbsp; Chg% " + sign + pct.toFixed(2) + "%</span>";
         }
+        // meta.earnings only exists when the Python side was told to
+        // include it (show_earnings_flag=True in build_figure() - the
+        // guided Journal Session only) AND the cached next earnings
+        // date is within 10 days - see next_earnings_badge_info().
+        if (meta.earnings) {
+            html += "&nbsp;&nbsp; <span style='color:" + THEME.critical + "; font-weight:600;'>"
+                + "⚠ Earnings " + formatDate(meta.earnings.date)
+                + " (in " + meta.earnings.days_until + "d)</span>";
+        }
         el.innerHTML = html;
     }
 

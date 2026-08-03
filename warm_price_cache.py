@@ -9,6 +9,10 @@ after market close, by a scheduled GitHub Actions workflow (see
 .github/workflows/warm_price_cache.yml). Can also be run manually any
 time (e.g. `python warm_price_cache.py`) to warm the cache on demand.
 
+Also warms each symbol's next earnings date into earnings_cache (see
+charting.warm_earnings_cache_for_symbol()), which feeds the Journal
+Session's "earnings within 10 days" status-bar badge.
+
 WHY THIS EXISTS, SEPARATE FROM nightly_archive.py: that job runs near
 midnight (not right after close - see its own workflow's comment on
 cron/DST), which is often already well into, or past, a typical evening
@@ -44,6 +48,9 @@ def main():
     for symbol in sorted(symbols):
         result = charting.warm_price_cache_for_symbol(symbol)
         print(f"  {symbol}: {result}")
+        time.sleep(PAUSE_BETWEEN_SYMBOLS_SECONDS)
+        earnings_result = charting.warm_earnings_cache_for_symbol(symbol)
+        print(f"  {symbol} earnings: {earnings_result}")
         time.sleep(PAUSE_BETWEEN_SYMBOLS_SECONDS)
     print("Done.")
 

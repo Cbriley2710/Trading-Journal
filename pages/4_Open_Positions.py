@@ -118,6 +118,13 @@ if positions:
                 if current_value:
                     heat_pct = heat_dollars / current_value * 100
 
+            # A plain cache read (see charting.next_earnings_badge_info()) -
+            # no live Yahoo Finance call here, since the nightly warming
+            # job (warm_price_cache.py) already keeps earnings_cache
+            # fresh. None unless the position's next earnings date is
+            # within 10 days.
+            earnings_info = charting.next_earnings_badge_info(conn, position["symbol"])
+
             enriched.append({
                 **position,
                 "current_price": current_price,
@@ -129,6 +136,7 @@ if positions:
                 "heat_pct": heat_pct,
                 "ma_settings": ma_settings,
                 "ma_signal": ma_signal,
+                "earnings_info": earnings_info,
             })
 
 # --- Positions & stop-loss --------------------------------------------------
@@ -226,6 +234,9 @@ if positions:
          pl_col, stop_col, o_col, m_col, a_col, signal_col) = st.columns(COLUMN_WIDTHS)
 
         ticker_col.write(position_label(e))
+        if e["earnings_info"] is not None:
+            ticker_col.badge(
+                f"Earnings in {e['earnings_info']['days_until']}d", icon="📅", color="violet")
         entry_col.write(e["entry_date"].strftime("%m/%d/%Y"))
         shares_col.write(f"{e['quantity']:,.0f}")
         avg_col.write(f"${e['avg_price']:,.2f}")

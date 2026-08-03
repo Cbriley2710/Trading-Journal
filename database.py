@@ -488,6 +488,22 @@ def init_db(conn):
             fetched_for_date DATE NOT NULL
         )
     """)
+    # A persistent cache of each tracked symbol's next earnings date,
+    # warmed by the same once-a-day job as price_cache above (see
+    # warm_price_cache.py/charting.warm_earnings_cache_for_symbol()).
+    # Feeds the Journal Session's "earnings within 10 days" badge (see
+    # charting.build_figure()) with a plain date-math check instead of
+    # a live Yahoo Finance call during the session itself.
+    # `next_earnings_date` is NULL when Yahoo Finance has no known
+    # upcoming date for the symbol - that correctly means "no badge"
+    # downstream, not "not cached yet" (see get_cached_next_earnings_date()).
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS earnings_cache (
+            symbol TEXT PRIMARY KEY,
+            next_earnings_date DATE,
+            fetched_at TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+    """)
     # A Trade Review Report: one batch of CLOSED trades reviewed together
     # in one guided session (see pages/1_Trade_Analyzer.py's Review
     # Session) - `range_start`/`range_end` are just the date-range filter
@@ -1559,6 +1575,38 @@ def save_cached_price_history(conn, symbol, history_dict, fetched_for_date):
             fetched_for_date = EXCLUDED.fetched_for_date
         """,
         (symbol, Json(history_dict), fetched_for_date),
+    )
+    conn.commit()
+
+
+def get_cached_next_earnings_date(conn, symbol):
+    """
+    Returns `symbol`'s cached next earnings date (a plain date), or None
+    if either nothing's cached for it yet OR Yahoo Finance has no known
+    upcoming date - both cases mean "don't show the earnings badge",
+    which is why this doesn't distinguish the two.
+    """
+    cur = conn.cursor()
+    cur.execute("SELECT next_earnings_date FROM earnings_cache WHERE symbol = %s", (symbol,))
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def save_cached_next_earnings_date(conn, symbol, next_earnings_date):
+    """Saves (or overwrites) `symbol`'s cached next earnings date -
+    `next_earnings_date` may be None (Yahoo Finance has no known
+    upcoming date for this symbol). Called by the after-close warming
+    job, never by an interactive chart view itself."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO earnings_cache (symbol, next_earnings_date, fetched_at)
+        VALUES (%s, %s, NOW())
+        ON CONFLICT (symbol) DO UPDATE SET
+            next_earnings_date = EXCLUDED.next_earnings_date,
+            fetched_at = NOW()
+        """,
+        (symbol, next_earnings_date),
     )
     conn.commit()
 

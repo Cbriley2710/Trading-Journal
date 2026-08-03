@@ -64,7 +64,8 @@ def fact_tile(column, label, value, color=None):
     ui.stat_tile(column, label, value, color)
 
 
-def render_price_chart(conn, symbol, entry_point, entry_label, key_prefix, stop_loss=None, anchor_id=None):
+def render_price_chart(conn, symbol, entry_point, entry_label, key_prefix, stop_loss=None, anchor_id=None,
+                        show_earnings_flag=False):
     """
     The Timeframe/Chart-Settings controls plus the price chart itself -
     split out from render_chart_and_journal() below so the Journal
@@ -88,6 +89,11 @@ def render_price_chart(conn, symbol, entry_point, entry_label, key_prefix, stop_
     viewport, with the chart, volume panel, and journal box all in one
     screen - not higher up at "Reviewing X of Y," which still left the
     chart itself below the fold.
+
+    `show_earnings_flag`, passed through to charting.build_figure(),
+    only True from render_journal_session() - the guided session is the
+    one place an upcoming-earnings badge should show, not free-browsing
+    a chart elsewhere on this page.
     """
     timeframe_options = list(charting.TIMEFRAMES.keys())
     timeframe_label = st.radio(
@@ -155,7 +161,7 @@ def render_price_chart(conn, symbol, entry_point, entry_label, key_prefix, stop_
     fig, fit_payload = charting.build_figure(
         symbol, history, entry_point, settings, overlay_history, entry_label=entry_label, interval=interval,
         visible_range=(visible_start, display_end), stop_loss=stop_loss, drawings=saved_drawings,
-        bake_arrow_traces=False)
+        bake_arrow_traces=False, show_earnings_flag=show_earnings_flag, conn=conn)
     current_drawings = charting.render_interactive_chart(fig, fit_payload, saved_drawings, key=key_prefix)["drawings"]
 
     # Only writes to the database when the chart component reports
@@ -841,7 +847,8 @@ def render_journal_session(conn):
         st.divider()
 
     entry_point = render_price_chart(
-        conn, symbol, item["entry_point"], item["entry_label"], key_prefix, stop_loss=stop_loss, anchor_id=anchor_id)
+        conn, symbol, item["entry_point"], item["entry_label"], key_prefix, stop_loss=stop_loss, anchor_id=anchor_id,
+        show_earnings_flag=True)
 
     if should_scroll:
         ui.scroll_to_anchor(anchor_id)

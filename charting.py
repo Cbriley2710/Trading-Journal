@@ -581,6 +581,76 @@ def price_near_date(history, target_date):
 
 
 @st.cache_data(ttl=60, show_spinner=False)
+def warm_earnings_cache_for_symbol(symbol):
+    """
+    Looks up `symbol`'s next earnings date via yfinance and stores it in
+    the persistent earnings_cache table (see
+    database.save_cached_next_earnings_date()). Called by
+    warm_price_cache.py in the same once-a-day, paced loop that already
+    warms price history for every tracked symbol, so the Journal
+    Session's "earnings within 10 days" badge (see build_figure()) reads
+    an already-warm value instead of making its own live Yahoo Finance
+    call during the session.
+
+    Returns "ok" (cached something, possibly a NULL "no known upcoming
+    date"), "rate_limited", or "fetch_failed" - same shape as
+    warm_price_cache_for_symbol() so the caller can print/skip
+    accordingly instead of treating every non-success the same way.
+    """
+    earnings = None
+    for attempt in range(2):
+        try:
+            earnings = yf.Ticker(symbol).get_earnings_dates(limit=12)
+            break
+        except YFRateLimitError:
+            # Same one-retry-after-a-short-pause approach as
+            # warm_price_cache_for_symbol() - a rate limit often clears
+            # within a couple seconds.
+            if attempt == 0:
+                time.sleep(2)
+                continue
+            return "rate_limited"
+        except Exception:
+            return "fetch_failed"
+
+    conn = database.get_connection()
+    if earnings is None or earnings.empty:
+        # Not every symbol has upcoming earnings data (ETFs, for
+        # instance) - caching a NULL here (rather than leaving no row at
+        # all) still means "don't show the badge", same as a real date
+        # more than 10 days out would.
+        database.save_cached_next_earnings_date(conn, symbol, None)
+        return "ok"
+
+    # get_earnings_dates() returns both past and future estimated
+    # dates in one DataFrame, not necessarily in a convenient order -
+    # so this just filters for anything today-or-later and takes the
+    # soonest, rather than trusting row order.
+    index = earnings.index.tz_localize(None) if earnings.index.tz is not None else earnings.index
+    today = timeutil.today_eastern()
+    upcoming = sorted(d.date() for d in index if d.date() >= today)
+    database.save_cached_next_earnings_date(conn, symbol, upcoming[0] if upcoming else None)
+    return "ok"
+
+
+def next_earnings_badge_info(conn, symbol, within_days=10):
+    """
+    Returns {"date": "YYYY-MM-DD", "days_until": N} if `symbol` has a
+    cached next earnings date within `within_days` days from now
+    (inclusive, never in the past), or None otherwise - the None case
+    covers "no cached date," "no known upcoming earnings," and "earnings
+    are further out than within_days" all the same way, since all three
+    mean the same thing to a caller: don't show the badge.
+    """
+    next_date = database.get_cached_next_earnings_date(conn, symbol)
+    if next_date is None:
+        return None
+    days_until = (next_date - timeutil.today_eastern()).days
+    if not (0 <= days_until <= within_days):
+        return None
+    return {"date": next_date.isoformat(), "days_until": days_until}
+
+
 def fetch_latest_price(symbol):
     """
     Returns the most recent closing price for a symbol (a plain, current
@@ -1117,7 +1187,8 @@ def _format_trade_moment(dt):
 
 
 def build_figure(symbol, history, entry_point, settings, overlay_history=None, entry_label="Entry", interval="1d",
-                  visible_range=None, stop_loss=None, drawings=None, bake_arrow_traces=True):
+                  visible_range=None, stop_loss=None, drawings=None, bake_arrow_traces=True,
+                  show_earnings_flag=False, conn=None):
     """
     Builds the go.Figure for a price chart: candlestick or line, moving
     averages, an entry marker (plus an exit marker and connecting line if
@@ -1158,6 +1229,14 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
     single arrow placed/erased change this figure's data, which forces
     an unnecessary full chart rebuild (and a fresh price-history fetch)
     on every click instead of just a lightweight client-side redraw.
+
+    `show_earnings_flag`, if True, adds an "earnings within 10 days"
+    badge to the chart component's status bar (see
+    next_earnings_badge_info() and chart_component/index.html's
+    showDailyInfo()) - only the guided Journal Session passes this,
+    so free-browsing a chart elsewhere in the app doesn't show it.
+    Requires `conn` when True (falls back to database.get_connection()
+    if not given).
     """
     entry_date = entry_point["entry_date"]
     buy_price = entry_point["buy_price"]
@@ -1218,6 +1297,11 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
         "symbol": symbol,
         "interval_label": INTERVAL_LABELS.get(interval, interval),
     }
+    if show_earnings_flag:
+        earnings_conn = conn if conn is not None else database.get_connection()
+        earnings_info = next_earnings_badge_info(earnings_conn, symbol)
+        if earnings_info is not None:
+            fit_payload["meta"]["earnings"] = earnings_info
 
     # secondary_y=True on row 1 only is what makes an overlay ticker's
     # own price scale possible below - row 2 (volume) never needs one.
