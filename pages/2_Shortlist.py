@@ -65,7 +65,7 @@ def fact_tile(column, label, value, color=None):
 
 
 def render_price_chart(conn, symbol, entry_point, entry_label, key_prefix, stop_loss=None, anchor_id=None,
-                        show_earnings_flag=False):
+                        show_earnings_flag=False, plan_entry_price=None, plan_stop_price=None):
     """
     The Timeframe/Chart-Settings controls plus the price chart itself -
     split out from render_chart_and_journal() below so the Journal
@@ -94,6 +94,12 @@ def render_price_chart(conn, symbol, entry_point, entry_label, key_prefix, stop_
     only True from render_journal_session() - the guided session is the
     one place an upcoming-earnings badge should show, not free-browsing
     a chart elsewhere on this page.
+
+    `plan_entry_price`/`plan_stop_price`, also passed straight through
+    to charting.build_figure(), are a watchlist ticker's saved plan (see
+    database.get_logbook_entry()) - callers read today's logbook entry
+    themselves before calling this, so the green/red lines are already
+    on the FIRST render, not just after the next save.
     """
     timeframe_options = list(charting.TIMEFRAMES.keys())
     timeframe_label = st.radio(
@@ -161,7 +167,8 @@ def render_price_chart(conn, symbol, entry_point, entry_label, key_prefix, stop_
     fig, fit_payload = charting.build_figure(
         symbol, history, entry_point, settings, overlay_history, entry_label=entry_label, interval=interval,
         visible_range=(visible_start, display_end), stop_loss=stop_loss, drawings=saved_drawings,
-        bake_arrow_traces=False, show_earnings_flag=show_earnings_flag, conn=conn)
+        bake_arrow_traces=False, show_earnings_flag=show_earnings_flag, conn=conn,
+        plan_entry_price=plan_entry_price, plan_stop_price=plan_stop_price)
     current_drawings = charting.render_interactive_chart(fig, fit_payload, saved_drawings, key=key_prefix)["drawings"]
 
     # Only writes to the database when the chart component reports
@@ -178,7 +185,8 @@ def render_journal_box(conn, symbol, key_prefix, submit_labels=("Save",), on_wat
     """
     One row, left to right: yesterday's entry (read-only), today's
     entry (a short text box - a journal entry here is usually a
-    sentence or two, not a full-width essay box), the Save/Next/Skip
+    sentence or two, not a full-width essay box), a Plan Entry/Plan Stop
+    pair (watchlist tickers only - see below), the Save/Next/Skip
     button(s) stacked in their own narrow column, and (if `on_watchlist`)
     a compact "remove from watchlist" checkbox - everything in one
     compact row near the bottom of the chart instead of yesterday's
@@ -200,6 +208,14 @@ def render_journal_box(conn, symbol, key_prefix, submit_labels=("Save",), on_wat
     and clear_on_submit empties the box right after a successful submit
     instead of leaving what you just wrote sitting there.
 
+    The Plan Entry/Plan Stop boxes live in the same form as notes, so
+    they also clear right after a submit - the risk/equity-loss caption
+    under them, though, is computed from the ALREADY-SAVED plan (read
+    at the top of this function, before the form), not from whatever's
+    currently typed - so it keeps showing the correct numbers even on
+    the render where the boxes themselves have just gone blank, and
+    naturally updates to the new numbers on the next save.
+
     The widget's own key includes `symbol`, not just `key_prefix` - the
     single-ticker view reuses the same key_prefix ("position" or
     "watchlist") no matter which ticker is currently selected, and
@@ -216,25 +232,45 @@ def render_journal_box(conn, symbol, key_prefix, submit_labels=("Save",), on_wat
     per form can be `type="primary"`). `on_watchlist` should be True
     only when `symbol` is a real, manually-managed watchlist row (not
     an open position, which List 5 shows automatically but isn't itself
-    a watchlist entry to remove) - see this function's callers.
+    a watchlist entry to remove) - see this function's callers. It also
+    gates the Plan Entry/Plan Stop boxes: only a watchlist "setup" gets
+    a plan, since an open position already has its real entry/stop
+    tracked on the Positions & Stop-Loss table.
 
-    Returns (clicked_label_or_None, notes, remove_from_watchlist) -
-    notes is always whatever's in the box at submit time regardless of
-    which button was clicked; remove_from_watchlist is only ever True
-    if `on_watchlist` was True AND that checkbox was checked at submit.
+    Returns (clicked_label_or_None, notes, remove_from_watchlist,
+    plan_entry_price, plan_stop_price) - notes is always whatever's in
+    the box at submit time regardless of which button was clicked;
+    remove_from_watchlist is only ever True if `on_watchlist` was True
+    AND that checkbox was checked at submit. plan_entry_price/
+    plan_stop_price are the current Plan Entry/Plan Stop box values (a
+    blank/0 box reads as None, meaning "no plan"/"clear the plan"), or
+    always (None, None) when `on_watchlist` is False.
     """
     today = timeutil.today_eastern()
     existing_entry = database.get_logbook_entry(conn, symbol, today)
     existing_notes = existing_entry["notes"] if existing_entry else ""
+    existing_plan_entry = existing_entry["plan_entry_price"] if existing_entry else None
+    existing_plan_stop = existing_entry["plan_stop_price"] if existing_entry else None
 
     yesterday = today - timedelta(days=1)
     yesterday_entry = database.get_logbook_entry(conn, symbol, yesterday)
     yesterday_notes = yesterday_entry["notes"] if yesterday_entry and yesterday_entry["notes"] else ""
 
+    # Computed from the ALREADY-SAVED plan (not whatever's currently in
+    # the boxes below, which may be about to clear on this very submit -
+    # see this function's own docstring) so it's always an honest
+    # readout of what's actually persisted.
+    existing_metrics = charting.plan_risk_metrics(existing_plan_entry, existing_plan_stop)
+
     clicked = None
     remove_from_watchlist = False
+    plan_entry_price = plan_stop_price = None
     with st.form(key=f"{key_prefix}_{symbol}_journal_form", clear_on_submit=True, border=False):
-        yesterday_col, box_col, button_col, checkbox_col = st.columns([2, 2, 1, 0.6])
+        if on_watchlist:
+            yesterday_col, box_col, plan_col, button_col, checkbox_col = st.columns([1.3, 1.3, 1.6, 1, 0.6])
+        else:
+            yesterday_col, box_col, button_col, checkbox_col = st.columns([2, 2, 1, 0.6])
+            plan_col = None
 
         with yesterday_col:
             with st.container(border=True):
@@ -244,6 +280,32 @@ def render_journal_box(conn, symbol, key_prefix, submit_labels=("Save",), on_wat
         notes = box_col.text_area(
             "Today's Journal", value=existing_notes or "",
             height=68, key=f"{key_prefix}_{symbol}_notes")
+
+        if plan_col is not None:
+            with plan_col:
+                with st.container(border=True):
+                    st.caption("Plan for next setup")
+                    entry_sub, stop_sub = st.columns(2)
+                    entry_input = entry_sub.number_input(
+                        "Entry $", min_value=0.0, step=0.01, format="%.2f",
+                        value=existing_plan_entry or 0.0, key=f"{key_prefix}_{symbol}_plan_entry")
+                    stop_input = stop_sub.number_input(
+                        "Stop $", min_value=0.0, step=0.01, format="%.2f",
+                        value=existing_plan_stop or 0.0, key=f"{key_prefix}_{symbol}_plan_stop")
+                    plan_entry_price = entry_input if entry_input > 0 else None
+                    plan_stop_price = stop_input if stop_input > 0 else None
+
+                    if existing_metrics is not None:
+                        equity_text = " / ".join(
+                            f"{allocation}%: {loss:.1f}%"
+                            for allocation, loss in existing_metrics["equity_loss_pcts"].items()
+                        )
+                        st.caption(
+                            f"Saved plan risk to stop: {existing_metrics['price_loss_pct']:.1f}%  "
+                            f"·  Equity loss at {equity_text} of account"
+                        )
+                    else:
+                        st.caption("Set both prices and save to see risk %.")
 
         if len(submit_labels) == 1:
             # type="primary" isn't needed here for Ctrl+Enter to work -
@@ -269,13 +331,18 @@ def render_journal_box(conn, symbol, key_prefix, submit_labels=("Save",), on_wat
                 "Remove", key=f"{key_prefix}_{symbol}_remove_from_watchlist",
                 help="Remove from watchlist")
 
-    return clicked, notes, remove_from_watchlist
+    return clicked, notes, remove_from_watchlist, plan_entry_price, plan_stop_price
 
 
-def save_journal_entry(conn, symbol, entry_point, entry_label, notes, stop_loss=None):
+def save_journal_entry(conn, symbol, entry_point, entry_label, notes, stop_loss=None,
+                        plan_entry_price=None, plan_stop_price=None):
     """Archives today's chart snapshot and saves the journal entry -
     the actual work behind every "Save" button on this page, whether
-    it's the plain single-ticker view or a Journal Session step."""
+    it's the plain single-ticker view or a Journal Session step.
+    `plan_entry_price`/`plan_stop_price` (always None for a non-
+    watchlist symbol - see render_journal_box()) are saved separately
+    via database.save_journal_plan(), not upsert_logbook_entry() - see
+    that function's own docstring for why."""
     today = timeutil.today_eastern()
     with st.spinner("Saving and archiving today's chart..."):
         png_bytes = charting.build_archive_snapshot(
@@ -283,6 +350,7 @@ def save_journal_entry(conn, symbol, entry_point, entry_label, notes, stop_loss=
             datetime.combine(today, datetime.min.time()), direction=entry_point.get("direction", "LONG"),
             stop_loss=stop_loss)
     database.upsert_logbook_entry(conn, symbol, today, notes=notes, chart_image=png_bytes)
+    database.save_journal_plan(conn, symbol, today, plan_entry_price, plan_stop_price)
     return png_bytes
 
 
@@ -306,14 +374,27 @@ def render_chart_and_journal(conn, symbol, entry_point, entry_label, key_prefix,
     """
     anchor_id = f"{key_prefix}_{symbol}_journal_anchor"
 
-    entry_point = render_price_chart(conn, symbol, entry_point, entry_label, key_prefix, stop_loss=stop_loss, anchor_id=anchor_id)
+    # Read today's already-saved plan (if any) BEFORE the chart renders,
+    # so the green/red Plan Entry/Plan Stop lines show up on the very
+    # first render, not just after the next save - only ever set for a
+    # watchlist ticker (see render_journal_box()'s on_watchlist gating).
+    today_entry = database.get_logbook_entry(conn, symbol, timeutil.today_eastern()) if on_watchlist else None
+    plan_entry_price = today_entry["plan_entry_price"] if today_entry else None
+    plan_stop_price = today_entry["plan_stop_price"] if today_entry else None
+
+    entry_point = render_price_chart(
+        conn, symbol, entry_point, entry_label, key_prefix, stop_loss=stop_loss, anchor_id=anchor_id,
+        plan_entry_price=plan_entry_price, plan_stop_price=plan_stop_price)
     if entry_point is None:
         return
 
-    clicked, notes, remove_from_watchlist = render_journal_box(conn, symbol, key_prefix, on_watchlist=on_watchlist)
+    clicked, notes, remove_from_watchlist, plan_entry_price, plan_stop_price = render_journal_box(
+        conn, symbol, key_prefix, on_watchlist=on_watchlist)
 
     if clicked:
-        png_bytes = save_journal_entry(conn, symbol, entry_point, entry_label, notes, stop_loss=stop_loss)
+        png_bytes = save_journal_entry(
+            conn, symbol, entry_point, entry_label, notes, stop_loss=stop_loss,
+            plan_entry_price=plan_entry_price, plan_stop_price=plan_stop_price)
         if png_bytes is not None:
             st.success("Saved - today's chart has been archived to the Logbook.")
         else:
@@ -846,9 +927,17 @@ def render_journal_session(conn):
         stop_loss = render_position_stats(item["position"], conn)
         st.divider()
 
+    # Same "read the already-saved plan before the chart renders" as
+    # render_chart_and_journal() - see its own note. Only ever set for a
+    # watchlist item (see render_journal_box()'s on_watchlist gating).
+    is_watchlist_item = item["source"] == "watchlist"
+    today_entry = database.get_logbook_entry(conn, symbol, timeutil.today_eastern()) if is_watchlist_item else None
+    plan_entry_price = today_entry["plan_entry_price"] if today_entry else None
+    plan_stop_price = today_entry["plan_stop_price"] if today_entry else None
+
     entry_point = render_price_chart(
         conn, symbol, item["entry_point"], item["entry_label"], key_prefix, stop_loss=stop_loss, anchor_id=anchor_id,
-        show_earnings_flag=True)
+        show_earnings_flag=True, plan_entry_price=plan_entry_price, plan_stop_price=plan_stop_price)
 
     if should_scroll:
         ui.scroll_to_anchor(anchor_id)
@@ -867,9 +956,9 @@ def render_journal_session(conn):
         # looking for a box that was never going to exist.
         ui.focus_textarea("Today's Journal")
 
-    clicked, notes, remove_from_watchlist = render_journal_box(
+    clicked, notes, remove_from_watchlist, plan_entry_price, plan_stop_price = render_journal_box(
         conn, symbol, key_prefix, submit_labels=("Save & Next →", "Skip"),
-        on_watchlist=(item["source"] == "watchlist"))
+        on_watchlist=is_watchlist_item)
 
     if remove_from_watchlist and clicked:
         # Honored on either button, not just "Save & Next" - checking
@@ -885,6 +974,7 @@ def render_journal_session(conn):
         # several seconds per ticker, almost entirely kaleido/Chromium
         # startup overhead, not anything proportional to the image).
         database.upsert_logbook_entry(conn, symbol, timeutil.today_eastern(), notes=notes)
+        database.save_journal_plan(conn, symbol, timeutil.today_eastern(), plan_entry_price, plan_stop_price)
         session.setdefault("pending_archives", []).append({
             "symbol": symbol, "entry_point": entry_point,
             "entry_label": item["entry_label"], "stop_loss": stop_loss,

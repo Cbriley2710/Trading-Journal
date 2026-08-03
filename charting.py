@@ -651,6 +651,45 @@ def next_earnings_badge_info(conn, symbol, within_days=10):
     return {"date": next_date.isoformat(), "days_until": days_until}
 
 
+# Hypothetical account allocations the Plan Entry/Plan Stop boxes (see
+# pages/2_Shortlist.py's render_journal_box()) show equity risk for -
+# there's no shares/position-size input, so "equity % loss" is shown as
+# a small table of "if this were N% of my account" scenarios instead of
+# one real number tied to an actual position size.
+PLAN_ALLOCATION_PCTS = (10, 20, 30)
+
+
+def plan_risk_metrics(entry_price, stop_price):
+    """
+    Turns a watchlist ticker's planned entry/stop prices into risk
+    numbers for the Plan Entry/Plan Stop boxes, or None if either price
+    is missing or `entry_price` isn't positive (nothing meaningful to
+    divide by).
+
+    `price_loss_pct` is direction-agnostic - plain |entry - stop| /
+    entry - since a watchlist idea has no LONG/SHORT of its own yet
+    (unlike an open position), so this works whether the plan is "buy
+    above, stop below" or the reverse, without needing a direction
+    toggle.
+
+    `equity_loss_pcts` is {allocation%: equity_loss%} for each of
+    PLAN_ALLOCATION_PCTS - "if this position were N% of my account,
+    this stop costs me equity_loss% of my whole account" - just
+    price_loss_pct scaled by the allocation, no actual share count or
+    account dollar value needed.
+    """
+    if entry_price is None or stop_price is None or entry_price <= 0:
+        return None
+    price_loss_pct = abs(entry_price - stop_price) / entry_price * 100
+    return {
+        "price_loss_pct": price_loss_pct,
+        "equity_loss_pcts": {
+            allocation: price_loss_pct * allocation / 100
+            for allocation in PLAN_ALLOCATION_PCTS
+        },
+    }
+
+
 def fetch_latest_price(symbol):
     """
     Returns the most recent closing price for a symbol (a plain, current
@@ -1188,7 +1227,7 @@ def _format_trade_moment(dt):
 
 def build_figure(symbol, history, entry_point, settings, overlay_history=None, entry_label="Entry", interval="1d",
                   visible_range=None, stop_loss=None, drawings=None, bake_arrow_traces=True,
-                  show_earnings_flag=False, conn=None):
+                  show_earnings_flag=False, conn=None, plan_entry_price=None, plan_stop_price=None):
     """
     Builds the go.Figure for a price chart: candlestick or line, moving
     averages, an entry marker (plus an exit marker and connecting line if
@@ -1215,6 +1254,12 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
     scroll/zoom into on either side without an immediate empty edge.
     `stop_loss`, if given, draws a thin grey line at that price - only
     open positions have one (see database.get_stop_loss()).
+
+    `plan_entry_price`/`plan_stop_price`, if given, draw a green/red line
+    the same way - a watchlist ticker's saved "trading plan for next
+    time" (see database.get_logbook_entry()'s plan_entry_price/
+    plan_stop_price and pages/2_Shortlist.py's render_journal_box()).
+    Independent of each other - either can be set without the other.
 
     `drawings`, if given, is a symbol's saved line/rect/arrow_up/
     arrow_down shapes (see database.get_drawings()). Line/rect ones are
@@ -1451,6 +1496,26 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
             line=dict(color=MUTED_COLOR, width=1, dash="dot"),
             annotation_text="Stop", annotation_position="top left",
             annotation_font=dict(color=MUTED_COLOR, size=10),
+        )
+
+    # Same (possibly customized) green/red used for a winning/losing
+    # trade elsewhere in the app (see win_loss_color()) - dashed rather
+    # than the real Stop line's dotted style, so a watchlist ticker that
+    # someday becomes an open position with both a real stop AND a
+    # leftover plan doesn't show two visually identical grey lines.
+    if plan_entry_price is not None:
+        fig.add_hline(
+            y=plan_entry_price, row=1, col=1,
+            line=dict(color=win_loss_color(True), width=1, dash="dash"),
+            annotation_text="Plan Entry", annotation_position="top left",
+            annotation_font=dict(color=win_loss_color(True), size=10),
+        )
+    if plan_stop_price is not None:
+        fig.add_hline(
+            y=plan_stop_price, row=1, col=1,
+            line=dict(color=win_loss_color(False), width=1, dash="dash"),
+            annotation_text="Plan Stop", annotation_position="top left",
+            annotation_font=dict(color=win_loss_color(False), size=10),
         )
 
     # Volume panel - bars colored the same up/down as the candles

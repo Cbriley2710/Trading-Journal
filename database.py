@@ -244,6 +244,16 @@ def init_db(conn):
             UNIQUE (symbol, entry_date)
         )
     """)
+    # A watchlist ticker's "trading plan for next time" - the entry/stop
+    # prices typed into the Plan Entry/Plan Stop boxes on the Shortlist
+    # page (see pages/2_Shortlist.py's render_journal_box()), NULL when
+    # no plan's been set for that day. Only ever set for watchlist
+    # tickers, never open positions - see render_journal_box()'s own
+    # `on_watchlist` gating for why.
+    if not _column_exists(cur, "logbook_entries", "plan_entry_price"):
+        cur.execute("ALTER TABLE logbook_entries ADD COLUMN plan_entry_price DOUBLE PRECISION")
+    if not _column_exists(cur, "logbook_entries", "plan_stop_price"):
+        cur.execute("ALTER TABLE logbook_entries ADD COLUMN plan_stop_price DOUBLE PRECISION")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS watchlist (
             id SERIAL PRIMARY KEY,
@@ -972,11 +982,41 @@ def upsert_logbook_entry(conn, symbol, entry_date, notes=None, chart_image=None,
     conn.commit()
 
 
+def save_journal_plan(conn, symbol, entry_date, plan_entry_price, plan_stop_price):
+    """
+    Saves (or clears) a watchlist ticker's trading plan for one day -
+    unlike upsert_logbook_entry()'s notes/chart_image/archived_at, this
+    always OVERWRITES both fields with exactly what's passed, including
+    None - the same "no COALESCE" convention position_stops already
+    uses (see set_stop_loss()/delete_stop_loss()), since the Plan
+    Entry/Plan Stop boxes being left blank on a later save means "clear
+    this plan," not "leave whatever was there before." The journal
+    form's own Save action is the only caller. Creates the day's
+    logbook_entries row if it doesn't exist yet - a plan can be the
+    first thing saved for a ticker today, before any notes.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO logbook_entries (symbol, entry_date, plan_entry_price, plan_stop_price)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (symbol, entry_date) DO UPDATE SET
+            plan_entry_price = EXCLUDED.plan_entry_price,
+            plan_stop_price = EXCLUDED.plan_stop_price
+        """,
+        (symbol, entry_date, plan_entry_price, plan_stop_price),
+    )
+    conn.commit()
+
+
 def get_logbook_entry(conn, symbol, entry_date):
     """Returns one day's logbook row for a symbol, or None if it doesn't exist yet."""
     cur = conn.cursor()
     cur.execute(
-        "SELECT notes, chart_image, archived_at FROM logbook_entries WHERE symbol = %s AND entry_date = %s",
+        """
+        SELECT notes, chart_image, archived_at, plan_entry_price, plan_stop_price
+        FROM logbook_entries WHERE symbol = %s AND entry_date = %s
+        """,
         (symbol, entry_date),
     )
     row = cur.fetchone()
@@ -986,6 +1026,8 @@ def get_logbook_entry(conn, symbol, entry_date):
         "notes": row[0],
         "chart_image": bytes(row[1]) if row[1] is not None else None,
         "archived_at": row[2],
+        "plan_entry_price": row[3],
+        "plan_stop_price": row[4],
     }
 
 
@@ -1002,7 +1044,10 @@ def get_logbook_entries_for_date(conn, entry_date):
     """
     cur = conn.cursor()
     cur.execute(
-        "SELECT symbol, notes, chart_image, archived_at FROM logbook_entries WHERE entry_date = %s",
+        """
+        SELECT symbol, notes, chart_image, archived_at, plan_entry_price, plan_stop_price
+        FROM logbook_entries WHERE entry_date = %s
+        """,
         (entry_date,),
     )
     return {
@@ -1010,6 +1055,8 @@ def get_logbook_entries_for_date(conn, entry_date):
             "notes": row[1],
             "chart_image": bytes(row[2]) if row[2] is not None else None,
             "archived_at": row[3],
+            "plan_entry_price": row[4],
+            "plan_stop_price": row[5],
         }
         for row in cur.fetchall()
     }

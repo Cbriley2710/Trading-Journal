@@ -122,6 +122,28 @@ def _write_ticker_page(pdf, section_label, symbol, entry):
         pdf.set_font("Helvetica", size=11)
         pdf.cell(0, 6, "No chart archived for this day yet.", new_x="LMARGIN", new_y="NEXT")
 
+    # A watchlist ticker's saved "trading plan for next time" (see
+    # pages/2_Shortlist.py's render_journal_box()) - never set for an
+    # open position, so this is skipped entirely for those without any
+    # extra check here.
+    plan_entry = entry.get("plan_entry_price")
+    plan_stop = entry.get("plan_stop_price")
+    metrics = charting.plan_risk_metrics(plan_entry, plan_stop)
+    if metrics is not None:
+        equity_text = " / ".join(
+            f"{allocation}%: {loss:.1f}%" for allocation, loss in metrics["equity_loss_pcts"].items()
+        )
+        pdf.set_font("Helvetica", style="B", size=10)
+        pdf.multi_cell(
+            0, 6,
+            safe_text(
+                f"Plan: Entry ${plan_entry:,.2f}  ·  Stop ${plan_stop:,.2f}  ·  "
+                f"Risk to stop {metrics['price_loss_pct']:.1f}%  ·  "
+                f"Equity loss at {equity_text} of account"
+            ),
+        )
+        pdf.ln(1)
+
     notes_text = entry["notes"].strip() if entry["notes"] else ""
     pdf.set_font("Helvetica", style="I", size=10)
     pdf.multi_cell(0, 6, safe_text(notes_text or "No notes recorded for this day."))
