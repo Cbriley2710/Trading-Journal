@@ -12,6 +12,18 @@ to day.
 Every test cleans up its own signal_log rows in a finally block, even
 on failure, so a broken assertion never leaves test data behind for a
 future run to trip over.
+
+IMPORTANT: reconcile_all_pending() processes EVERY unreconciled row in
+signal_log, not just this test's own - and since real Screener usage
+now leaves real pending signals in that table, every monkeypatched
+`_cached_fetch_one` below is scoped to TEST_TICKER (falling back to
+None - a harmless "fetch failed" - for anything else). An unscoped
+fake that returns the same made-up price history for every ticker
+would apply nonsense data to real signals too, and depending on
+whether their real trigger/stop happens to fall inside that fake
+range, could silently write bogus reconciliation results to production
+data. (This bit us once already - see git history around the
+transaction-dedup fix this file was touched alongside.)
 """
 import numpy as np
 import pandas as pd
@@ -77,11 +89,13 @@ def test_reconcile_all_pending_resolves_a_stopped_out_signal(conn, monkeypatch):
         dict(open=100, high=101, low=97, close=98.5),     # stop hit (low <= 98)
     ]
     fake = _fake_history(signal_date, rows)
-    monkeypatch.setattr(reconcile, "_cached_fetch_one", lambda ticker, session_date: fake)
+    monkeypatch.setattr(
+        reconcile, "_cached_fetch_one",
+        lambda ticker, session_date: fake if ticker == TEST_TICKER else None)
 
     try:
         summary = reconcile.reconcile_all_pending(conn)
-        assert summary["resolved"] == 1
+        assert summary["resolved"] >= 1
         assert TEST_TICKER not in summary["fetch_failed"]
 
         remaining = [s for s in database.get_unreconciled_signals(conn) if s["ticker"] == TEST_TICKER]
@@ -119,12 +133,17 @@ def test_reconcile_all_pending_leaves_still_open_signal_unreconciled(conn, monke
     rows = [dict(open=104, high=106, low=103, close=105.5)]
     rows += [dict(open=105.5, high=106, low=105, close=105.5)] * 5  # quiet, no exit
     fake = _fake_history(signal_date, rows)
-    monkeypatch.setattr(reconcile, "_cached_fetch_one", lambda ticker, session_date: fake)
+    # Scoped to TEST_TICKER only - other pending signals in the table
+    # (real ones, from actual Screener use) must never be reconciled
+    # against this fake price data. Returning None for anything else is
+    # a harmless "fetch failed" for those, not a corrupting write.
+    monkeypatch.setattr(
+        reconcile, "_cached_fetch_one",
+        lambda ticker, session_date: fake if ticker == TEST_TICKER else None)
 
     try:
         summary = reconcile.reconcile_all_pending(conn)
-        assert summary["resolved"] == 0
-        assert summary["still_pending"] == 1
+        assert summary["still_pending"] >= 1
 
         remaining = [s for s in database.get_unreconciled_signals(conn) if s["ticker"] == TEST_TICKER]
         assert len(remaining) == 1
@@ -153,11 +172,17 @@ def test_reconcile_all_pending_records_fetch_failure_without_crashing(conn, monk
     )
     conn.commit()
 
+    # Unconditionally None is safe here regardless of ticker (a fetch
+    # failure never writes anything - see reconcile_all_pending()) -
+    # unlike the other two tests above, there's no fake price data that
+    # could apply nonsense to a real signal. Other real pending tickers
+    # will also show up as "fetch failed" in this run as a side effect;
+    # the assertions below only check TEST_TICKER's own outcome.
     monkeypatch.setattr(reconcile, "_cached_fetch_one", lambda ticker, session_date: None)
 
     try:
         summary = reconcile.reconcile_all_pending(conn)
-        assert summary["fetch_failed"] == [TEST_TICKER]
+        assert TEST_TICKER in summary["fetch_failed"]
         assert summary["resolved"] == 0
         remaining = [s for s in database.get_unreconciled_signals(conn) if s["ticker"] == TEST_TICKER]
         assert len(remaining) == 1  # untouched, will retry next run

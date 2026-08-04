@@ -686,18 +686,28 @@ def _insert_transactions(conn, transactions):
          a cent (or 0.2%, whichever is bigger, for pricier stocks).
 
     That fuzzy price check in #2 is deliberately source-aware (only
-    kicks in when the two rows come from different places - "csv" vs
-    "snaptrade") - it used to apply no matter where either row came
-    from, which meant two genuinely SEPARATE fills from the SAME
-    source (e.g. one order filled in two 100-share chunks a few cents
-    apart, which is completely normal) could get mistaken for "the same
-    fill reported twice" and one of them silently thrown away forever -
-    confirmed happening for real (a 500-share sale where only 400
-    shares of matching buys survived, permanently losing 100 shares of
-    profit/loss). Within a single source (or when either row's source
-    isn't known - see init_db's migration note on this column), a real
-    duplicate report of the same execution would carry the exact same
-    price, not just a close one, so an exact match is required instead.
+    kicks in when the two rows' `source` values are actually DIFFERENT,
+    per Python's plain `==` - see same_fill() below) - it used to apply
+    no matter where either row came from, which meant two genuinely
+    SEPARATE fills from the SAME source (e.g. one order filled in two
+    100-share chunks a few cents apart, which is completely normal)
+    could get mistaken for "the same fill reported twice" and one of
+    them silently thrown away forever - confirmed happening for real (a
+    500-share sale where only 400 shares of matching buys survived,
+    permanently losing 100 shares of profit/loss). Same source
+    (including both sides None/unknown - e.g. rows from before this
+    column existed - `None == None` counts as "same" here) requires an
+    exact price match; different/unknown-vs-known sources get the fuzzy
+    tolerance. **A `None` (unknown) source is treated as POSSIBLY
+    different from a known one, not assumed same** - a legacy
+    pre-source-column row re-synced later via SnapTrade needs the fuzzy
+    tolerance too (two independent platforms essentially never agree on
+    a fill's price to the fraction of a cent) - the earlier, stricter
+    `t["source"] and e["source"] and t["source"] != e["source"]` check
+    missed exactly this case (a None row never counted as "different"
+    from anything) and let 46 real SnapTrade-vs-legacy duplicates
+    through in production before this was tightened to a plain
+    `t["source"] == e["source"]` comparison.
 
     Since a CSV export always contains your FULL history, and a
     SnapTrade sync re-fetches a recent overlapping window every time
@@ -738,18 +748,34 @@ def _insert_transactions(conn, transactions):
                 or e["action"] != t["action"] or e["quantity"] != t["quantity"]):
             return False
 
-        if t["source"] and e["source"] and t["source"] != e["source"]:
-            # Different sources reporting what might be the same real
-            # fill - allow the small rounding-level price gap that
-            # comes from two platforms displaying the same execution
-            # slightly differently.
-            return abs(e["price"] - t["price"]) <= max(0.01, e["price"] * 0.002)
+        if t["source"] == e["source"]:
+            # Genuinely the same source - including both None/unknown,
+            # e.g. two rows from before this column existed - a real
+            # duplicate report of the same execution would carry the
+            # exact same price, so two truly separate fills essentially
+            # never land on the identical price. Require an exact match
+            # rather than the loose tolerance below. (This is also what
+            # protects against the older bug the tolerance check itself
+            # used to cause: two genuinely separate same-source fills a
+            # few cents apart getting mistaken for one fill reported
+            # twice - see this function's own docstring.)
+            return e["price"] == t["price"]
 
-        # Same source (or one/both unknown, e.g. rows from before this
-        # column existed) - two truly separate fills essentially never
-        # land on the identical price, so require an exact match rather
-        # than the loose tolerance above.
-        return e["price"] == t["price"]
+        # Different (and both KNOWN, e.g. "csv" vs "snaptrade") sources,
+        # OR one side unknown (None) and the other known - either way,
+        # possibly the same real fill reported by two different
+        # platforms/import paths, so allow the small rounding-level
+        # price gap that comes from two platforms displaying the same
+        # execution slightly differently. Treating "unknown" as
+        # possibly-different (not "assume same") matters in practice:
+        # a legacy pre-source-column row synced again later via
+        # SnapTrade would otherwise never be recognized as the same
+        # fill, since two independent platforms essentially never
+        # report the identical price to the fraction of a cent -
+        # confirmed causing real duplicate transactions (inflated open
+        # positions) before this was source == source instead of
+        # source and source.
+        return abs(e["price"] - t["price"]) <= max(0.01, e["price"] * 0.002)
 
     def is_duplicate(t, others):
         return any(same_fill(t, e) for e in others)
