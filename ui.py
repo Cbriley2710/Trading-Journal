@@ -162,6 +162,24 @@ def focus_textarea(label):
     )
 
 
+def parse_ticker_input(text):
+    """
+    Turns "NVDA" or a pasted batch like "NVDA, AMD MSFT" (commas,
+    spaces, tabs, or new lines between tickers - however it was copied)
+    into a clean, de-duplicated list of uppercase symbols, keeping the
+    order they were typed. Shared by the Shortlist page's watchlist-add
+    box and the Screener page's ticker list - moved here (rather than
+    living only on Shortlist, where it started) once a second page
+    needed the exact same parsing.
+    """
+    symbols = []
+    for part in text.replace(",", " ").split():
+        sym = part.strip().upper()
+        if sym and sym not in symbols:
+            symbols.append(sym)
+    return symbols
+
+
 def stat_tile(column, label, value, color=None, size="1.4rem"):
     """
     Renders one number in a column, with its muted label above it. If a

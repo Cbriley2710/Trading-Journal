@@ -605,6 +605,59 @@ def init_db(conn):
             CONSTRAINT single_row CHECK (id = 1)
         )
     """)
+    # The Screener page's signal log (see screener/engine.py and
+    # pages/7_Screener.py) - one row per (signal_date, ticker), for
+    # EVERY baseline-passing candidate, not just the strict ones shown
+    # by default or the ones the user actually acted on. That's the
+    # whole point of logging it at all: reviewing later whether the
+    # strict filter is hiding winners the baseline tier would have
+    # caught, and whether the user's own skips are helping or costing
+    # money - neither question is answerable from a log that only
+    # keeps what was shown/taken. `trigger_price`/`close_price` (not
+    # `trigger`/`close`) sidestep `trigger` being a reserved SQL
+    # keyword and `close` reading oddly unquoted.
+    #
+    # triggered/trigger_date/outcome_*/exit_reason/reconciled_at start
+    # NULL and are filled in later by screener.reconcile - see that
+    # module's own docstring for the three exit conditions it
+    # simulates. user_action/user_note are the only fields this app
+    # itself ever sets directly on an already-logged row (see
+    # update_signal_user_action() below) - everything else about a
+    # signal is immutable once logged, same "append-only" idea
+    # daily_screen.py's own append_log() already uses for its CSV.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS signal_log (
+            id SERIAL PRIMARY KEY,
+            signal_date DATE NOT NULL,
+            ticker TEXT NOT NULL,
+            tier TEXT NOT NULL,
+            trigger_price DOUBLE PRECISION NOT NULL,
+            stop_price DOUBLE PRECISION NOT NULL,
+            risk_pct DOUBLE PRECISION NOT NULL,
+            shares INTEGER NOT NULL,
+            position_usd DOUBLE PRECISION NOT NULL,
+            risk_usd DOUBLE PRECISION NOT NULL,
+            adr DOUBLE PRECISION NOT NULL,
+            rs_excess DOUBLE PRECISION NOT NULL,
+            rsline_at_high BOOLEAN NOT NULL,
+            nr7_2 BOOLEAN NOT NULL,
+            pct_off_high DOUBLE PRECISION NOT NULL,
+            close_price DOUBLE PRECISION NOT NULL,
+            gate_pct DOUBLE PRECISION,
+            expires DATE NOT NULL,
+            triggered BOOLEAN,
+            trigger_date DATE,
+            user_action TEXT,
+            user_note TEXT,
+            outcome_return DOUBLE PRECISION,
+            outcome_r DOUBLE PRECISION,
+            outcome_bars INTEGER,
+            exit_reason TEXT,
+            reconciled_at TIMESTAMP,
+            created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+            UNIQUE (signal_date, ticker)
+        )
+    """)
     conn.commit()
 
 
@@ -2299,3 +2352,152 @@ def delete_tracked_goal(conn, goal_id):
     cur = conn.cursor()
     cur.execute("DELETE FROM tracked_goals WHERE id = %s", (goal_id,))
     conn.commit()
+
+
+# The Screener page's signal log (see screener/engine.py's own module
+# docstring and the signal_log table in init_db() above) - column order
+# here is the one source of truth _signal_row_to_dict() and every
+# SELECT below rely on, so a new column always gets added to BOTH the
+# CREATE TABLE and this list together.
+_SIGNAL_LOG_COLUMNS = [
+    "signal_date", "ticker", "tier", "trigger_price", "stop_price", "risk_pct",
+    "shares", "position_usd", "risk_usd", "adr", "rs_excess", "rsline_at_high",
+    "nr7_2", "pct_off_high", "close_price", "gate_pct", "expires",
+    "triggered", "trigger_date", "user_action", "user_note",
+    "outcome_return", "outcome_r", "outcome_bars", "exit_reason", "reconciled_at",
+]
+
+
+def _signal_row_to_dict(row):
+    return dict(zip(_SIGNAL_LOG_COLUMNS, row))
+
+
+def save_signals(conn, watchlist):
+    """
+    Bulk-logs every row in `watchlist` (a screener.engine.ScreenResult.
+    watchlist-shaped DataFrame, or anything with the same column names -
+    see screener/engine.py's make_orders()) into signal_log. Dedupes on
+    (signal_date, ticker) via ON CONFLICT DO NOTHING - the same "first
+    logged wins, permanently" semantics daily_screen.py's own
+    append_log() uses for its CSV, so a signal's logged numbers never
+    change even if it gets re-screened (carried forward at a different
+    age) on a later run.
+
+    Deliberately logs EVERY row passed in, strict and baseline alike -
+    the caller (pages/7_Screener.py) is responsible for passing the
+    FULL watchlist here regardless of which tier it's currently
+    displaying, since an unlogged baseline candidate can never be
+    reviewed later (see this module's own note on signal_log above).
+
+    Returns how many rows were actually NEW (not already logged).
+    """
+    if watchlist.empty:
+        return 0
+    cur = conn.cursor()
+    inserted = 0
+    for _, s in watchlist.iterrows():
+        cur.execute(
+            """
+            INSERT INTO signal_log
+                (signal_date, ticker, tier, trigger_price, stop_price, risk_pct,
+                 shares, position_usd, risk_usd, adr, rs_excess, rsline_at_high,
+                 nr7_2, pct_off_high, close_price, gate_pct, expires)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (signal_date, ticker) DO NOTHING
+            """,
+            (s.signal_date, s.ticker, s.tier, s.trigger, s.stop, s.risk_pct,
+             int(s.shares), s.position, s.risk_usd, s.adr, s.rs_excess, bool(s.rsline_at_high),
+             bool(s.nr7_2), s.pct_off_high, s.close, s.gate_pct, s.expires),
+        )
+        inserted += cur.rowcount
+    conn.commit()
+    return inserted
+
+
+def get_unreconciled_signals(conn):
+    """
+    Every signal screener.reconcile hasn't finished resolving yet -
+    reconciled_at IS NULL covers both a brand-new signal (nothing
+    checked at all) and a triggered-but-still-open one (see
+    screener.reconcile.reconcile_signal()'s `resolved` flag) - both
+    need re-checking against fresh price data on the next reconciliation
+    run.
+    """
+    cur = conn.cursor()
+    cur.execute(f"""
+        SELECT {", ".join(_SIGNAL_LOG_COLUMNS)} FROM signal_log
+        WHERE reconciled_at IS NULL
+        ORDER BY signal_date, ticker
+    """)
+    return [_signal_row_to_dict(row) for row in cur.fetchall()]
+
+
+def update_signal_reconciliation(conn, signal_date, ticker, triggered=None, trigger_date=None,
+                                  outcome_return=None, outcome_r=None, outcome_bars=None,
+                                  exit_reason=None, mark_reconciled=False):
+    """
+    Writes whatever screener.reconcile.reconcile_signal() figured out
+    for one signal. `mark_reconciled` sets reconciled_at to NOW() (a
+    FINAL answer - never checked again) only when True; a
+    `triggered=True, mark_reconciled=False` call (the "still open, no
+    exit yet" case) writes the partial info without closing the row
+    out, so get_unreconciled_signals() keeps surfacing it for the next
+    run. COALESCE keeps any field not passed here unchanged, the same
+    "only overwrite what's actually given" convention
+    upsert_logbook_entry() already uses elsewhere in this file.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE signal_log SET
+            triggered = COALESCE(%s, triggered),
+            trigger_date = COALESCE(%s, trigger_date),
+            outcome_return = COALESCE(%s, outcome_return),
+            outcome_r = COALESCE(%s, outcome_r),
+            outcome_bars = COALESCE(%s, outcome_bars),
+            exit_reason = COALESCE(%s, exit_reason),
+            reconciled_at = CASE WHEN %s THEN NOW() ELSE reconciled_at END
+        WHERE signal_date = %s AND ticker = %s
+        """,
+        (triggered, trigger_date, outcome_return, outcome_r, outcome_bars, exit_reason,
+         mark_reconciled, signal_date, ticker),
+    )
+    conn.commit()
+
+
+def update_signal_user_action(conn, signal_date, ticker, user_action, user_note=None):
+    """Records what the user actually did with a logged signal (taken/
+    skipped/missed) - the only fields on an already-logged signal_log
+    row this app ever lets the user edit directly (see the History tab
+    on pages/7_Screener.py). Without this, the signal log can log
+    candidates but never answer whether a discretionary skip helped or
+    cost money - see screener/engine.py's own module docstring."""
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE signal_log SET user_action = %s, user_note = %s WHERE signal_date = %s AND ticker = %s",
+        (user_action, user_note, signal_date, ticker),
+    )
+    conn.commit()
+
+
+def get_signals_for_history(conn, start_date, end_date, tier=None):
+    """
+    Every logged signal (strict AND baseline) between `start_date` and
+    `end_date` inclusive, newest first - the History tab's own table
+    and summary stats (see pages/7_Screener.py) are both built from
+    this. `tier`, if given, restricts to just "strict" or "baseline".
+    """
+    cur = conn.cursor()
+    if tier:
+        cur.execute(f"""
+            SELECT {", ".join(_SIGNAL_LOG_COLUMNS)} FROM signal_log
+            WHERE signal_date BETWEEN %s AND %s AND tier = %s
+            ORDER BY signal_date DESC, ticker
+        """, (start_date, end_date, tier))
+    else:
+        cur.execute(f"""
+            SELECT {", ".join(_SIGNAL_LOG_COLUMNS)} FROM signal_log
+            WHERE signal_date BETWEEN %s AND %s
+            ORDER BY signal_date DESC, ticker
+        """, (start_date, end_date))
+    return [_signal_row_to_dict(row) for row in cur.fetchall()]

@@ -35,6 +35,7 @@ PAGES = [
     ("open_positions", "Open Positions", "pages/4_Open_Positions.py"),
     ("logbook", "Logbook", "pages/3_Logbook.py"),
     ("goals", "Goals", "pages/6_Goals.py"),
+    ("screener", "Screener", "pages/7_Screener.py"),
     ("settings", "Settings", "pages/5_Settings.py"),
 ]
 
@@ -140,7 +141,7 @@ def render_top_nav(current_page):
         scroll_to_anchor()'s position actually stick. */
         [data-testid='stMain'] {overflow-anchor: none;}
 
-        /* On a phone-width screen, len(PAGES) (7) equal-width columns
+        /* On a phone-width screen, len(PAGES) (8) equal-width columns
         squeeze labels like "Trade Analyzer" into unreadably narrow
         buttons. Scoped to just the nav row (the "top_nav_row" container
         key below, via Streamlit's documented .st-key-<key> class - see

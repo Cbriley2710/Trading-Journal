@@ -496,21 +496,6 @@ def render_position_detail(position, conn):
         conn, symbol, entry_point, "Short Entry" if is_short else "Entry", key_prefix="position", stop_loss=stop_loss)
 
 
-def parse_ticker_input(text):
-    """
-    Turns "NVDA" or a pasted batch like "NVDA, AMD MSFT" (commas,
-    spaces, or new lines between tickers - however it was copied) into
-    a clean, de-duplicated list of uppercase symbols, keeping the order
-    they were typed.
-    """
-    symbols = []
-    for part in text.replace(",", " ").split():
-        sym = part.strip().upper()
-        if sym and sym not in symbols:
-            symbols.append(sym)
-    return symbols
-
-
 def render_lists_section(conn):
     st.header("Watchlists")
     st.caption(
@@ -579,7 +564,7 @@ def render_lists_section(conn):
             if add_clicked and add_text.strip():
                 newly_added = []
                 moved = []
-                for sym in parse_ticker_input(add_text):
+                for sym in ui.parse_ticker_input(add_text):
                     status, previous_list_id = database.add_to_watchlist(conn, sym, list_id)
                     if status == "added":
                         newly_added.append(sym)
