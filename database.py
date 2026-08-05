@@ -1509,6 +1509,70 @@ def save_trade_review(conn, report_id, trade, notes, snapshots):
     conn.commit()
 
 
+def get_review_for_trade(conn, report_id, trade):
+    """
+    Returns the already-saved review for this exact trade within this
+    report - {"id", "notes", "snapshots": {timeframe: bytes}} - or None
+    if this trade hasn't been reviewed yet in this report. Matched by
+    the same natural-key fields as trade_reviews' own schema (symbol/
+    entry_date/exit_date/direction/quantity/buy_price/sell_price - see
+    pages/1_Trade_Analyzer.py's _trade_key(), which this mirrors).
+
+    Used by the Review Session when revisiting a trade via the Previous
+    button or the trade-jump dropdown - lets that render prefill the
+    existing notes instead of a blank box, and tells the caller whether
+    "Save & Next" should update this row (see update_trade_review()
+    below) instead of inserting a duplicate.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, notes FROM trade_reviews
+        WHERE report_id = %s AND symbol = %s AND entry_date = %s AND exit_date = %s
+              AND direction = %s AND quantity = %s AND buy_price = %s AND sell_price = %s
+        """,
+        (report_id, trade["symbol"], trade["entry_date"].date(), trade["date"].date(),
+         trade["direction"], trade["quantity"], trade["buy_price"], trade["sell_price"]),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return None
+    review_id, notes = row
+    cur.execute(
+        "SELECT timeframe, chart_image FROM trade_review_snapshots WHERE review_id = %s", (review_id,))
+    snapshots = {timeframe: bytes(chart_image) for timeframe, chart_image in cur.fetchall()}
+    return {"id": review_id, "notes": notes, "snapshots": snapshots}
+
+
+def update_trade_review(conn, review_id, notes, new_snapshots):
+    """
+    Updates an already-saved review in place, for the Review Session's
+    Save & Next when revisiting a trade via Previous or the trade-jump
+    dropdown (see get_review_for_trade()) - notes are overwritten with
+    whatever's currently in the box (even blank; clearing a note on a
+    re-review is a legitimate way to remove it, not something to
+    silently keep the old value for). Any newly captured snapshot in
+    `new_snapshots` replaces an existing one for that SAME timeframe
+    (capturing "Daily" again means "update this snapshot", not "keep
+    both") and adds a new row for any timeframe not already saved.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE trade_reviews SET notes = %s, reviewed_at = %s WHERE id = %s",
+        (notes, timeutil.now_eastern(), review_id),
+    )
+    for timeframe, chart_image in new_snapshots.items():
+        cur.execute(
+            "DELETE FROM trade_review_snapshots WHERE review_id = %s AND timeframe = %s",
+            (review_id, timeframe),
+        )
+        cur.execute(
+            "INSERT INTO trade_review_snapshots (review_id, timeframe, chart_image) VALUES (%s, %s, %s)",
+            (review_id, timeframe, chart_image),
+        )
+    conn.commit()
+
+
 def get_review_reports(conn):
     """Returns every Trade Review Report, newest first, as
     {"id", "created_at", "range_start", "range_end", "sent_at",

@@ -262,6 +262,20 @@ def _reorder_for_resume(trades, saved_order):
     return [by_key[_saved_key_tuple(s)] for s in saved_order if _saved_key_tuple(s) in by_key]
 
 
+def _jump_review_session(conn, session, new_index):
+    """Moves the Review Session directly to `new_index` - used by the
+    Previous button and the trade-jump dropdown below. Same "clear this
+    trade's scratch snapshot state, persist, scroll+focus on arrival,
+    rerun" as _advance_review_session() below, just to an arbitrary
+    index instead of always the next one."""
+    session["index"] = new_index
+    session["pending_snapshots"] = {}
+    database.save_review_session_progress(
+        conn, session["report_id"], _queue_natural_keys(session["queue"]), session["index"])
+    st.session_state["_scroll_to_review_anchor"] = True
+    st.rerun()
+
+
 def _advance_review_session(conn, session):
     """Moves the Review Session to the next trade: bumps the index,
     clears any snapshots captured for the trade just finished, persists
@@ -291,11 +305,123 @@ def _render_review_intro(conn, session):
             st.rerun()
 
 
-def _render_review_outro(conn, session, trade_count):
+def _review_session_summary(reviews):
+    """
+    Aggregate stats across every trade actually reviewed (saved) this
+    session - batting average (win rate), win/loss $ (average AND
+    total, since either framing is useful - a good average with a
+    small total isn't the same story as a good total with a huge
+    average), win/loss % (average price move on winners vs losers, via
+    analyze_trades.trade_stats() - the same math the fact tiles and PDF
+    already use), and a per-ticker breakdown. Returns None if `reviews`
+    is empty - nothing to summarize.
+    """
+    if not reviews:
+        return None
+
+    winners = [r for r in reviews if r["profit_loss"] >= 0]
+    losers = [r for r in reviews if r["profit_loss"] < 0]
+
+    def avg(values):
+        return sum(values) / len(values) if values else None
+
+    win_pcts, loss_pcts = [], []
+    for r in reviews:
+        stats = trade_stats(
+            r["direction"], r["buy_price"], r["sell_price"], r["quantity"],
+            r["profit_loss"], r["entry_date"], r["exit_date"])
+        (win_pcts if r["profit_loss"] >= 0 else loss_pcts).append(stats["pct_change"])
+
+    per_ticker = {}
+    for r in reviews:
+        row = per_ticker.setdefault(r["symbol"], {"trades": 0, "wins": 0, "net_pl": 0.0})
+        row["trades"] += 1
+        row["wins"] += 1 if r["profit_loss"] >= 0 else 0
+        row["net_pl"] += r["profit_loss"]
+
+    return {
+        "total": len(reviews),
+        "win_count": len(winners), "loss_count": len(losers),
+        "batting_avg": len(winners) / len(reviews) * 100,
+        "total_pl": sum(r["profit_loss"] for r in reviews),
+        "avg_win_dollar": avg([r["profit_loss"] for r in winners]),
+        "avg_loss_dollar": avg([r["profit_loss"] for r in losers]),
+        "total_win_dollar": sum(r["profit_loss"] for r in winners) if winners else None,
+        "total_loss_dollar": sum(r["profit_loss"] for r in losers) if losers else None,
+        "avg_win_pct": avg(win_pcts),
+        "avg_loss_pct": avg(loss_pcts),
+        "per_ticker": per_ticker,
+    }
+
+
+def _render_review_summary(reviews):
+    """Renders _review_session_summary()'s numbers - shown once, on the
+    Reflections screen, so the session's closing journal entry can
+    actually be written with the real numbers in view instead of from
+    memory."""
+    summary = _review_session_summary(reviews)
+    if summary is None:
+        return
+    st.subheader("Session Summary")
+
+    win_color = charting.win_loss_color(True)
+    loss_color = charting.win_loss_color(False)
+
+    top_cols = st.columns(4)
+    ui.stat_tile(top_cols[0], "Batting Average", f"{summary['batting_avg']:.1f}%")
+    ui.stat_tile(
+        top_cols[1], "Total P/L", f"${summary['total_pl']:,.2f}",
+        win_color if summary["total_pl"] >= 0 else loss_color)
+    ui.stat_tile(top_cols[2], "Wins", f"{summary['win_count']}", win_color)
+    ui.stat_tile(top_cols[3], "Losses", f"{summary['loss_count']}", loss_color)
+
+    bottom_cols = st.columns(4)
+    ui.stat_tile(
+        bottom_cols[0], "Avg Win $",
+        f"${summary['avg_win_dollar']:,.2f}" if summary["avg_win_dollar"] is not None else "—", win_color)
+    ui.stat_tile(
+        bottom_cols[1], "Avg Loss $",
+        f"${summary['avg_loss_dollar']:,.2f}" if summary["avg_loss_dollar"] is not None else "—", loss_color)
+    ui.stat_tile(
+        bottom_cols[2], "Avg Win %",
+        f"{summary['avg_win_pct']:,.2f}%" if summary["avg_win_pct"] is not None else "—", win_color)
+    ui.stat_tile(
+        bottom_cols[3], "Avg Loss %",
+        f"{summary['avg_loss_pct']:,.2f}%" if summary["avg_loss_pct"] is not None else "—", loss_color)
+
+    st.caption(
+        "Win $/Loss $ totals: "
+        + (f"${summary['total_win_dollar']:,.2f} won" if summary["total_win_dollar"] is not None else "no wins")
+        + "  ·  "
+        + (f"${summary['total_loss_dollar']:,.2f} lost" if summary["total_loss_dollar"] is not None else "no losses")
+    )
+
+    per_ticker_rows = sorted(
+        (
+            {
+                "Symbol": symbol, "Trades": row["trades"], "Wins": row["wins"],
+                "Losses": row["trades"] - row["wins"],
+                "Win Rate": f"{row['wins'] / row['trades'] * 100:.0f}%",
+                "Net P/L": row["net_pl"],
+            }
+            for symbol, row in summary["per_ticker"].items()
+        ),
+        key=lambda row: row["Net P/L"], reverse=True,
+    )
+    st.dataframe(
+        per_ticker_rows, hide_index=True, width="stretch",
+        column_config={"Net P/L": st.column_config.NumberColumn(format="$%.2f")},
+    )
+    st.divider()
+
+
+def _render_review_outro(conn, session, trade_count, reviews):
     """The Review Session's closing journal entry, shown once after the
     last trade (only when at least one trade was actually saved - see
     caller) - same NULL-means-not-written-yet signal as the intro
-    above."""
+    above. `reviews` (report["reviews"]) drives the Session Summary
+    shown just above the Reflections box - see _render_review_summary()."""
+    _render_review_summary(reviews)
     st.subheader("Reflections")
     with st.form(key="review_outro_form", clear_on_submit=True, border=False):
         notes = st.text_area("Reflections", height=100, key="review_outro_notes")
@@ -333,7 +459,7 @@ def render_review_session(conn):
             database.delete_review_report(conn, session["report_id"])
             st.info("Session ended - nothing was saved, so no report was kept.")
         elif report["reflections_notes"] is None:
-            _render_review_outro(conn, session, trade_count)
+            _render_review_outro(conn, session, trade_count, report["reviews"])
             return
         else:
             database.clear_review_session_progress(conn)
@@ -351,8 +477,27 @@ def render_review_session(conn):
     anchor_id = f"{key_prefix}_review_anchor"
     should_scroll = st.session_state.pop("_scroll_to_review_anchor", False)
 
+    # Whatever's already saved for THIS trade in THIS report, if
+    # anything - non-None whenever the trade-jump dropdown or Previous
+    # brought us back to one already reviewed earlier this session (or
+    # a resumed one from a prior sitting). Drives the notes prefill and
+    # the "already captured" snapshot caption below, and tells Save &
+    # Next whether to update this row instead of inserting a duplicate.
+    existing_review = database.get_review_for_trade(conn, session["report_id"], trade)
+
+    # Which trades in the queue already have a saved review - used for
+    # both the "N of M (K reviewed)" counter and the jump dropdown's
+    # 🟢/⚪ markers just below.
+    reviewed_keys = {
+        (r["symbol"], r["entry_date"].isoformat(), r["exit_date"].isoformat(),
+         r["direction"], r["quantity"], r["buy_price"], r["sell_price"])
+        for r in report["reviews"]
+    }
+    reviewed_count = sum(1 for t in queue if _trade_key(t) in reviewed_keys)
+
     header_cols = st.columns([5, 1])
-    header_cols[0].subheader(f"Reviewing {index + 1} of {len(queue)}: {trade_label(trade)}")
+    header_cols[0].subheader(
+        f"Reviewing {index + 1} of {len(queue)} ({reviewed_count} reviewed): {trade_label(trade)}")
     if header_cols[1].button("Exit Session", key=f"{key_prefix}_exit"):
         # Deliberately does NOT clear the persisted progress - exiting
         # mid-session is exactly the "didn't finish" case the saved
@@ -360,6 +505,25 @@ def render_review_session(conn):
         del st.session_state["review_session"]
         st.rerun()
     st.progress(index / len(queue))
+
+    # Jump straight to any trade in the queue - marked 🟢 already
+    # reviewed vs ⚪ not yet, so it doubles as a progress map. The
+    # widget's key includes `index`, not just the report id - that
+    # forces a BRAND NEW key (freshly re-seeded to wherever we actually
+    # landed) every time the index changes for ANY reason (this
+    # dropdown, Previous, Save & Next, Skip), instead of trying to
+    # manually keep a stable widget's remembered value in sync with
+    # session["index"] from several different directions.
+    jump_labels = [
+        f"{'🟢' if _trade_key(t) in reviewed_keys else '⚪'} {i + 1}. {trade_label(t)}"
+        for i, t in enumerate(queue)
+    ]
+    jump_choice = st.selectbox(
+        "Jump to a trade", options=jump_labels, index=index,
+        key=f"review_jump_select_{session['report_id']}_{index}")
+    jump_index = jump_labels.index(jump_choice)
+    if jump_index != index:
+        _jump_review_session(conn, session, jump_index)
 
     render_trade_facts(conn, trade)
     st.divider()
@@ -388,20 +552,23 @@ def render_review_session(conn):
         # No price data for this one right now - nothing to capture or
         # journal against, so the only sensible move is on to the next
         # trade.
-        if st.button("Skip →", key=f"{key_prefix}_skip"):
+        nav_cols = st.columns([1, 1, 4])
+        if nav_cols[0].button("← Previous", disabled=index == 0, key=f"{key_prefix}_previous_nodata"):
+            _jump_review_session(conn, session, index - 1)
+        if nav_cols[1].button("Skip →", key=f"{key_prefix}_skip"):
             _advance_review_session(conn, session)
         return
 
     pending = session.setdefault("pending_snapshots", {})
 
     # One single row, left to right: notes box (widest), Save this
-    # timeframe + Timeframe selector, Save & Next/Skip. Nothing here
-    # needs to be inside an st.form() anymore (see _advance_review_
-    # session() - Save & Next/Skip both move to a new trade with a
-    # fresh key_prefix, so there's nothing to "clear on submit"; this
-    # widget instance just never renders again), which is what makes a
-    # single st.columns() band - and true flush alignment with no gap -
-    # possible at all.
+    # timeframe + Timeframe selector, Previous/Save & Next/Skip.
+    # Nothing here needs to be inside an st.form() anymore (see
+    # _advance_review_session() - Save & Next/Skip both move to a new
+    # trade with a fresh key_prefix, so there's nothing to "clear on
+    # submit"; this widget instance just never renders again), which is
+    # what makes a single st.columns() band - and true flush alignment
+    # with no gap - possible at all.
     notes_col, timeframe_col, buttons_col = st.columns([3, 1, 1])
 
     if timeframe_col.button("📸 Save this timeframe", key=f"{key_prefix}_capture"):
@@ -422,12 +589,29 @@ def render_review_session(conn):
         "Timeframe", options=timeframe_options, index=timeframe_options.index(timeframe_label),
         key=timeframe_key)
 
+    already_saved_timeframes = set(pending) | (set(existing_review["snapshots"]) if existing_review else set())
+    if already_saved_timeframes:
+        timeframe_col.caption(f"Already captured: {', '.join(sorted(already_saved_timeframes))}")
+
     if should_scroll:
         ui.focus_textarea("Trade Review Notes")
 
-    notes = notes_col.text_area("Trade Review Notes", height=68, key=f"{key_prefix}_notes")
+    # Keyed on whether a saved review exists, not just `key_prefix` -
+    # `key_prefix` alone stays IDENTICAL across visits to this same
+    # index (Previous/the jump dropdown don't change it), and Streamlit
+    # only honors `value=` the FIRST time a given key is ever created in
+    # a session. Revisiting a trade that got saved AFTER this key first
+    # existed needs a genuinely NEW key to actually show the now-saved
+    # notes instead of silently keeping whatever blank/stale value the
+    # box had the first time it was ever rendered this session.
+    notes_key = f"{key_prefix}_notes_{'reviewed' if existing_review else 'new'}"
+    notes = notes_col.text_area(
+        "Trade Review Notes", value=(existing_review["notes"] if existing_review else "") or "",
+        height=68, key=notes_key)
 
     clicked = None
+    if buttons_col.button("← Previous", width="stretch", disabled=index == 0, key=f"{key_prefix}_previous"):
+        _jump_review_session(conn, session, index - 1)
     if buttons_col.button("Save & Next →", type="primary", width="stretch", key=f"{key_prefix}_save_next"):
         clicked = "Save & Next →"
     if buttons_col.button("Skip", width="stretch", key=f"{key_prefix}_skip_btn"):
@@ -436,18 +620,21 @@ def render_review_session(conn):
     if clicked == "Save & Next →":
         # Daily is always saved, even if never explicitly captured above -
         # every other timeframe stays opt-in, on top of this guaranteed
-        # baseline. Skipped if it's already in `pending` (either captured
-        # this trade, or - since "Daily" is a fixed key regardless of
-        # which timeframe was on screen - already saved by this exact step
-        # moments ago, though that shouldn't normally happen twice).
-        if "Daily" not in pending:
+        # baseline. Skipped if it's already in `pending`, OR already
+        # saved on an existing review being re-visited - no need to
+        # re-fetch and overwrite an unchanged Daily snapshot just
+        # because a note got tweaked.
+        if "Daily" not in already_saved_timeframes:
             with st.spinner("Saving Daily snapshot..."):
                 daily_snapshot = charting.build_trade_review_snapshot(
                     trade["symbol"], trade["entry_date"], trade["date"], trade["buy_price"], trade["sell_price"],
                     trade["direction"], "Daily", settings)
             if daily_snapshot is not None:
                 pending["Daily"] = daily_snapshot
-        database.save_trade_review(conn, session["report_id"], trade, notes, pending)
+        if existing_review:
+            database.update_trade_review(conn, existing_review["id"], notes, pending)
+        else:
+            database.save_trade_review(conn, session["report_id"], trade, notes, pending)
         _advance_review_session(conn, session)
     elif clicked == "Skip":
         _advance_review_session(conn, session)
@@ -546,6 +733,27 @@ def render_review_selection(conn, trades):
     # Streamlit remembers whatever the user actually left it at.
     precheck = st.session_state.pop("_review_precheck", False)
 
+    def _checkbox_key(i, t):
+        return f"review_pick_{i}_{_trade_key(t)}"
+
+    if filtered:
+        select_cols = st.columns([1, 1, 4])
+        # Sets every CURRENTLY FILTERED trade's checkbox state directly,
+        # rather than reusing the `_review_precheck`-on-first-render
+        # trick above - that trick only seeds a checkbox's value the
+        # FIRST time its key is ever created, so it can't retroactively
+        # change boxes that already exist from an earlier render (e.g.
+        # after manually toggling a few, or after the date range/preset
+        # already rendered this same list once).
+        if select_cols[0].button("Select All", key="review_select_all"):
+            for i, t in enumerate(filtered):
+                st.session_state[_checkbox_key(i, t)] = True
+            st.rerun()
+        if select_cols[1].button("Clear All", key="review_clear_all"):
+            for i, t in enumerate(filtered):
+                st.session_state[_checkbox_key(i, t)] = False
+            st.rerun()
+
     checked = []
     with st.container(height=300):
         # Keyed by loop position, not just _trade_key(t) - belt and
@@ -553,7 +761,7 @@ def render_review_selection(conn, trades):
         # include quantity/prices (see _trade_key()'s own docstring for
         # the real duplicate-trade case that motivated both fixes).
         for i, t in enumerate(filtered):
-            if st.checkbox(trade_label(t), value=precheck, key=f"review_pick_{i}_{_trade_key(t)}"):
+            if st.checkbox(trade_label(t), value=precheck, key=_checkbox_key(i, t)):
                 checked.append(t)
 
     action_cols = st.columns([1, 1, 3])

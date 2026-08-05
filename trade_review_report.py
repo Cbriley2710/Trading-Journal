@@ -53,39 +53,61 @@ class DarkReportPDF(FPDF):
         self.rect(0, 0, self.w, self.h, "F")
 
 
-def _write_snapshot_page(pdf, symbol, timeframe, chart_image):
-    """One full page for a single captured timeframe snapshot - a trade
-    with three saved timeframes gets three of these, each full-size,
-    rather than shrinking all three onto one page until they're too
-    small to actually read."""
-    pdf.add_page()
-    pdf.set_text_color(*MUTED_TEXT_RGB)
-    pdf.set_font("Helvetica", size=11)
-    pdf.cell(0, 7, safe_text(f"{symbol} - {timeframe}"), new_x="LMARGIN", new_y="NEXT")
-
+def _draw_chart_image(pdf, chart_image, room_below_mm=0):
+    """
+    Draws one chart snapshot at the current page position, scaled to
+    fit the page width - or, if that would run past the bottom margin
+    (minus `room_below_mm`, reserved for whatever's meant to follow on
+    the SAME page, e.g. notes text), scaled down to whatever height
+    actually remains instead. Same "cap to remaining room, scale width
+    to match" logic as daily_report.py's _write_ticker_page() - a
+    landscape page is much shorter than it is wide. Shared by the
+    trade-review header page's primary snapshot (see
+    _write_trade_review_page()) and _write_snapshot_page() below, which
+    just pass different `room_below_mm`.
+    """
     image = Image.open(io.BytesIO(chart_image))
     scaled_height_mm = CONTENT_WIDTH_MM * (image.height / image.width)
-    # Same "cap to remaining room, scale width to match" logic as
-    # daily_report.py's _write_ticker_page() - a landscape page is much
-    # shorter than it is wide.
-    max_height_mm = pdf.h - pdf.get_y() - pdf.b_margin
+    max_height_mm = pdf.h - pdf.get_y() - pdf.b_margin - room_below_mm
     if scaled_height_mm > max_height_mm:
         scaled_height_mm = max_height_mm
         image_width_mm = scaled_height_mm * (image.width / image.height)
     else:
         image_width_mm = CONTENT_WIDTH_MM
     x = pdf.l_margin + (CONTENT_WIDTH_MM - image_width_mm) / 2
+    # pdf.image() already advances the cursor to just below the placed
+    # image on its own (same as daily_report.py's own _write_ticker_
+    # page() relies on) - an extra manual pdf.set_y() here would double
+    # the advance, pushing whatever's meant to follow on this SAME page
+    # (the notes text, in _write_trade_review_page()) far enough down
+    # to trigger its own unwanted page break.
     pdf.image(image, x=x, w=image_width_mm)
+
+
+def _write_snapshot_page(pdf, symbol, timeframe, chart_image):
+    """One full page for a single captured timeframe snapshot - a trade
+    with several saved timeframes gets one of these for every timeframe
+    BEYOND the primary one already shown on the trade's own header page
+    (see _write_trade_review_page()), each full-size, rather than
+    shrinking all of them onto one page until they're too small to
+    actually read."""
+    pdf.add_page()
+    pdf.set_text_color(*MUTED_TEXT_RGB)
+    pdf.set_font("Helvetica", size=11)
+    pdf.cell(0, 7, safe_text(f"{symbol} - {timeframe}"), new_x="LMARGIN", new_y="NEXT")
+    _draw_chart_image(pdf, chart_image)
 
 
 def _write_trade_review_page(pdf, review, jan1_balance):
     """One reviewed trade's header page (symbol/direction, entry/exit
-    dates, stats, notes), followed by one additional page per captured
-    timeframe snapshot. `jan1_balance` (database.get_account_value())
-    is what Equity Contribution divides this trade's profit_loss by -
-    see trade_stats()'s own docstring for why; left off the stats line
-    entirely if it hasn't been set yet, same as the other two places
-    this same math is shown (Trade Analyzer, Logbook)."""
+    dates, stats, its PRIMARY chart snapshot, and notes all together on
+    this same page - see the primary-snapshot selection below), followed
+    by one additional page per any OTHER captured timeframe. `jan1_
+    balance` (database.get_account_value()) is what Equity Contribution
+    divides this trade's profit_loss by - see trade_stats()'s own
+    docstring for why; left off the stats line entirely if it hasn't
+    been set yet, same as the other two places this same math is shown
+    (Trade Analyzer, Logbook)."""
     pdf.add_page()
     short_tag = " (Short)" if review["direction"] == "SHORT" else ""
 
@@ -129,6 +151,23 @@ def _write_trade_review_page(pdf, review, jan1_balance):
     pdf.cell(0, 7, safe_text(pl_line), new_x="LMARGIN", new_y="NEXT")
     pdf.ln(4)
 
+    # The PRIMARY snapshot goes right here, on this same page - "Daily"
+    # if it was saved (always is; see the Review Session's guaranteed
+    # baseline capture in pages/1_Trade_Analyzer.py), otherwise
+    # whichever single timeframe exists. This is the fix for the chart
+    # and its own data/notes previously always landing on different
+    # pages: _write_snapshot_page() used to run for EVERY captured
+    # timeframe, including this guaranteed first one, and it always
+    # starts a fresh page. `room_below_mm` reserves space for the notes
+    # that follow, the same "cap the image, not the text" approach
+    # daily_report.py's _write_ticker_page() already uses.
+    remaining_snapshots = dict(review["snapshots"])
+    primary_timeframe = "Daily" if "Daily" in remaining_snapshots else next(iter(remaining_snapshots), None)
+    if primary_timeframe:
+        primary_image = remaining_snapshots.pop(primary_timeframe)
+        _draw_chart_image(pdf, primary_image, room_below_mm=30)
+        pdf.ln(3)
+
     notes_text = review["notes"].strip() if review["notes"] else ""
     pdf.set_text_color(*TEXT_COLOR_RGB)
     pdf.set_font("Helvetica", style="I", size=12)
@@ -140,7 +179,9 @@ def _write_trade_review_page(pdf, review, jan1_balance):
         pdf.set_font("Helvetica", size=10)
         pdf.cell(0, 6, "No chart snapshots were saved for this trade.", new_x="LMARGIN", new_y="NEXT")
 
-    for timeframe, chart_image in review["snapshots"].items():
+    # Any OTHER captured timeframes beyond the primary one still get
+    # their own full page each.
+    for timeframe, chart_image in remaining_snapshots.items():
         _write_snapshot_page(pdf, review["symbol"], timeframe, chart_image)
 
 
