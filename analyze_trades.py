@@ -88,31 +88,68 @@ def load_transactions(filename):
         # The real column headers ("Run Date,Action,Symbol,...") aren't
         # on the very first line of this file - Fidelity adds a couple
         # of blank lines before it. So we skip rows until we find the
-        # one that starts with "Run Date".
+        # one that starts with "Run Date" - THAT row's own cells become
+        # the field names for the DictReader below, rather than a fixed
+        # position-based unpack of the first 7 columns.
+        #
+        # Position-based unpacking used to be exactly what this did
+        # (`run_date, action, symbol, ... = row[:7]`), and it broke for
+        # real: Fidelity's export gained two new columns ("Account",
+        # "Account Number") ahead of "Action" once the account had more
+        # than one linked account to report - every column after that
+        # point silently shifted over by two, so "Action" was actually
+        # reading "Account"'s value ("Individual"/"PRE-TAX", never
+        # starting with "YOU BOUGHT"/"YOU SOLD"), and the entire file
+        # parsed as zero transactions with no error at all. Reading by
+        # COLUMN NAME instead (the same csv.DictReader-based approach
+        # load_transactions_schwab() below already uses) survives
+        # Fidelity inserting, removing, or reordering columns - only an
+        # actual RENAME of "Run Date"/"Action"/"Symbol"/"Price ($)"/
+        # "Quantity" themselves would break this.
+        header_row = None
         for row in reader:
             if row and row[0] == "Run Date":
+                header_row = row
                 break
+        if header_row is None:
+            return transactions
 
-        # Now `reader` is positioned right after the header row, so we
-        # can read the actual data rows using their column position.
-        for row in reader:
-            if len(row) < 7:
-                continue  # skip blank/short rows
-
-            run_date, action, symbol, description, row_type, price, quantity = row[:7]
+        for row in csv.DictReader(csv_file, fieldnames=header_row):
+            action = (row.get("Action") or "").strip()
 
             # We only care about rows where you actually bought or sold
             # a stock. Everything else (dividends, margin interest,
             # money market "reinvestment" rows, etc.) gets skipped.
+            #
+            # "YOU SOLD SHORT SALE ..." (Type "Short") is what OPENS a
+            # short position - it must map to "SELL_SHORT", not a plain
+            # "SELL", or match_trades_lifo() (which only ever treats a
+            # plain SELL as closing an existing LONG lot, never as
+            # opening a new short - see its own docstring) has nothing
+            # to match it against and silently reports it as an
+            # unmatched sell, while a real long lot elsewhere gets
+            # wrongly consumed instead. Confirmed happening for real
+            # (NBIS: 4 real short-sale opens, 2050 shares total, were
+            # all being imported as plain SELL). "YOU BOUGHT SHORT
+            # COVER ..." (closing that short) stays a plain "BUY" -
+            # match_trades_lifo()'s BUY handling already covers any
+            # open short lot first before opening a new long, so THAT
+            # half of a short round-trip was never the problem.
             if action.startswith("YOU BOUGHT"):
                 trade_action = "BUY"
+            elif action.startswith("YOU SOLD SHORT SALE"):
+                trade_action = "SELL_SHORT"
             elif action.startswith("YOU SOLD"):
                 trade_action = "SELL"
             else:
                 continue
 
-            if not symbol or not price:
-                continue  # skip rows with no ticker or no price
+            symbol = (row.get("Symbol") or "").strip()
+            price = (row.get("Price ($)") or "").strip()
+            quantity = (row.get("Quantity") or "").strip()
+            run_date = (row.get("Run Date") or "").strip()
+            if not symbol or not price or not run_date:
+                continue  # skip rows with no ticker, no price, or no date
 
             transactions.append({
                 "date": datetime.strptime(run_date, "%m/%d/%Y"),
