@@ -327,6 +327,102 @@ def _combine_fills(fills):
     }
 
 
+def net_same_day_short_opens(transactions):
+    """
+    Resolves an order-dependent ambiguity that ONLY affects BUY vs
+    SELL_SHORT: broker exports have no time-of-day, so on a day with
+    BOTH a BUY and a SELL_SHORT for the same symbol, whichever
+    match_trades_lifo() happens to process first (an arbitrary same-day
+    tie-break, since the true sequence isn't in the data) decides
+    whether that BUY covers the short sale or opens an unrelated new
+    long lot instead - processed the "wrong" way, the account ends up
+    showing as simultaneously LONG and SHORT the same stock, which can
+    never be real. Confirmed happening for real: NBIS, a single chaotic
+    day with several thousand shares of same-day buying and short
+    selling, showed as open long AND open short at once depending on
+    row order - and neither the CSV export's own row order nor
+    SnapTrade's activity feed carries real intraday timestamps for this
+    account, so there's no data-driven way to recover the true sequence.
+
+    This only ever affects BUY vs SELL_SHORT specifically - a same-day
+    BUY-then-SELL (both long-side) or a short opened on one day and
+    covered on another both already interact correctly with the SAME
+    lot list regardless of processing order (see match_trades_lifo()'s
+    own docstring for how BUY/SELL/SELL_SHORT each behave), so there's
+    no equivalent ambiguity to resolve for those - this function is a
+    no-op for any (symbol, date) that doesn't have BOTH a BUY and a
+    SELL_SHORT that same day, which is the overwhelming majority of
+    real trading history.
+
+    Since the exact chronological order genuinely isn't recoverable,
+    this doesn't try to guess one. Instead, for each (symbol, date)
+    with BOTH a BUY and a SELL_SHORT, it nets the overlapping quantity
+    directly: min(total_buy, total_short) shares become ONE already-
+    closed SHORT trade, priced at that day's own volume-weighted
+    average for each side (which specific shares "really" paired up is
+    exactly the part that can't be known, so an aggregate average is
+    the most honest number available) - a genuine P/L record, not a
+    bookkeeping trick to hide the tangle, since the account DID make
+    that many dollars of short-side round trips that day even though
+    the precise fill-by-fill sequence isn't recoverable. Whichever side
+    had MORE volume (buy or short) is left with its leftover quantity
+    as an ordinary transaction, unambiguous now since only one
+    direction remains for that symbol that day - match_trades_lifo()
+    runs its normal walk over that (and everything else) afterward.
+
+    Returns (remaining_transactions, synthetic_closed_trades).
+    """
+    by_group = {}
+    others = []
+    for t in transactions:
+        if t["action"] in ("BUY", "SELL_SHORT"):
+            key = (t["date"].date(), t["symbol"])
+            by_group.setdefault(key, {"BUY": [], "SELL_SHORT": []})[t["action"]].append(t)
+        else:
+            others.append(t)
+
+    remaining = list(others)
+    synthetic_closed_trades = []
+
+    for (_date, symbol), actions in by_group.items():
+        buys, shorts = actions["BUY"], actions["SELL_SHORT"]
+        if not buys or not shorts:
+            remaining.extend(buys)
+            remaining.extend(shorts)
+            continue
+
+        total_buy = sum(t["quantity"] for t in buys)
+        total_short = sum(t["quantity"] for t in shorts)
+        netted_qty = min(total_buy, total_short)
+
+        short_avg_price = sum(t["price"] * t["quantity"] for t in shorts) / total_short
+        buy_avg_price = sum(t["price"] * t["quantity"] for t in buys) / total_buy
+
+        synthetic_closed_trades.append({
+            "symbol": symbol, "direction": "SHORT",
+            "buy_price": buy_avg_price, "sell_price": short_avg_price,
+            "quantity": netted_qty,
+            "profit_loss": (short_avg_price - buy_avg_price) * netted_qty,
+            "entry_date": min(t["date"] for t in shorts),
+            "date": max(t["date"] for t in buys),
+        })
+
+        leftover_buy_qty = total_buy - netted_qty
+        leftover_short_qty = total_short - netted_qty
+        if leftover_buy_qty > 0:
+            remaining.append({
+                "date": max(t["date"] for t in buys), "symbol": symbol,
+                "action": "BUY", "price": buy_avg_price, "quantity": leftover_buy_qty,
+            })
+        if leftover_short_qty > 0:
+            remaining.append({
+                "date": min(t["date"] for t in shorts), "symbol": symbol,
+                "action": "SELL_SHORT", "price": short_avg_price, "quantity": leftover_short_qty,
+            })
+
+    return remaining, synthetic_closed_trades
+
+
 def match_trades_lifo(transactions):
     """
     Matches each closing transaction to the most recently opened lot
@@ -365,6 +461,12 @@ def match_trades_lifo(transactions):
     # so a single order doesn't get counted as several tiny trades.
     transactions = merge_partial_fills(transactions)
 
+    # Then resolve the same-day BUY-vs-SELL_SHORT ordering ambiguity
+    # (see net_same_day_short_opens above) before anything else can be
+    # thrown off by it. This is a no-op for the vast majority of days,
+    # which never have both a BUY and a SELL_SHORT for the same symbol.
+    transactions, synthetic_closed_trades = net_same_day_short_opens(transactions)
+
     # Sort transactions oldest-first so we process them in the order
     # they actually happened. A SnapTrade-sourced transaction's "date"
     # is a real timestamp (see snaptrade_sync.fetch_activities()), so
@@ -389,7 +491,7 @@ def match_trades_lifo(transactions):
     open_long_lots = {}  # example: {"AAPL": [{"price": 150.0, "quantity": 100}]}
     open_short_lots = {}
 
-    closed_trades = []
+    closed_trades = list(synthetic_closed_trades)
 
     for t in transactions:
         symbol = t["symbol"]
