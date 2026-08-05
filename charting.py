@@ -27,7 +27,7 @@ import json
 import math
 import re
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from datetime import time as dtime
 from pathlib import Path
 
@@ -725,6 +725,36 @@ def fetch_latest_price(symbol):
         except Exception:
             return None
         return None if recent.empty else recent["Close"].iloc[-1]
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_period_return_pct(symbol, period_start):
+    """
+    A benchmark's own % price change from period_start through today -
+    used by goals.py's "Equity Growth vs SPY/QQQ" goals to see whether
+    the account is beating the market over the same stretch. Reuses
+    fetch_history() (no moving averages needed) rather than a fresh
+    yfinance call, so this gets the same persistent Daily price_cache/
+    hour-long st.cache_data benefits every chart already relies on -
+    cached for an hour here too, same reasoning as fetch_history()'s
+    own docstring (mostly past days that never change).
+
+    Returns None if there's no price data for the range at all (bad
+    symbol, rate-limited, market hasn't opened yet this period) -
+    callers already treat None as "can't compute this goal right now."
+    """
+    # fetch_history() compares its display_start against a DatetimeIndex
+    # internally, so this needs to be a real datetime, not the plain
+    # date period_start comes in as (same conversion ma_strategy.py's
+    # own fetch_history() call already needs, for the same reason).
+    start = datetime.combine(period_start, datetime.min.time())
+    end = datetime.combine(timeutil.today_eastern(), datetime.min.time())
+    history = fetch_history(symbol, start, start, end, "1d", [])
+    if history.empty:
+        return None
+    first_close = history["Close"].iloc[0]
+    last_close = history["Close"].iloc[-1]
+    return (last_close - first_close) / first_close * 100
 
 
 def get_calculated_account_value(conn):

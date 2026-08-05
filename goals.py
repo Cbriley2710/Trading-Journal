@@ -33,6 +33,7 @@ Met/Not Met.
 import calendar
 from datetime import timedelta
 
+import charting
 import database
 import timeutil
 
@@ -67,6 +68,27 @@ GOAL_LIBRARY = [
             "by the end of the following month, as a % of months whose deadline has already passed"
         ),
     },
+    {
+        "key": "equity_growth_pct", "name": "Equity Growth %", "category": "Statistical",
+        "timeframes": ["Monthly", "Yearly"], "metric": "equity_growth_pct", "unit": "%",
+        "direction": "higher_is_better",
+        "data_source": (
+            "Realized P/L closed since the start of the period ÷ Jan 1 account value baseline "
+            "(Settings page) - same convention as the Dashboard's own Account Performance tiles"
+        ),
+    },
+    {
+        "key": "equity_growth_vs_spy", "name": "Equity Growth vs SPY", "category": "Statistical",
+        "timeframes": ["Monthly", "Yearly"], "metric": "equity_growth_vs_spy", "unit": "%",
+        "direction": "higher_is_better",
+        "data_source": "Equity Growth % minus SPY's own % price change over the same period (excess return)",
+    },
+    {
+        "key": "equity_growth_vs_qqq", "name": "Equity Growth vs QQQ", "category": "Statistical",
+        "timeframes": ["Monthly", "Yearly"], "metric": "equity_growth_vs_qqq", "unit": "%",
+        "direction": "higher_is_better",
+        "data_source": "Equity Growth % minus QQQ's own % price change over the same period (excess return)",
+    },
 ]
 
 GOAL_BY_KEY = {g["key"]: g for g in GOAL_LIBRARY}
@@ -76,6 +98,15 @@ def build_context(conn):
     """
     Everything a metric function might need, fetched once per page
     render rather than once per tracked goal.
+
+    "fetch_period_return_pct" is stored as a function reference (not
+    called here) rather than pre-fetching every benchmark/timeframe
+    combination up front - most page renders won't have every Equity
+    Growth vs SPY/QQQ goal tracked at once, so this only pays for a
+    live price fetch for whichever ones actually are. Injected this way
+    (not called directly from charting.py inside the metric functions
+    below) so tests can swap in a fake without touching the network -
+    see tests/test_goals.py.
     """
     today = timeutil.today_eastern()
     year_start = today.replace(month=1, day=1)
@@ -83,6 +114,9 @@ def build_context(conn):
         "trades": sorted(database.get_trades(conn), key=lambda t: t["date"]),
         "journaled_dates": database.get_journal_note_dates(conn, year_start, today),
         "reviewed_trade_keys": database.get_reviewed_trade_keys(conn),
+        "jan1_balance": database.get_account_value(conn),
+        "conn": conn,
+        "fetch_period_return_pct": charting.fetch_period_return_pct,
     }
 
 
@@ -210,9 +244,52 @@ def _monthly_review_pct(window, context):
     return sum(decided) / len(decided) * 100
 
 
+def _equity_growth_pct(window, context):
+    """Realized P/L closed since the start of the period, as a % of the
+    Jan 1 account value baseline - the SAME convention (period P/L ÷
+    Jan1 baseline, not the fully-calculated current value) already used
+    by the Dashboard's own Account Performance tiles, deliberately kept
+    consistent rather than re-deriving a different "growth" number here
+    (dividing by current value instead of Jan1 baseline was a real bug
+    there once - it self-inflates as the year goes on). None if no Jan
+    1 baseline has been set (Dashboard's Account Settings)."""
+    jan1_balance = context.get("jan1_balance")
+    if not jan1_balance:
+        return None
+    period_pl = database.get_realized_pl_since(context["conn"], window["start"])
+    return period_pl / jan1_balance * 100
+
+
+def _equity_growth_vs_benchmark(window, context, symbol):
+    """Equity Growth % minus a benchmark symbol's own % price change
+    over the same period (start of the window through today) - a
+    positive number means beating that benchmark, negative means
+    lagging it. None if either side can't be computed (no Jan 1
+    baseline, or the benchmark's price data isn't available right now -
+    see charting.fetch_period_return_pct())."""
+    equity_pct = _equity_growth_pct(window, context)
+    if equity_pct is None:
+        return None
+    benchmark_pct = context["fetch_period_return_pct"](symbol, window["start"])
+    if benchmark_pct is None:
+        return None
+    return equity_pct - benchmark_pct
+
+
+def _equity_growth_vs_spy(window, context):
+    return _equity_growth_vs_benchmark(window, context, "SPY")
+
+
+def _equity_growth_vs_qqq(window, context):
+    return _equity_growth_vs_benchmark(window, context, "QQQ")
+
+
 METRIC_FUNCS = {
     "daily_journal_pct": _daily_journal_pct,
     "monthly_review_pct": _monthly_review_pct,
+    "equity_growth_pct": _equity_growth_pct,
+    "equity_growth_vs_spy": _equity_growth_vs_spy,
+    "equity_growth_vs_qqq": _equity_growth_vs_qqq,
 }
 
 

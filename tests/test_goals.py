@@ -178,6 +178,53 @@ def test_monthly_review_pct_averages_only_decided_months(monkeypatch):
     assert result == pytest.approx(1 / 3 * 100)
 
 
+def test_equity_growth_pct_basic(monkeypatch):
+    monkeypatch.setattr(goals.database, "get_realized_pl_since", lambda conn, start: 5000.0)
+    context = {"jan1_balance": 100000.0, "conn": None}
+    window = {"start": date(2026, 1, 1), "end": date(2026, 8, 5)}
+    assert goals._equity_growth_pct(window, context) == 5.0
+
+
+def test_equity_growth_pct_none_without_jan1_balance():
+    context = {"jan1_balance": None, "conn": None}
+    window = {"start": date(2026, 1, 1), "end": date(2026, 8, 5)}
+    assert goals._equity_growth_pct(window, context) is None
+
+
+def test_equity_growth_vs_spy_excess_return(monkeypatch):
+    monkeypatch.setattr(goals.database, "get_realized_pl_since", lambda conn, start: 5000.0)
+    context = {
+        "jan1_balance": 100000.0, "conn": None,
+        "fetch_period_return_pct": lambda symbol, start: 3.0 if symbol == "SPY" else None,
+    }
+    window = {"start": date(2026, 1, 1), "end": date(2026, 8, 5)}
+    # Account grew 5% (5000/100000), SPY grew 3% over the same period -> beating it by 2 points.
+    assert goals._equity_growth_vs_spy(window, context) == pytest.approx(2.0)
+
+
+def test_equity_growth_vs_qqq_none_when_benchmark_unavailable(monkeypatch):
+    """A failed/rate-limited price fetch for the benchmark (see
+    charting.fetch_period_return_pct()'s own None case) must not crash
+    or silently show 0 - the whole goal is unknown until that data's
+    available."""
+    monkeypatch.setattr(goals.database, "get_realized_pl_since", lambda conn, start: 5000.0)
+    context = {
+        "jan1_balance": 100000.0, "conn": None,
+        "fetch_period_return_pct": lambda symbol, start: None,
+    }
+    window = {"start": date(2026, 1, 1), "end": date(2026, 8, 5)}
+    assert goals._equity_growth_vs_qqq(window, context) is None
+
+
+def test_equity_growth_vs_benchmark_none_without_jan1_balance():
+    context = {
+        "jan1_balance": None, "conn": None,
+        "fetch_period_return_pct": lambda symbol, start: 3.0,
+    }
+    window = {"start": date(2026, 1, 1), "end": date(2026, 8, 5)}
+    assert goals._equity_growth_vs_spy(window, context) is None
+
+
 def test_status_zone_higher_is_better():
     assert goals.status_zone(90, warning_level=80, alert_level=60, direction="higher_is_better") == "Good"
     assert goals.status_zone(70, warning_level=80, alert_level=60, direction="higher_is_better") == "Warning"
