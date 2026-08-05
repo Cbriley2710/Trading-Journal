@@ -1,36 +1,30 @@
 """
 Goals
 =====================
-Two sections, matching goals.py's own two layers:
+A dashboard of the goals you're actively tracking, one tile per goal
+(Current Value + a Good/Warning/Alert badge - see goals.status_zone()).
 
-  - Goal Library: a reference table of every goal AVAILABLE to track -
-    browse-only, nothing to click here. See goals.GOAL_LIBRARY.
+Everything about ADDING or CONFIGURING a goal lives in the "Settings"
+section at the bottom, collapsed by default so the main view stays a
+clean dashboard:
+  - Actively Tracked: the goals above, with their own editable Warning
+    Level / Alert Level thresholds (same "number_input that saves and
+    reruns on change" pattern as Stop Loss on the Open Positions page).
+  - Available Goals: everything in goals.GOAL_LIBRARY not currently
+    tracked - check its box to start tracking it.
 
-  - Tracked Goals: the actual working dashboard - goals you've chosen
-    to track, each with a Target Value/Comparison you set and a
-    Current Value computed fresh from your real trade history every
-    time this page loads (see goals.current_value()), plus a Met/Not
-    Met/In Progress Status. Add as many as you want; nothing about the
-    page needs to change when you do, since every tracked goal's number
-    comes from the exact same lookup (goal's own "metric" key -> a
-    function in goals.METRIC_FUNCS) - see goals.py's own module
-    docstring for the full reasoning.
-
-Scoped to Statistical (trade-derived) goals for now - see goals.py's
-own note on why the data model already has room for a "Process/
-Discipline" or "Manual Input" category later without changing this
-page's mechanics.
+See goals.py's own module docstring for the metric-function
+architecture this page is just a thin display over.
 """
 
 import streamlit as st
 
 import auth
-import charting
 import database
 import goals
 import nav
 
-st.set_page_config(page_title="Goals", page_icon="📈", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Goals", page_icon="🎯", layout="wide", initial_sidebar_state="collapsed")
 
 if not auth.check_password():
     st.stop()
@@ -42,131 +36,115 @@ st.title("Goals")
 conn = database.get_connection()
 
 
-def format_value(value, goal, timeframe):
-    """Formats a metric's raw number for display - $/%/ratio/count,
-    matching goal["unit"]. Account Growth is the one goal whose unit
-    depends on WHICH timeframe was picked (see goals.GOAL_LIBRARY's own
-    note on it), so that's handled as a special case here rather than
-    every goal needing a per-timeframe unit."""
+def format_value(value, goal):
+    """Formats a metric's raw number for display - every current goal
+    is a "%" unit; kept as a small dispatch (not a bare f-string inline)
+    so a future non-% goal has one obvious place to add its own case."""
     if value is None:
         return "—"
-    if goal["key"] == "account_growth":
-        return f"{value:,.2f}%" if timeframe == "Monthly" else f"${value:,.2f}"
-    unit = goal["unit"]
-    if unit == "$":
-        return f"${value:,.2f}"
-    if unit == "%":
-        return f"{value:,.2f}%"
-    if unit == "x":
-        return f"{value:,.2f}x"
-    return f"{value:,.0f}"  # "trades" (streaks)
+    if goal["unit"] == "%":
+        return f"{value:,.1f}%"
+    return f"{value:,.2f}"
 
 
-STATUS_COLORS = {"Met": charting.GOOD_COLOR, "Not Met": charting.CRITICAL_COLOR, "In Progress": charting.MUTED_COLOR}
+STATUS_BADGE_COLOR = {"Good": "green", "Warning": "yellow", "Alert": "red"}
 
-
-def render_status(column, stat):
-    if stat is None:
-        column.write("—")
-        return
-    color = STATUS_COLORS[stat]
-    column.markdown(f"<span style='color:{color};font-weight:700;'>{stat}</span>", unsafe_allow_html=True)
-
-
-st.header("Goal Library")
-st.caption(
-    "Every goal available to track below - add a new one to goals.GOAL_LIBRARY "
-    "any time (see that module's own docstring); nothing else on this page "
-    "needs to change for it to show up here and become trackable."
-)
-st.dataframe(
-    [
-        {
-            "Goal": g["name"], "Category": g["category"], "Timeframes": ", ".join(g["timeframes"]),
-            "Data Source": g["data_source"], "Suggested Comparison": g["suggested_comparison"],
-        }
-        for g in goals.GOAL_LIBRARY
-    ],
-    width="stretch", hide_index=True,
-)
-
-st.divider()
-
-st.header("Tracked Goals")
-st.caption(
-    "Current Value is always computed fresh from your real trade history "
-    "(and, for Account Growth, your Jan 1 baseline and live prices) - never "
-    "a stored number. \"In Progress\" only applies to Daily/Weekly/Monthly "
-    "goals - there's still time left in the period for the number to move; "
-    "a Rolling or All-Time goal that isn't Met is simply Not Met."
-)
 
 with st.spinner("Computing current values..."):
     context = goals.build_context(conn)
 
 tracked = database.get_tracked_goals(conn)
 
+# --- Dashboard ---------------------------------------------------------
 if not tracked:
-    st.info("No goals tracked yet - add one below.")
+    st.info("No goals tracked yet - open Settings below to add one.")
 else:
-    col_widths = [2, 1.3, 1, 1, 1.2, 1.2, 0.6]
-    header_cols = st.columns(col_widths)
-    for col, label in zip(header_cols, ["Goal", "Timeframe", "Target", "Comparison", "Current", "Status", ""]):
-        col.markdown(f"**{label}**")
-
-    for tg in tracked:
-        goal = goals.GOAL_BY_KEY.get(tg["goal_key"])
-        row_cols = st.columns(col_widths)
-
-        if goal is None:
-            # The code changed since this row was added (a goal_key
-            # that no longer exists in GOAL_LIBRARY) - shown plainly
-            # rather than crashing, with Remove as the only real option
-            # since there's no definition left to compute anything from.
-            row_cols[0].write(f"⚠️ Unknown goal ({tg['goal_key']})")
-            if row_cols[6].button("✕", key=f"remove_{tg['id']}"):
-                database.delete_tracked_goal(conn, tg["id"])
-                st.rerun()
-            continue
-
-        value = goals.current_value(goal, tg["timeframe"], context)
-        stat = goals.status(value, tg["target_value"], tg["comparison"], tg["timeframe"])
-
-        row_cols[0].write(goal["name"])
-        row_cols[1].write(tg["timeframe"])
-        row_cols[2].write(format_value(tg["target_value"], goal, tg["timeframe"]))
-        row_cols[3].write(tg["comparison"])
-        row_cols[4].write(format_value(value, goal, tg["timeframe"]))
-        render_status(row_cols[5], stat)
-        if row_cols[6].button("✕", key=f"remove_{tg['id']}"):
-            database.delete_tracked_goal(conn, tg["id"])
-            st.rerun()
+    rows = [tracked[i:i + 4] for i in range(0, len(tracked), 4)]
+    for row in rows:
+        cols = st.columns(4)
+        for col, tg in zip(cols, row):
+            goal = goals.GOAL_BY_KEY.get(tg["goal_key"])
+            with col.container(border=True):
+                if goal is None:
+                    # The code changed since this row was added (a
+                    # goal_key no longer in GOAL_LIBRARY) - shown
+                    # plainly instead of crashing; Settings is where
+                    # it gets removed.
+                    st.markdown(f"**⚠️ Unknown goal** ({tg['goal_key']})")
+                    continue
+                value = goals.current_value(goal, tg["timeframe"], context)
+                zone = goals.status_zone(value, tg["warning_level"], tg["alert_level"], goal["direction"])
+                st.markdown(f"**{goal['name']}**")
+                st.markdown(f"<div style='font-size:1.8rem;font-weight:700;'>{format_value(value, goal)}</div>",
+                             unsafe_allow_html=True)
+                if zone is not None:
+                    st.badge(zone, color=STATUS_BADGE_COLOR[zone])
+                elif tg["warning_level"] is None or tg["alert_level"] is None:
+                    st.caption("Set Warning/Alert Level in Settings")
+                else:
+                    st.caption("No data yet")
 
 st.divider()
 
-st.subheader("Add a Goal")
-# Deliberately NOT an st.form - the Timeframe dropdown's OWN options
-# depend on which Goal is picked (only that goal's valid timeframes -
-# see goals.GOAL_LIBRARY), which needs an immediate rerun on every
-# Goal change to stay in sync. A form only reruns on submit, which
-# would leave Timeframe showing the PREVIOUS goal's options until
-# Add Goal was clicked.
-add_cols = st.columns([2, 1.3, 1, 1, 0.8])
-goal_names = [g["name"] for g in goals.GOAL_LIBRARY]
-chosen_name = add_cols[0].selectbox("Goal", goal_names, key="add_goal_name")
-chosen_goal = next(g for g in goals.GOAL_LIBRARY if g["name"] == chosen_name)
+# --- Settings ------------------------------------------------------------
+with st.expander("Settings"):
+    st.subheader("Actively Tracked")
+    if not tracked:
+        st.caption("Nothing tracked yet - check a box below to add one.")
+    else:
+        col_widths = [2, 1.2, 1.2, 1.2, 0.6]
+        header_cols = st.columns(col_widths)
+        for col, label in zip(header_cols, ["Goal", "Current", "Warning Level", "Alert Level", ""]):
+            col.markdown(f"**{label}**")
 
-chosen_timeframe = add_cols[1].selectbox("Timeframe", chosen_goal["timeframes"], key="add_goal_timeframe")
-target_value = add_cols[2].number_input("Target Value", value=0.0, step=0.1, format="%.2f", key="add_goal_target")
-comparison_options = [">=", "<=", "="]
-comparison = add_cols[3].selectbox(
-    "Comparison", comparison_options,
-    index=comparison_options.index(chosen_goal["suggested_comparison"]),
-    key="add_goal_comparison",
-)
+        for tg in tracked:
+            goal = goals.GOAL_BY_KEY.get(tg["goal_key"])
+            row_cols = st.columns(col_widths)
 
-add_cols[4].write("")  # vertical spacer so the button lines up with the inputs, not their labels
-if add_cols[4].button("Add Goal", type="primary"):
-    database.add_tracked_goal(conn, chosen_goal["key"], chosen_timeframe, target_value, comparison)
-    st.success(f"Added {chosen_name} ({chosen_timeframe}).")
-    st.rerun()
+            if goal is None:
+                row_cols[0].write(f"⚠️ Unknown goal ({tg['goal_key']})")
+                if row_cols[4].button("✕", key=f"remove_{tg['id']}"):
+                    database.delete_tracked_goal(conn, tg["id"])
+                    st.rerun()
+                continue
+
+            value = goals.current_value(goal, tg["timeframe"], context)
+            row_cols[0].write(goal["name"])
+            row_cols[1].write(format_value(value, goal))
+
+            new_warning = row_cols[2].number_input(
+                "Warning Level", value=tg["warning_level"], step=1.0, format="%.2f",
+                key=f"warning_{tg['id']}", label_visibility="collapsed",
+            )
+            new_alert = row_cols[3].number_input(
+                "Alert Level", value=tg["alert_level"], step=1.0, format="%.2f",
+                key=f"alert_{tg['id']}", label_visibility="collapsed",
+            )
+            if new_warning != tg["warning_level"] or new_alert != tg["alert_level"]:
+                database.update_tracked_goal(conn, tg["id"], new_warning, new_alert)
+                st.rerun()
+
+            if row_cols[4].button("✕", key=f"remove_{tg['id']}"):
+                database.delete_tracked_goal(conn, tg["id"])
+                st.rerun()
+
+    st.divider()
+
+    st.subheader("Available Goals")
+    tracked_keys = {tg["goal_key"] for tg in tracked}
+    available = [g for g in goals.GOAL_LIBRARY if g["key"] not in tracked_keys]
+    if not available:
+        st.caption("Every goal in the library is already tracked.")
+    else:
+        avail_widths = [2, 4, 0.8]
+        header_cols = st.columns(avail_widths)
+        for col, label in zip(header_cols, ["Goal", "Data Source", "Track"]):
+            col.markdown(f"**{label}**")
+
+        for goal in available:
+            row_cols = st.columns(avail_widths)
+            row_cols[0].write(goal["name"])
+            row_cols[1].caption(goal["data_source"])
+            if row_cols[2].checkbox("Track", key=f"track_{goal['key']}", label_visibility="collapsed"):
+                database.add_tracked_goal(conn, goal["key"], goal["timeframes"][0])
+                st.rerun()

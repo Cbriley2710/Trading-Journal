@@ -360,11 +360,21 @@ def init_db(conn):
             id SERIAL PRIMARY KEY,
             goal_key TEXT NOT NULL,
             timeframe TEXT NOT NULL,
-            target_value DOUBLE PRECISION NOT NULL,
-            comparison TEXT NOT NULL,
+            warning_level DOUBLE PRECISION,
+            alert_level DOUBLE PRECISION,
             created_at TIMESTAMP NOT NULL
         )
     """)
+    # Replaced the old Target Value/Comparison (>=/<=/=) model with a
+    # Warning Level/Alert Level pair (see goals.status_zone()) - a
+    # three-way Good/Warning/Alert read instead of a binary Met/Not Met,
+    # nullable until the Settings table's per-goal inputs are filled in.
+    cur.execute("ALTER TABLE tracked_goals DROP COLUMN IF EXISTS target_value")
+    cur.execute("ALTER TABLE tracked_goals DROP COLUMN IF EXISTS comparison")
+    if not _column_exists(cur, "tracked_goals", "warning_level"):
+        cur.execute("ALTER TABLE tracked_goals ADD COLUMN warning_level DOUBLE PRECISION")
+    if not _column_exists(cur, "tracked_goals", "alert_level"):
+        cur.execute("ALTER TABLE tracked_goals ADD COLUMN alert_level DOUBLE PRECISION")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS chart_drawings (
             id SERIAL PRIMARY KEY,
@@ -1221,6 +1231,21 @@ def save_daily_journal_note(conn, entry_date, notes):
     conn.commit()
 
 
+def get_journal_note_dates(conn, start_date, end_date):
+    """Every date in [start_date, end_date] (inclusive) that has a
+    daily_journal_notes row, as a set of dates - used by goals.py's
+    Daily Journal % goal, which only needs to know WHICH days were
+    journaled, not the note text itself. A row existing at all counts,
+    even an empty string (see get_daily_journal_note()'s own note on
+    why)."""
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT entry_date FROM daily_journal_notes WHERE entry_date BETWEEN %s AND %s",
+        (start_date, end_date),
+    )
+    return {row[0] for row in cur.fetchall()}
+
+
 def get_logbook_entries(conn, symbol):
     """Returns every logbook row for a symbol, oldest day first."""
     cur = conn.cursor()
@@ -1622,6 +1647,36 @@ def update_trade_review(conn, review_id, notes, new_snapshots):
             (review_id, timeframe, chart_image),
         )
     conn.commit()
+
+
+def get_reviewed_trade_keys(conn):
+    """
+    Every reviewed trade across EVERY report, flat (not scoped to one
+    report_id the way get_review_report() is) - used by goals.py's
+    Monthly Review Credit % goal, which needs to check "has this trade
+    been reviewed, and was that review's report actually finished (has
+    reflections) and finished by when." Returns a list of
+    {"symbol", "entry_date", "exit_date", "direction", "quantity",
+    "buy_price", "sell_price", "report_created_at", "reflections_notes"}
+    - the first seven fields are the same natural key trade_reviews
+    itself is matched by everywhere else (see pages/1_Trade_Analyzer.py's
+    _trade_key()), not trades.id.
+    """
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT tr.symbol, tr.entry_date, tr.exit_date, tr.direction, tr.quantity,
+               tr.buy_price, tr.sell_price, r.created_at, r.reflections_notes
+        FROM trade_reviews tr
+        JOIN trade_review_reports r ON r.id = tr.report_id
+    """)
+    return [
+        {
+            "symbol": row[0], "entry_date": row[1], "exit_date": row[2], "direction": row[3],
+            "quantity": row[4], "buy_price": row[5], "sell_price": row[6],
+            "report_created_at": row[7], "reflections_notes": row[8],
+        }
+        for row in cur.fetchall()
+    ]
 
 
 def get_review_reports(conn):
@@ -2442,8 +2497,8 @@ def mark_daily_report_generated(conn, report_date):
 def get_tracked_goals(conn):
     """
     Every goal currently being tracked (see pages/6_Goals.py), oldest
-    first, as {"id", "goal_key", "timeframe", "target_value",
-    "comparison"} dictionaries. Not joined against goals.GOAL_LIBRARY
+    first, as {"id", "goal_key", "timeframe", "warning_level",
+    "alert_level"} dictionaries. Not joined against goals.GOAL_LIBRARY
     here - a row whose goal_key/timeframe no longer matches anything in
     the library (the code changed since it was added) is still
     returned as-is; it's the PAGE's job to notice that and show it as
@@ -2451,37 +2506,40 @@ def get_tracked_goals(conn):
     """
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, goal_key, timeframe, target_value, comparison FROM tracked_goals ORDER BY created_at"
+        "SELECT id, goal_key, timeframe, warning_level, alert_level FROM tracked_goals ORDER BY created_at"
     )
     return [
-        {"id": row[0], "goal_key": row[1], "timeframe": row[2], "target_value": row[3], "comparison": row[4]}
+        {"id": row[0], "goal_key": row[1], "timeframe": row[2], "warning_level": row[3], "alert_level": row[4]}
         for row in cur.fetchall()
     ]
 
 
-def add_tracked_goal(conn, goal_key, timeframe, target_value, comparison):
+def add_tracked_goal(conn, goal_key, timeframe, warning_level=None, alert_level=None):
     """Starts tracking one goal - see get_tracked_goals() for the shape
-    this later comes back as."""
+    this later comes back as. Warning/Alert Level start unset (checking
+    a goal on in the Available Goals table doesn't ask for them up
+    front) - set them afterward via update_tracked_goal() in the
+    Actively Tracked table."""
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT INTO tracked_goals (goal_key, timeframe, target_value, comparison, created_at)
+        INSERT INTO tracked_goals (goal_key, timeframe, warning_level, alert_level, created_at)
         VALUES (%s, %s, %s, %s, %s)
         """,
-        (goal_key, timeframe, target_value, comparison, timeutil.now_eastern()),
+        (goal_key, timeframe, warning_level, alert_level, timeutil.now_eastern()),
     )
     conn.commit()
 
 
-def update_tracked_goal(conn, goal_id, target_value, comparison):
-    """Changes an already-tracked goal's target/comparison in place -
-    used when you want to raise the bar on a goal without losing its
+def update_tracked_goal(conn, goal_id, warning_level, alert_level):
+    """Changes an already-tracked goal's Warning/Alert Level in place -
+    used when you want to move the bar on a goal without losing its
     history of being tracked (re-adding it would look identical today,
     but this is clearer about what actually happened)."""
     cur = conn.cursor()
     cur.execute(
-        "UPDATE tracked_goals SET target_value = %s, comparison = %s WHERE id = %s",
-        (target_value, comparison, goal_id),
+        "UPDATE tracked_goals SET warning_level = %s, alert_level = %s WHERE id = %s",
+        (warning_level, alert_level, goal_id),
     )
     conn.commit()
 

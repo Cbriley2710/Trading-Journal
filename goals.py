@@ -1,159 +1,70 @@
 """
 Goals
 =====================
-The trading-statistic goal-tracking system (see pages/6_Goals.py). Two
-layers, deliberately kept separate so adding a new goal later never
-means touching how tracked goals get displayed or evaluated:
+The goal-tracking system (see pages/6_Goals.py). Two layers,
+deliberately kept separate so adding a new goal later never means
+touching how tracked goals get displayed or evaluated:
 
-  - GOAL_LIBRARY: the catalog of available goals - name, category (all
-    "Statistical" for now - see its own note below), which timeframes
-    make sense for it, which metric actually computes it, a plain-
-    language description of where its numbers come from, and a
-    suggested (not enforced) comparison direction. Adding a goal is
-    exactly one more entry here.
+  - GOAL_LIBRARY: the catalog of available goals - name, category, which
+    timeframe(s) make sense for it, which metric actually computes it, a
+    plain-language description of where its numbers come from, and
+    which "direction" counts as good (see status_zone() below).
 
-  - METRIC_FUNCS: one function per underlying calculation (win rate,
-    net P/L, profit factor, ...), each taking a `window` (what slice of
-    time/trades to look at - see resolve_window()) and a `context`
-    (the data it needs - see build_context()) and returning a single
-    number, or None if it can't be computed (no trades in the window,
-    no losers to divide by for a ratio, no Jan 1 baseline set, ...). A
-    tracked goal's Current Value is always METRIC_FUNCS[goal["metric"]]
-    (window, context) - never a per-row formula - which is what makes
-    "add a row to GOAL_LIBRARY" the only thing a new goal ever needs.
+  - METRIC_FUNCS: one function per underlying calculation, each taking a
+    `window` (what slice of time to look at - see resolve_window()) and
+    a `context` (the data it needs - see build_context()) and returning
+    a single number, or None if it can't be computed yet. A tracked
+    goal's Current Value is always METRIC_FUNCS[goal["metric"]](window,
+    context) - never a per-row formula - which is what makes "add a row
+    to GOAL_LIBRARY" the only thing a new goal ever needs.
 
-Deliberately scoped to STATISTICAL (trades-table-derived) goals only
-for now. The user's own plan is to add "process/discipline" goals
-(e.g. "followed my trading plan") and "manual-input" goals (numbers
-typed in by hand, not derived from trades at all) later - those would
-be more GOAL_LIBRARY entries with a different `category` and a
-METRIC_FUNCS entry that doesn't necessarily need `context["trades"]`
-at all (a manual-input goal's "metric" might just read a value the
-user typed in elsewhere, for instance). Nothing here assumes
-Statistical is the only category that will ever exist - `category` is
-already a real field on every entry, just uniform today.
+Started fresh (2026-08) with two "Process" goals (did you actually do
+the habit, not a trade-performance number) instead of the earlier set
+of 13 Statistical (trades-table-derived) goals - those were removed
+wholesale rather than carried forward; see git history if any of them
+are wanted back later, one at a time.
+
+Every tracked goal now uses a Warning Level / Alert Level pair instead
+of the old Target Value + Comparison - see status_zone() below for why
+that's a three-way read (Good/Warning/Alert) instead of a binary
+Met/Not Met.
 """
 
+import calendar
 from datetime import timedelta
 
-import charting
 import database
 import timeutil
-from analyze_trades import trade_stats
 
 # Every timeframe any goal can use. A goal's own "timeframes" list (see
-# GOAL_LIBRARY) is a subset of this - e.g. a streak doesn't make sense
-# "Daily", and Net P/L isn't tracked "Rolling" (it's not per-trade), so
-# each goal only exposes what its comparison actually holds together.
-TIMEFRAMES = ["Daily", "Weekly", "Monthly", "Rolling 10", "Rolling 20", "Rolling 30", "All-Time"]
+# GOAL_LIBRARY) is a subset of this.
+TIMEFRAMES = ["Daily", "Weekly", "Monthly", "Yearly", "Rolling 10", "Rolling 20", "Rolling 30", "All-Time"]
 
-# Timeframes with a real calendar period that's still "open" (more
-# trades could still happen before it's over) - see status() below for
-# why that's what separates "In Progress" from "Not Met".
-_OPEN_PERIOD_TIMEFRAMES = {"Daily", "Weekly", "Monthly"}
+# Timeframes with a real calendar period that's still "open" (more days
+# could still happen before it's over) - see status_zone() callers for
+# why that matters: a shortfall here isn't final yet the way it is for
+# a Rolling window or All-Time.
+_OPEN_PERIOD_TIMEFRAMES = {"Daily", "Weekly", "Monthly", "Yearly"}
 
 
 GOAL_LIBRARY = [
     {
-        "key": "win_rate", "name": "Win Rate", "category": "Statistical",
-        "timeframes": ["Daily", "Weekly", "Monthly", "Rolling 10", "Rolling 20", "Rolling 30"],
-        "metric": "win_rate", "unit": "%",
-        "data_source": "Winning trades ÷ total trades closed in the period (Trade Analyzer's closed trades)",
-        "suggested_comparison": ">=",
-    },
-    {
-        "key": "net_pl", "name": "Net P/L", "category": "Statistical",
-        "timeframes": ["Daily", "Weekly", "Monthly"],
-        "metric": "net_pl", "unit": "$",
-        "data_source": "Sum of profit_loss for trades closed in the period",
-        "suggested_comparison": ">=",
-    },
-    {
-        "key": "profit_factor", "name": "Profit Factor", "category": "Statistical",
-        "timeframes": ["Weekly", "Monthly"],
-        "metric": "profit_factor", "unit": "x",
-        "data_source": "Gross winning $ ÷ gross losing $ (absolute value) for the period",
-        "suggested_comparison": ">=",
-    },
-    {
-        "key": "avg_winner_dollar", "name": "Average Winner ($)", "category": "Statistical",
-        "timeframes": ["Weekly", "Monthly"],
-        "metric": "avg_winner_dollar", "unit": "$",
-        "data_source": "Average profit_loss across winning trades in the period",
-        "suggested_comparison": ">=",
-    },
-    {
-        "key": "avg_winner_pct", "name": "Average Winner (%)", "category": "Statistical",
-        "timeframes": ["Weekly", "Monthly"],
-        "metric": "avg_winner_pct", "unit": "%",
-        "data_source": "Average % change across winning trades in the period (analyze_trades.trade_stats())",
-        "suggested_comparison": ">=",
-    },
-    {
-        "key": "avg_loser_dollar", "name": "Average Loser ($)", "category": "Statistical",
-        "timeframes": ["Weekly", "Monthly"],
-        "metric": "avg_loser_dollar", "unit": "$",
-        "data_source": "Average profit_loss across losing trades in the period (comes out negative)",
-        "suggested_comparison": ">=",
-    },
-    {
-        "key": "avg_loser_pct", "name": "Average Loser (%)", "category": "Statistical",
-        "timeframes": ["Weekly", "Monthly"],
-        "metric": "avg_loser_pct", "unit": "%",
-        "data_source": "Average % change across losing trades in the period (comes out negative)",
-        "suggested_comparison": ">=",
-    },
-    {
-        "key": "largest_win", "name": "Largest Win ($)", "category": "Statistical",
-        "timeframes": ["Monthly"],
-        "metric": "largest_win", "unit": "$",
-        "data_source": "Highest single profit_loss among winning trades in the period",
-        "suggested_comparison": ">=",
-    },
-    {
-        "key": "largest_loss", "name": "Largest Loss ($)", "category": "Statistical",
-        "timeframes": ["Monthly"],
-        "metric": "largest_loss", "unit": "$",
-        "data_source": "Lowest single profit_loss among losing trades in the period (comes out negative)",
-        "suggested_comparison": ">=",
-    },
-    {
-        "key": "reward_risk", "name": "Reward:Risk Ratio", "category": "Statistical",
-        "timeframes": ["Rolling 10", "Rolling 20", "Rolling 30"],
-        "metric": "reward_risk", "unit": "x",
-        "data_source": "Average winner % ÷ average loser % (absolute value) over the window",
-        "suggested_comparison": ">=",
-    },
-    {
-        "key": "current_win_streak", "name": "Current Win Streak", "category": "Statistical",
-        "timeframes": ["Rolling 10", "Rolling 20", "Rolling 30", "All-Time"],
-        "metric": "current_win_streak", "unit": "trades",
-        "data_source": "Consecutive winning trades counting back from the most recent trade",
-        "suggested_comparison": ">=",
-    },
-    {
-        "key": "current_loss_streak", "name": "Current Loss Streak", "category": "Statistical",
-        "timeframes": ["Rolling 10", "Rolling 20", "Rolling 30", "All-Time"],
-        "metric": "current_loss_streak", "unit": "trades",
-        "data_source": "Consecutive losing trades counting back from the most recent trade",
-        "suggested_comparison": "<=",
-    },
-    {
-        "key": "max_drawdown", "name": "Max Drawdown", "category": "Statistical",
-        "timeframes": ["Monthly", "All-Time"],
-        "metric": "max_drawdown", "unit": "$",
-        "data_source": "Largest peak-to-trough decline in cumulative P/L over the period (comes out negative)",
-        "suggested_comparison": ">=",
-    },
-    {
-        "key": "account_growth", "name": "Account Growth", "category": "Statistical",
-        "timeframes": ["Monthly", "All-Time"],
-        "metric": "account_growth", "unit": "% (Monthly) / $ (All-Time)",
+        "key": "daily_journal_pct", "name": "Daily Journal %", "category": "Process",
+        "timeframes": ["Monthly"], "metric": "daily_journal_pct", "unit": "%",
+        "direction": "higher_is_better",
         "data_source": (
-            "Monthly: this month's realized P/L as a % of the Jan 1 baseline (Settings page). "
-            "All-Time: today's fully calculated account value in dollars (a milestone figure)"
+            "Days this month with a \"Today's Thoughts\" journal entry ÷ days so far "
+            "this month, excluding Friday and Saturday (Friday's session gets journaled Sunday)"
         ),
-        "suggested_comparison": ">=",
+    },
+    {
+        "key": "monthly_review_pct", "name": "Monthly Review Credit %", "category": "Process",
+        "timeframes": ["Yearly"], "metric": "monthly_review_pct", "unit": "%",
+        "direction": "higher_is_better",
+        "data_source": (
+            "Months this year whose closed trades were ALL reviewed (with reflections written) "
+            "by the end of the following month, as a % of months whose deadline has already passed"
+        ),
     },
 ]
 
@@ -163,28 +74,26 @@ GOAL_BY_KEY = {g["key"]: g for g in GOAL_LIBRARY}
 def build_context(conn):
     """
     Everything a metric function might need, fetched once per page
-    render rather than once per tracked goal - trades (oldest first,
-    including SHORT trades, unlike the Excel-era tracker which left
-    those out), the Jan 1 baseline, and `conn` itself for the one goal
-    (Account Growth) that needs a live database read of its own.
+    render rather than once per tracked goal.
     """
-    trades = sorted(database.get_trades(conn), key=lambda t: t["date"])
+    today = timeutil.today_eastern()
+    year_start = today.replace(month=1, day=1)
     return {
-        "trades": trades,
-        "jan1_balance": database.get_account_value(conn),
-        "conn": conn,
+        "trades": sorted(database.get_trades(conn), key=lambda t: t["date"]),
+        "journaled_dates": database.get_journal_note_dates(conn, year_start, today),
+        "reviewed_trade_keys": database.get_reviewed_trade_keys(conn),
     }
 
 
 def resolve_window(timeframe):
     """
     Turns a timeframe string into a `window` dict describing what
-    slice of trades it means:
+    slice of time it means:
       - {"kind": "range", "start": date, "end": date} - a calendar
-        period, inclusive, always ending today (Daily/Weekly/Monthly).
+        period, inclusive, always ending today.
       - {"kind": "rolling", "n": int} - the most recent N trades,
         regardless of date.
-      - {"kind": "all"} - every trade ever.
+      - {"kind": "all"} - everything.
     """
     today = timeutil.today_eastern()
     if timeframe == "Daily":
@@ -194,6 +103,8 @@ def resolve_window(timeframe):
         return {"kind": "range", "start": monday, "end": today}
     if timeframe == "Monthly":
         return {"kind": "range", "start": today.replace(day=1), "end": today}
+    if timeframe == "Yearly":
+        return {"kind": "range", "start": today.replace(month=1, day=1), "end": today}
     if timeframe.startswith("Rolling "):
         return {"kind": "rolling", "n": int(timeframe.split()[1])}
     if timeframe == "All-Time":
@@ -201,163 +112,100 @@ def resolve_window(timeframe):
     raise ValueError(f"Unknown timeframe: {timeframe!r}")
 
 
-def _trades_in_window(trades, window):
-    """`trades` must already be sorted oldest-first by exit date (see
-    build_context()). Returns the subset the window selects."""
-    if window["kind"] == "range":
-        return [t for t in trades if window["start"] <= t["date"].date() <= window["end"]]
-    if window["kind"] == "rolling":
-        return trades[-window["n"]:]
-    return list(trades)
+def _last_day_of_month(any_date_in_month):
+    """The date of the last day of any_date_in_month's calendar month."""
+    last_day = calendar.monthrange(any_date_in_month.year, any_date_in_month.month)[1]
+    return any_date_in_month.replace(day=last_day)
 
 
-def _pct_change(trade):
-    """A trade's % change, direction-aware - reuses analyze_trades.
-    trade_stats() (the same shared math Trade Analyzer/Logbook/the PDF
-    report use) rather than a second copy of the entry/exit pairing
-    logic for shorts."""
-    stats = trade_stats(
-        trade["direction"], trade["buy_price"], trade["sell_price"], trade["quantity"],
-        trade["profit_loss"], trade["entry_date"].date(), trade["date"].date(),
-    )
-    return stats["pct_change"]
+def _first_of_next_month(any_date_in_month):
+    """The 1st of the calendar month right after any_date_in_month's."""
+    last_day = _last_day_of_month(any_date_in_month)
+    return last_day + timedelta(days=1)
 
 
-def _win_rate(window, context):
-    trades = _trades_in_window(context["trades"], window)
-    if not trades:
+def _daily_journal_pct(window, context):
+    """% of days in the window with a Today's Thoughts journal entry -
+    Friday and Saturday are excluded from both the numerator and the
+    denominator (the user journals Friday's market action on Sunday, so
+    there's nothing to write on Friday or Saturday itself). None if the
+    window has no countable days at all (only possible if today is the
+    1st of the month and it's a Friday or Saturday)."""
+    journaled_dates = context["journaled_dates"]
+    total = done = 0
+    d = window["start"]
+    while d <= window["end"]:
+        if d.weekday() not in (4, 5):  # Friday=4, Saturday=5
+            total += 1
+            if d in journaled_dates:
+                done += 1
+        d += timedelta(days=1)
+    if total == 0:
         return None
-    wins = sum(1 for t in trades if t["profit_loss"] > 0)
-    return wins / len(trades) * 100
+    return done / total * 100
 
 
-def _net_pl(window, context):
-    trades = _trades_in_window(context["trades"], window)
-    return sum(t["profit_loss"] for t in trades)
-
-
-def _profit_factor(window, context):
-    trades = _trades_in_window(context["trades"], window)
-    gross_win = sum(t["profit_loss"] for t in trades if t["profit_loss"] > 0)
-    gross_loss = sum(t["profit_loss"] for t in trades if t["profit_loss"] < 0)
-    if gross_loss == 0:
-        return None  # no losers yet - a ratio against zero isn't meaningful
-    return gross_win / abs(gross_loss)
-
-
-def _avg_winner_dollar(window, context):
-    winners = [t["profit_loss"] for t in _trades_in_window(context["trades"], window) if t["profit_loss"] > 0]
-    return sum(winners) / len(winners) if winners else None
-
-
-def _avg_loser_dollar(window, context):
-    losers = [t["profit_loss"] for t in _trades_in_window(context["trades"], window) if t["profit_loss"] < 0]
-    return sum(losers) / len(losers) if losers else None
-
-
-def _avg_winner_pct(window, context):
-    winners = [_pct_change(t) for t in _trades_in_window(context["trades"], window) if t["profit_loss"] > 0]
-    return sum(winners) / len(winners) if winners else None
-
-
-def _avg_loser_pct(window, context):
-    losers = [_pct_change(t) for t in _trades_in_window(context["trades"], window) if t["profit_loss"] < 0]
-    return sum(losers) / len(losers) if losers else None
-
-
-def _largest_win(window, context):
-    wins = [t["profit_loss"] for t in _trades_in_window(context["trades"], window) if t["profit_loss"] > 0]
-    return max(wins) if wins else None
-
-
-def _largest_loss(window, context):
-    losses = [t["profit_loss"] for t in _trades_in_window(context["trades"], window) if t["profit_loss"] < 0]
-    return min(losses) if losses else None
-
-
-def _reward_risk(window, context):
-    avg_win = _avg_winner_pct(window, context)
-    avg_loss = _avg_loser_pct(window, context)
-    if not avg_win or not avg_loss:
+def _month_is_credited(month_start, context, today):
+    """True/False/None for whether month_start's calendar month earned
+    "Monthly Review" credit - None means "not decided yet" (either no
+    trades closed that month, so there's nothing to review, or the
+    deadline - the end of the FOLLOWING month - hasn't passed yet, so a
+    shortfall isn't final). True/False only once the deadline has
+    passed, based on whether every trade that closed that month is
+    covered by a reviewed_trade_keys entry with reflections written, on
+    or before that deadline."""
+    month_end = _last_day_of_month(month_start)
+    trades_in_month = [
+        t for t in context["trades"]
+        if month_start <= t["date"].date() <= month_end
+    ]
+    if not trades_in_month:
         return None
-    return avg_win / abs(avg_loss)
+
+    deadline = _last_day_of_month(_first_of_next_month(month_start))
+
+    covered_keys = {
+        (r["symbol"], r["entry_date"].isoformat(), r["exit_date"].isoformat(), r["direction"],
+         r["quantity"], r["buy_price"], r["sell_price"])
+        for r in context["reviewed_trade_keys"]
+        if r["reflections_notes"] and r["report_created_at"].date() <= deadline
+    }
+    trade_keys = {
+        (t["symbol"], t["entry_date"].date().isoformat(), t["date"].date().isoformat(), t["direction"],
+         t["quantity"], t["buy_price"], t["sell_price"])
+        for t in trades_in_month
+    }
+
+    if trade_keys.issubset(covered_keys):
+        return True
+    if today > deadline:
+        return False
+    return None  # deadline hasn't passed yet - still pending
 
 
-def _streak(window, context):
-    """Shared by current_win_streak/current_loss_streak - (streak_type,
-    length) for the tail of the window's trades: 'W' or 'L' matching
-    whichever the MOST RECENT trade was, and how many trades in a row
-    at the end share that same outcome."""
-    trades = _trades_in_window(context["trades"], window)
-    if not trades:
-        return None, 0
-    last_is_win = trades[-1]["profit_loss"] > 0
-    length = 0
-    for t in reversed(trades):
-        if (t["profit_loss"] > 0) != last_is_win:
-            break
-        length += 1
-    return ("W" if last_is_win else "L"), length
-
-
-def _current_win_streak(window, context):
-    kind, length = _streak(window, context)
-    return length if kind == "W" else 0
-
-
-def _current_loss_streak(window, context):
-    kind, length = _streak(window, context)
-    return length if kind == "L" else 0
-
-
-def _max_drawdown(window, context):
-    """Largest peak-to-trough decline in cumulative P/L across the
-    window's trades, in dollars - a fresh cumulative curve starting at
-    0 for the window (not the account's own running equity), so
-    "Monthly" measures the worst dip THAT MONTH specifically, not one
-    carried over from an unrelated earlier month. Always <= 0."""
-    trades = _trades_in_window(context["trades"], window)
-    if not trades:
+def _monthly_review_pct(window, context):
+    """% of this year's "decided" months (deadline already passed, see
+    _month_is_credited()) that earned Monthly Review credit. A month
+    that's still pending (deadline not passed) or had no trades at all
+    is left out of both the numerator and denominator - it isn't a
+    failure yet, or there was nothing to review. None if no month has
+    been decided yet."""
+    today = timeutil.today_eastern()
+    decided = []
+    month_start = window["start"].replace(day=1)
+    while month_start <= today:
+        result = _month_is_credited(month_start, context, today)
+        if result is not None:
+            decided.append(result)
+        month_start = _first_of_next_month(month_start)
+    if not decided:
         return None
-    cumulative = peak = max_dd = 0.0
-    for t in trades:
-        cumulative += t["profit_loss"]
-        peak = max(peak, cumulative)
-        max_dd = min(max_dd, cumulative - peak)
-    return max_dd
-
-
-def _account_growth(window, context):
-    """Monthly: this month's realized P/L as a % of the Jan 1 baseline -
-    same convention as the Dashboard's own Account Performance tiles
-    (period P/L ÷ Jan 1 baseline), so this number means the same thing
-    there and here. All-Time: today's fully calculated account value in
-    dollars (charting.get_calculated_account_value()) - an absolute
-    milestone figure, e.g. a target of ">= 100000" for "reach $100k"."""
-    jan1_balance = context.get("jan1_balance")
-    if not jan1_balance:
-        return None
-    if window["kind"] == "all":
-        return charting.get_calculated_account_value(context["conn"])
-    month_pl = database.get_realized_pl_since(context["conn"], window["start"])
-    return month_pl / jan1_balance * 100
+    return sum(decided) / len(decided) * 100
 
 
 METRIC_FUNCS = {
-    "win_rate": _win_rate,
-    "net_pl": _net_pl,
-    "profit_factor": _profit_factor,
-    "avg_winner_dollar": _avg_winner_dollar,
-    "avg_winner_pct": _avg_winner_pct,
-    "avg_loser_dollar": _avg_loser_dollar,
-    "avg_loser_pct": _avg_loser_pct,
-    "largest_win": _largest_win,
-    "largest_loss": _largest_loss,
-    "reward_risk": _reward_risk,
-    "current_win_streak": _current_win_streak,
-    "current_loss_streak": _current_loss_streak,
-    "max_drawdown": _max_drawdown,
-    "account_growth": _account_growth,
+    "daily_journal_pct": _daily_journal_pct,
+    "monthly_review_pct": _monthly_review_pct,
 }
 
 
@@ -372,30 +220,27 @@ def current_value(goal, timeframe, context):
     return METRIC_FUNCS[goal["metric"]](window, context)
 
 
-COMPARISONS = {
-    ">=": lambda current, target: current >= target,
-    "<=": lambda current, target: current <= target,
-    "=": lambda current, target: abs(current - target) < 0.005,
-}
-
-
-def status(current, target, comparison, timeframe):
+def status_zone(value, warning_level, alert_level, direction):
     """
-    "Met" / "Not Met" / "In Progress" for one tracked goal. "In
-    Progress" only applies to a timeframe with a real calendar period
-    that's still open (Daily/Weekly/Monthly - see
-    _OPEN_PERIOD_TIMEFRAMES) - there's always more of today/this week/
-    this month left for the number to still move, so falling short
-    isn't a final result yet the way it is for a Rolling window or
-    All-Time (always fully "current", nothing left pending). Returns
-    None (not a string) if `current` is None - nothing to compare yet,
-    e.g. no trades at all in the period.
+    "Good" / "Warning" / "Alert" for one tracked goal - None if there's
+    nothing to compare yet (no current value, or Warning/Alert Level
+    hasn't been set in the Settings table). Unlike the old binary Met/
+    Not Met model, this is always a live read of where the CURRENT
+    value sits relative to both thresholds - there's no separate
+    "In Progress" state; a goal on an open-period timeframe (see
+    _OPEN_PERIOD_TIMEFRAMES) simply keeps recomputing as the period
+    goes, the same way its Current Value already does.
     """
-    if current is None:
+    if value is None or warning_level is None or alert_level is None:
         return None
-    met = COMPARISONS[comparison](current, target)
-    if met:
-        return "Met"
-    if timeframe in _OPEN_PERIOD_TIMEFRAMES:
-        return "In Progress"
-    return "Not Met"
+    if direction == "higher_is_better":
+        if value < alert_level:
+            return "Alert"
+        if value < warning_level:
+            return "Warning"
+        return "Good"
+    if value > alert_level:
+        return "Alert"
+    if value > warning_level:
+        return "Warning"
+    return "Good"
