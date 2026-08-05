@@ -705,12 +705,20 @@ def _insert_transactions(conn, transactions):
         "different enough" to get the tolerance, so 46 real SnapTrade-
         vs-legacy duplicates went uncaught and inflated open positions
         (see this project's own commit history around both fixes).
+      - Also too narrow, in a different way (fixed alongside): requiring
+        a bit-for-bit exact price match for the non-SnapTrade case
+        above rejected a legacy row's occasional extra digit of raw
+        precision (e.g. "1250.775") against a fresh CSV re-import's
+        cleanly-rounded cent price ("1250.78") for the SAME real fill -
+        confirmed for real (SNDK, AMRX), each inflating a phantom open
+        position by the fill's full share count. Now compared at cent
+        precision (round to 2 decimals) instead of exact equality.
     The actual right line: the tolerance is ONLY ever needed because of
     SnapTrade's own extra precision, so it should only fire when
     SnapTrade is actually one of the two sources being compared - a CSV
     import and a legacy (None) row are BOTH CSV-precision data, so two
-    of those reporting the same real fill would carry the IDENTICAL
-    price, not just a close one.
+    of those reporting the same real fill would carry the same price to
+    the cent, even if a stray extra decimal digit differs.
 
     Since a CSV export always contains your FULL history, and a
     SnapTrade sync re-fetches a recent overlapping window every time
@@ -772,7 +780,21 @@ def _insert_transactions(conn, transactions):
         # cents of an unrelated EXISTING 100-share fill from the same
         # order.
         if t["source"] == e["source"] or "snaptrade" not in (t["source"], e["source"]):
-            return e["price"] == t["price"]
+            # Not a bit-for-bit comparison: a legacy (source=None) row
+            # sometimes carries an extra digit or two of raw precision
+            # (e.g. an averaged fill price like "1250.775" or "17.9327")
+            # that a fresh CSV export - always quoted to the cent -
+            # rounds cleanly ("1250.78", "17.93"). Confirmed for real
+            # (SNDK, AMRX): the SAME 100-share fill, reported once as a
+            # legacy row and once via a fresh CSV re-import, failed this
+            # exact-match check by less than a cent and got double-
+            # counted as a phantom open position. Comparing at cent
+            # precision (what a broker actually quotes prices at) still
+            # keeps genuinely separate fills apart - the CON case this
+            # exact-match branch exists to protect (two real fills at
+            # $31.96 and $31.98) differ by a whole 2 cents, which
+            # survives rounding either way.
+            return round(e["price"], 2) == round(t["price"], 2)
 
         return abs(e["price"] - t["price"]) <= max(0.01, e["price"] * 0.002)
 

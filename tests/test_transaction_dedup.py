@@ -154,6 +154,34 @@ def test_none_source_vs_csv_exact_price_still_deduped(conn):
         _cleanup(conn)
 
 
+def test_none_source_vs_csv_extra_decimal_precision_is_deduped(conn):
+    """The SNDK/AMRX bug: a legacy (source=None) row sometimes carries
+    an extra digit of raw precision (e.g. "1250.775") that a fresh CSV
+    re-import of the SAME real fill rounds cleanly to the cent
+    ("1250.78") - these must be recognized as duplicates even though
+    they aren't bit-for-bit equal, or the fill gets double-counted into
+    a phantom open position. Must not require exact float equality, but
+    must still stay well short of the CON case two tests below (a real
+    2-cent difference), which survives rounding either way."""
+    _cleanup(conn)
+    try:
+        database._insert_transactions(conn, [{
+            "date": datetime(2026, 7, 30), "symbol": SYMBOL, "action": "BUY",
+            "price": 1250.775, "quantity": 100, "source": None,
+        }])
+        second = database._insert_transactions(conn, [{
+            "date": datetime(2026, 7, 30), "symbol": SYMBOL, "action": "BUY",
+            "price": 1250.78, "quantity": 100, "source": "csv",
+        }])
+        assert second == 0, "same fill at cent precision must be deduped despite the extra raw decimal"
+
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM transactions WHERE symbol = %s", (SYMBOL,))
+        assert cur.fetchone()[0] == 1
+    finally:
+        _cleanup(conn)
+
+
 def test_same_known_source_requires_exact_price(conn):
     """Two snaptrade rows a few cents apart are genuinely separate
     fills, not the same trade reported twice - same protection as the
