@@ -713,6 +713,16 @@ def _insert_transactions(conn, transactions):
         confirmed for real (SNDK, AMRX), each inflating a phantom open
         position by the fill's full share count. Now compared at cent
         precision (round to 2 decimals) instead of exact equality.
+      - A fourth gap, same root cause as the SnapTrade-precision one
+        above: SnapTrade's synced action is always plain "BUY"/"SELL",
+        never "SELL_SHORT" (its feed doesn't expose that distinction
+        for this account - see snaptrade_sync.py), so a real short sale
+        already correctly recorded as SELL_SHORT (from a CSV import or
+        legacy row) got a mislabeled SnapTrade "SELL" duplicate that
+        same_fill()'s exact-action requirement couldn't recognize as
+        the same fill. Confirmed for real (NBIS: 4 duplicated rows).
+        Now allowed to match across that specific action pair, but only
+        when SnapTrade is involved - see same_fill() below.
     The actual right line: the tolerance is ONLY ever needed because of
     SnapTrade's own extra precision, so it should only fire when
     SnapTrade is actually one of the two sources being compared - a CSV
@@ -755,9 +765,29 @@ def _insert_transactions(conn, transactions):
 
     def same_fill(t, e):
         t_date = as_date(t["date"])
-        if (as_date(e["date"]) != t_date or e["symbol"] != t["symbol"]
-                or e["action"] != t["action"] or e["quantity"] != t["quantity"]):
+        if as_date(e["date"]) != t_date or e["symbol"] != t["symbol"] or e["quantity"] != t["quantity"]:
             return False
+
+        involves_snaptrade = "snaptrade" in (t["source"], e["source"])
+
+        if e["action"] != t["action"]:
+            # SnapTrade's synced action is always plain "BUY"/"SELL" -
+            # it has no way to tell us a sell was actually a short-sale
+            # open (see snaptrade_sync.py's fetch_activities() docstring
+            # for why - this account's feed doesn't expose that). A CSV
+            # import or legacy row DOES know this (see analyze_trades.
+            # load_transactions()'s "SOLD SHORT SALE" detection), so a
+            # SnapTrade "SELL" landing on the same date/symbol/quantity/
+            # price as an existing "SELL_SHORT" from one of those is the
+            # SAME real short sale, just mislabeled - not a separate
+            # transaction. Confirmed for real (NBIS): 4 SnapTrade rows
+            # duplicated 4 already-correct SELL_SHORT rows this way.
+            # Restricted to SnapTrade specifically (not any two
+            # mismatched actions) so a genuinely different real SELL and
+            # SELL_SHORT that happen to share date/symbol/quantity/price
+            # between two CSV/legacy rows still stay separate.
+            if not (involves_snaptrade and {t["action"], e["action"]} == {"SELL", "SELL_SHORT"}):
+                return False
 
         # The fuzzy price tolerance below exists for exactly ONE reason:
         # SnapTrade's API reports more decimal precision than a plain
@@ -779,7 +809,7 @@ def _insert_transactions(conn, transactions):
         # fill's own P/L, because it happened to land within a few
         # cents of an unrelated EXISTING 100-share fill from the same
         # order.
-        if t["source"] == e["source"] or "snaptrade" not in (t["source"], e["source"]):
+        if t["source"] == e["source"] or not involves_snaptrade:
             # Not a bit-for-bit comparison: a legacy (source=None) row
             # sometimes carries an extra digit or two of raw precision
             # (e.g. an averaged fill price like "1250.775" or "17.9327")

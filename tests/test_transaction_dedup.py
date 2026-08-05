@@ -182,6 +182,55 @@ def test_none_source_vs_csv_extra_decimal_precision_is_deduped(conn):
         _cleanup(conn)
 
 
+def test_snaptrade_sell_dedupes_against_existing_sell_short(conn):
+    """The NBIS bug: SnapTrade's synced action is always plain "BUY"/
+    "SELL" - it can't tell us a sell was actually a short-sale open, so
+    a real short sale re-synced later via SnapTrade lands as a
+    duplicate "SELL" row of an already-correct "SELL_SHORT" row from a
+    CSV import. Must be recognized as the same fill despite the
+    mismatched action, using the same SnapTrade fuzzy price tolerance
+    as any other SnapTrade-vs-CSV comparison."""
+    _cleanup(conn)
+    try:
+        database._insert_transactions(conn, [{
+            "date": datetime(2026, 7, 30), "symbol": SYMBOL, "action": "SELL_SHORT",
+            "price": 191.0, "quantity": 700, "source": "csv",
+        }])
+        second = database._insert_transactions(conn, [{
+            "date": datetime(2026, 7, 30), "symbol": SYMBOL, "action": "SELL",
+            "price": 191.0001, "quantity": 700, "source": "snaptrade",
+        }])
+        assert second == 0, "SnapTrade's mislabeled SELL must be recognized as the same short sale"
+
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM transactions WHERE symbol = %s", (SYMBOL,))
+        assert cur.fetchone()[0] == 1
+    finally:
+        _cleanup(conn)
+
+
+def test_two_csv_rows_with_different_actions_stay_separate(conn):
+    """The cross-action SnapTrade allowance above must NOT weaken the
+    ordinary case: two CSV/legacy rows (no SnapTrade involved) with
+    different actions are never the same real fill, even if date/
+    symbol/quantity/price all happen to line up - a plain SELL and a
+    SELL_SHORT are genuinely different events when both sources already
+    know how to tell them apart."""
+    _cleanup(conn)
+    try:
+        database._insert_transactions(conn, [{
+            "date": datetime(2026, 7, 30), "symbol": SYMBOL, "action": "SELL_SHORT",
+            "price": 50.00, "quantity": 10, "source": "csv",
+        }])
+        second = database._insert_transactions(conn, [{
+            "date": datetime(2026, 7, 30), "symbol": SYMBOL, "action": "SELL",
+            "price": 50.00, "quantity": 10, "source": "csv",
+        }])
+        assert second == 1, "two CSV rows with different actions must not be merged"
+    finally:
+        _cleanup(conn)
+
+
 def test_same_known_source_requires_exact_price(conn):
     """Two snaptrade rows a few cents apart are genuinely separate
     fills, not the same trade reported twice - same protection as the
