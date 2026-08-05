@@ -247,6 +247,47 @@ def test_stop_loss_usage_pct_none_when_no_trades_in_window():
     assert goals._stop_loss_usage_pct(window, context) is None
 
 
+def _trade_with_pl(symbol, entry_date, exit_date, buy_price, sell_price, profit_loss, direction="LONG"):
+    t = _trade(symbol, entry_date, exit_date, direction=direction, buy_price=buy_price, sell_price=sell_price)
+    t["profit_loss"] = profit_loss
+    return t
+
+
+def test_reward_risk_ratio_basic():
+    # Winners: +10%, +20% (avg +15%). Loser: -5%. Ratio = 15/5 = 3.0x.
+    winner1 = _trade_with_pl("AAPL", date(2026, 7, 1), date(2026, 7, 5), 100.0, 110.0, 1000.0)
+    winner2 = _trade_with_pl("MSFT", date(2026, 7, 2), date(2026, 7, 6), 100.0, 120.0, 2000.0)
+    loser = _trade_with_pl("TSLA", date(2026, 7, 3), date(2026, 7, 7), 100.0, 95.0, -500.0)
+    context = {"trades": [winner1, winner2, loser]}
+    window = {"start": date(2026, 7, 1), "end": date(2026, 7, 31)}
+    assert goals._reward_risk_ratio(window, context) == pytest.approx(3.0)
+
+
+def test_reward_risk_ratio_none_without_a_loser():
+    winner = _trade_with_pl("AAPL", date(2026, 7, 1), date(2026, 7, 5), 100.0, 110.0, 1000.0)
+    context = {"trades": [winner]}
+    window = {"start": date(2026, 7, 1), "end": date(2026, 7, 31)}
+    assert goals._reward_risk_ratio(window, context) is None
+
+
+def test_reward_risk_ratio_none_without_a_winner():
+    loser = _trade_with_pl("TSLA", date(2026, 7, 3), date(2026, 7, 7), 100.0, 95.0, -500.0)
+    context = {"trades": [loser]}
+    window = {"start": date(2026, 7, 1), "end": date(2026, 7, 31)}
+    assert goals._reward_risk_ratio(window, context) is None
+
+
+def test_reward_risk_ratio_ignores_trades_outside_window():
+    winner_in_window = _trade_with_pl("AAPL", date(2026, 7, 1), date(2026, 7, 5), 100.0, 110.0, 1000.0)
+    loser_in_window = _trade_with_pl("TSLA", date(2026, 7, 3), date(2026, 7, 7), 100.0, 95.0, -500.0)
+    winner_outside = _trade_with_pl("MSFT", date(2026, 6, 1), date(2026, 6, 5), 100.0, 150.0, 5000.0)
+    context = {"trades": [winner_in_window, loser_in_window, winner_outside]}
+    window = {"start": date(2026, 7, 1), "end": date(2026, 7, 31)}
+    # Only the July winner/loser count - a huge June winner outside the
+    # window must not skew this month's ratio.
+    assert goals._reward_risk_ratio(window, context) == pytest.approx(10.0 / 5.0)
+
+
 def test_equity_growth_pct_basic(monkeypatch):
     monkeypatch.setattr(goals.database, "get_realized_pl_since", lambda conn, start: 5000.0)
     context = {"jan1_balance": 100000.0, "conn": None}

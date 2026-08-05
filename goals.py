@@ -36,6 +36,7 @@ from datetime import timedelta
 import charting
 import database
 import timeutil
+from analyze_trades import trade_stats
 
 # Every timeframe any goal can use. A goal's own "timeframes" list (see
 # GOAL_LIBRARY) is a subset of this.
@@ -86,6 +87,16 @@ GOAL_LIBRARY = [
             "and exit ÷ all closed trades in the period. Only counts a stop set via the Open "
             "Positions/Shortlist pages AFTER this goal was added (2026-08) - stop-loss history "
             "isn't tracked before that, so trades closed earlier can't be scored"
+        ),
+    },
+    {
+        "key": "reward_risk_ratio", "name": "Reward:Risk Ratio", "category": "Statistical",
+        "timeframes": ["Monthly", "Yearly"], "metric": "reward_risk_ratio", "unit": "x",
+        "direction": "higher_is_better",
+        "data_source": (
+            "Average % gain across winning trades in the period ÷ average % loss across losing "
+            "trades (absolute value) - e.g. 2.0x means your average win is twice your average "
+            "loss. Higher is better; needs at least one win AND one loss in the period"
         ),
     },
     {
@@ -309,6 +320,42 @@ def _stop_loss_usage_pct(window, context):
     return protected / len(trades) * 100
 
 
+def _pct_change(trade):
+    """A trade's % change, direction-aware - reuses analyze_trades.
+    trade_stats() (the same shared math Trade Analyzer/Logbook/the PDF
+    report use) rather than a second copy of the entry/exit pairing
+    logic for shorts."""
+    stats = trade_stats(
+        trade["direction"], trade["buy_price"], trade["sell_price"], trade["quantity"],
+        trade["profit_loss"], trade["entry_date"].date(), trade["date"].date(),
+    )
+    return stats["pct_change"]
+
+
+def _avg_winner_pct(trades):
+    winners = [_pct_change(t) for t in trades if t["profit_loss"] > 0]
+    return sum(winners) / len(winners) if winners else None
+
+
+def _avg_loser_pct(trades):
+    losers = [_pct_change(t) for t in trades if t["profit_loss"] < 0]
+    return sum(losers) / len(losers) if losers else None
+
+
+def _reward_risk_ratio(window, context):
+    """Average % gain across winners ÷ average % loss across losers
+    (absolute value) for trades closed in the period - e.g. 2.0x means
+    the average win is twice the average loss. None if the period is
+    missing a win or a loss to compare (a ratio against zero, or
+    against nothing, isn't meaningful)."""
+    trades = [t for t in context["trades"] if window["start"] <= t["date"].date() <= window["end"]]
+    avg_win = _avg_winner_pct(trades)
+    avg_loss = _avg_loser_pct(trades)
+    if not avg_win or not avg_loss:
+        return None
+    return avg_win / abs(avg_loss)
+
+
 def _equity_growth_pct(window, context):
     """Realized P/L closed since the start of the period, as a % of the
     Jan 1 account value baseline - the SAME convention (period P/L ÷
@@ -354,6 +401,7 @@ METRIC_FUNCS = {
     "monthly_review_pct": _monthly_review_pct,
     "stop_loss_coverage_pct": _stop_loss_coverage_pct,
     "stop_loss_usage_pct": _stop_loss_usage_pct,
+    "reward_risk_ratio": _reward_risk_ratio,
     "equity_growth_pct": _equity_growth_pct,
     "equity_growth_vs_spy": _equity_growth_vs_spy,
     "equity_growth_vs_qqq": _equity_growth_vs_qqq,
