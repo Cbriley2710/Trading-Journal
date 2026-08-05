@@ -69,6 +69,26 @@ GOAL_LIBRARY = [
         ),
     },
     {
+        "key": "stop_loss_coverage_pct", "name": "Stop-Loss Coverage %", "category": "Process",
+        "timeframes": ["All-Time"], "metric": "stop_loss_coverage_pct", "unit": "%",
+        "direction": "higher_is_better",
+        "data_source": (
+            "Currently open positions with a stop-loss set (Open Positions page) ÷ all "
+            "currently open positions - a live snapshot, not a date-windowed period"
+        ),
+    },
+    {
+        "key": "stop_loss_usage_pct", "name": "Stop-Loss Usage % (Closed Trades)", "category": "Process",
+        "timeframes": ["Monthly", "Yearly"], "metric": "stop_loss_usage_pct", "unit": "%",
+        "direction": "higher_is_better",
+        "data_source": (
+            "Closed trades in the period that had a stop-loss set at some point between entry "
+            "and exit ÷ all closed trades in the period. Only counts a stop set via the Open "
+            "Positions/Shortlist pages AFTER this goal was added (2026-08) - stop-loss history "
+            "isn't tracked before that, so trades closed earlier can't be scored"
+        ),
+    },
+    {
         "key": "equity_growth_pct", "name": "Equity Growth %", "category": "Statistical",
         "timeframes": ["Monthly", "Yearly"], "metric": "equity_growth_pct", "unit": "%",
         "direction": "higher_is_better",
@@ -117,6 +137,9 @@ def build_context(conn):
         "jan1_balance": database.get_account_value(conn),
         "conn": conn,
         "fetch_period_return_pct": charting.fetch_period_return_pct,
+        "open_positions": database.get_open_positions(conn),
+        "stop_losses": database.get_all_stop_losses(conn),
+        "stop_loss_events": database.get_stop_loss_events(conn),
     }
 
 
@@ -244,6 +267,48 @@ def _monthly_review_pct(window, context):
     return sum(decided) / len(decided) * 100
 
 
+def _stop_loss_coverage_pct(window, context):
+    """% of currently open positions that have a stop-loss set - a live
+    snapshot (ignores `window` entirely, unlike every other goal here),
+    since there's no meaningful "this month's" version of "do my
+    CURRENT positions have stops right now." None if there are no open
+    positions at all (nothing to have a % of)."""
+    positions = context["open_positions"]
+    if not positions:
+        return None
+    stop_losses = context["stop_losses"]
+    covered = sum(1 for p in positions if stop_losses.get(p["symbol"]) is not None)
+    return covered / len(positions) * 100
+
+
+def _trade_had_stop_loss(trade, stop_loss_events):
+    """Whether a stop_loss_events row exists for this trade's symbol
+    with set_at falling between its entry and exit date - i.e. a stop
+    was actively set at SOME point while the trade was open, even if it
+    was later cleared or the trade closed before hitting it. Doesn't
+    matter what the stop's actual price was, just that one existed."""
+    entry = trade["entry_date"].date()
+    exit_date = trade["date"].date()
+    return any(
+        e["symbol"] == trade["symbol"] and entry <= e["set_at"].date() <= exit_date
+        for e in stop_loss_events
+    )
+
+
+def _stop_loss_usage_pct(window, context):
+    """% of closed trades in the period that had a stop-loss set at
+    some point between entry and exit - see stop_loss_events' own note
+    in init_db() for why this can only ever cover trades closed after
+    that table started logging (nothing before it can be retroactively
+    known). None if there are no closed trades in the period."""
+    trades = [t for t in context["trades"] if window["start"] <= t["date"].date() <= window["end"]]
+    if not trades:
+        return None
+    events = context["stop_loss_events"]
+    protected = sum(1 for t in trades if _trade_had_stop_loss(t, events))
+    return protected / len(trades) * 100
+
+
 def _equity_growth_pct(window, context):
     """Realized P/L closed since the start of the period, as a % of the
     Jan 1 account value baseline - the SAME convention (period P/L ÷
@@ -287,6 +352,8 @@ def _equity_growth_vs_qqq(window, context):
 METRIC_FUNCS = {
     "daily_journal_pct": _daily_journal_pct,
     "monthly_review_pct": _monthly_review_pct,
+    "stop_loss_coverage_pct": _stop_loss_coverage_pct,
+    "stop_loss_usage_pct": _stop_loss_usage_pct,
     "equity_growth_pct": _equity_growth_pct,
     "equity_growth_vs_spy": _equity_growth_vs_spy,
     "equity_growth_vs_qqq": _equity_growth_vs_qqq,

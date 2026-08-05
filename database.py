@@ -327,6 +327,25 @@ def init_db(conn):
         cur.execute("ALTER TABLE position_stops ADD COLUMN ma_approach_pct DOUBLE PRECISION")
     if not _column_exists(cur, "position_stops", "ma_extended_pct"):
         cur.execute("ALTER TABLE position_stops ADD COLUMN ma_extended_pct DOUBLE PRECISION")
+    # An append-only log of every time set_stop_loss() below actually
+    # sets a real stop - position_stops itself only ever holds the
+    # CURRENT stop per symbol (overwritten on every edit, see
+    # set_stop_loss()'s own note), so there was no way to answer "did
+    # THIS closed trade ever have a stop set during its life" once the
+    # position closed or a later trade reused the same symbol. Used by
+    # goals.py's Stop-Loss Usage % goal - a trade only counts as
+    # "protected" if a row here falls between its entry and exit date.
+    # Starts empty, so only trades closed AFTER this table existed can
+    # ever be scored - a known, accepted gap (nothing before this can
+    # be retroactively known).
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS stop_loss_events (
+            id SERIAL PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            stop_loss DOUBLE PRECISION NOT NULL,
+            set_at TIMESTAMP NOT NULL
+        )
+    """)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS account_settings (
             id INTEGER PRIMARY KEY DEFAULT 1,
@@ -2003,8 +2022,15 @@ def set_stop_loss(conn, symbol, stop_loss):
     the life of a trade (e.g. trailing it up as the position works).
     `updated_at` is computed in Python (US Eastern - see timeutil.py)
     rather than SQL's NOW(), which reflects the database server's own
-    timezone (UTC on Neon), not yours."""
+    timezone (UTC on Neon), not yours.
+
+    Also appends a stop_loss_events row every time this runs (manual
+    edit or ma_strategy.py's auto-trailing alike, since both call this
+    same function) - position_stops itself only ever holds the CURRENT
+    value, so this is the only place that ever finds out a stop was set
+    at all, let alone when. See that table's own note in init_db()."""
     cur = conn.cursor()
+    now = timeutil.now_eastern()
     cur.execute(
         """
         INSERT INTO position_stops (symbol, stop_loss, updated_at)
@@ -2013,9 +2039,23 @@ def set_stop_loss(conn, symbol, stop_loss):
             stop_loss = EXCLUDED.stop_loss,
             updated_at = EXCLUDED.updated_at
         """,
-        (symbol, stop_loss, timeutil.now_eastern()),
+        (symbol, stop_loss, now),
+    )
+    cur.execute(
+        "INSERT INTO stop_loss_events (symbol, stop_loss, set_at) VALUES (%s, %s, %s)",
+        (symbol, stop_loss, now),
     )
     conn.commit()
+
+
+def get_stop_loss_events(conn):
+    """Every stop_loss_events row ever logged, as {"symbol", "stop_loss",
+    "set_at"} dicts - used by goals.py's Stop-Loss Usage % goal to check
+    whether a closed trade had a stop set at some point during its
+    life."""
+    cur = conn.cursor()
+    cur.execute("SELECT symbol, stop_loss, set_at FROM stop_loss_events")
+    return [{"symbol": row[0], "stop_loss": row[1], "set_at": row[2]} for row in cur.fetchall()]
 
 
 def delete_stop_loss(conn, symbol):

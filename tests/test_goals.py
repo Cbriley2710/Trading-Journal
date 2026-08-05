@@ -178,6 +178,75 @@ def test_monthly_review_pct_averages_only_decided_months(monkeypatch):
     assert result == pytest.approx(1 / 3 * 100)
 
 
+def test_stop_loss_coverage_pct_partial():
+    context = {
+        "open_positions": [{"symbol": "AAPL"}, {"symbol": "TSLA"}, {"symbol": "MSFT"}],
+        "stop_losses": {"AAPL": 150.0, "TSLA": 200.0},  # MSFT has none
+    }
+    assert goals._stop_loss_coverage_pct(None, context) == pytest.approx(2 / 3 * 100)
+
+
+def test_stop_loss_coverage_pct_full_coverage():
+    context = {"open_positions": [{"symbol": "AAPL"}], "stop_losses": {"AAPL": 150.0}}
+    assert goals._stop_loss_coverage_pct(None, context) == 100.0
+
+
+def test_stop_loss_coverage_pct_zero_coverage():
+    context = {"open_positions": [{"symbol": "AAPL"}], "stop_losses": {}}
+    assert goals._stop_loss_coverage_pct(None, context) == 0.0
+
+
+def test_stop_loss_coverage_pct_none_when_no_open_positions():
+    context = {"open_positions": [], "stop_losses": {}}
+    assert goals._stop_loss_coverage_pct(None, context) is None
+
+
+def _stop_event(symbol, set_at):
+    return {"symbol": symbol, "stop_loss": 100.0, "set_at": datetime.combine(set_at, datetime.min.time())}
+
+
+def test_trade_had_stop_loss_true_when_event_during_trade():
+    trade = _trade("AAPL", date(2026, 7, 5), date(2026, 7, 10))
+    events = [_stop_event("AAPL", date(2026, 7, 7))]
+    assert goals._trade_had_stop_loss(trade, events) is True
+
+
+def test_trade_had_stop_loss_false_when_event_outside_trade_window():
+    trade = _trade("AAPL", date(2026, 7, 5), date(2026, 7, 10))
+    events = [_stop_event("AAPL", date(2026, 7, 15))]  # set after the trade already closed
+    assert goals._trade_had_stop_loss(trade, events) is False
+
+
+def test_trade_had_stop_loss_false_for_different_symbol():
+    trade = _trade("AAPL", date(2026, 7, 5), date(2026, 7, 10))
+    events = [_stop_event("MSFT", date(2026, 7, 7))]
+    assert goals._trade_had_stop_loss(trade, events) is False
+
+
+def test_trade_had_stop_loss_true_on_boundary_dates():
+    """A stop set exactly on the entry or exit day still counts."""
+    trade = _trade("AAPL", date(2026, 7, 5), date(2026, 7, 10))
+    assert goals._trade_had_stop_loss(trade, [_stop_event("AAPL", date(2026, 7, 5))]) is True
+    assert goals._trade_had_stop_loss(trade, [_stop_event("AAPL", date(2026, 7, 10))]) is True
+
+
+def test_stop_loss_usage_pct_basic():
+    protected = _trade("AAPL", date(2026, 7, 5), date(2026, 7, 10))
+    unprotected = _trade("MSFT", date(2026, 7, 6), date(2026, 7, 12))
+    context = {
+        "trades": [protected, unprotected],
+        "stop_loss_events": [_stop_event("AAPL", date(2026, 7, 7))],
+    }
+    window = {"start": date(2026, 7, 1), "end": date(2026, 7, 31)}
+    assert goals._stop_loss_usage_pct(window, context) == 50.0
+
+
+def test_stop_loss_usage_pct_none_when_no_trades_in_window():
+    context = {"trades": [], "stop_loss_events": []}
+    window = {"start": date(2026, 7, 1), "end": date(2026, 7, 31)}
+    assert goals._stop_loss_usage_pct(window, context) is None
+
+
 def test_equity_growth_pct_basic(monkeypatch):
     monkeypatch.setattr(goals.database, "get_realized_pl_since", lambda conn, start: 5000.0)
     context = {"jan1_balance": 100000.0, "conn": None}
