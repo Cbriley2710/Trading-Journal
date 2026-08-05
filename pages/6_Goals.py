@@ -50,6 +50,19 @@ def format_value(value, goal):
 STATUS_BADGE_COLOR = {"Good": "green", "Warning": "yellow", "Alert": "red"}
 
 
+def tracked_goal_label(goal, tg):
+    """A tracked row's display name - the timeframe is appended only
+    for a goal with more than one option (e.g. "Equity Growth vs SPY
+    (Yearly)") so two rows of the SAME goal tracked at different
+    timeframes (Monthly and Yearly side by side) aren't shown as
+    identical, indistinguishable tiles. A goal with only one timeframe
+    (like Daily Journal %) never needed this disambiguation, so its
+    name stays plain."""
+    if len(goal["timeframes"]) > 1:
+        return f"{goal['name']} ({tg['timeframe']})"
+    return goal["name"]
+
+
 with st.spinner("Computing current values..."):
     context = goals.build_context(conn)
 
@@ -74,7 +87,7 @@ else:
                     continue
                 value = goals.current_value(goal, tg["timeframe"], context)
                 zone = goals.status_zone(value, tg["warning_level"], tg["alert_level"], goal["direction"])
-                st.markdown(f"**{goal['name']}**")
+                st.markdown(f"**{tracked_goal_label(goal, tg)}**")
                 st.markdown(f"<div style='font-size:1.8rem;font-weight:700;'>{format_value(value, goal)}</div>",
                              unsafe_allow_html=True)
                 if zone is not None:
@@ -109,7 +122,7 @@ with st.expander("Settings"):
                 continue
 
             value = goals.current_value(goal, tg["timeframe"], context)
-            row_cols[0].write(goal["name"])
+            row_cols[0].write(tracked_goal_label(goal, tg))
             row_cols[1].write(format_value(value, goal))
 
             new_warning = row_cols[2].number_input(
