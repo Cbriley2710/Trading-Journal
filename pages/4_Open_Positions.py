@@ -326,7 +326,12 @@ else:
 
     heat_positions = [e for e in priced if e["heat_dollars"] is not None]
     total_heat_dollars = sum(e["heat_dollars"] for e in heat_positions)
-    portfolio_heat_pct = (total_heat_dollars / total_current_value * 100) if total_current_value else None
+    # Against total portfolio value (cash included), not just what's
+    # currently invested - answers "what share of my WHOLE account is
+    # actually at risk," not "...of my invested money." Needs
+    # account_value set (Account Settings on the Dashboard page), same
+    # requirement as the Cash bar and % of account figures below.
+    portfolio_heat_pct = (total_heat_dollars / account_value * 100) if account_value else None
 
     cols = st.columns(5)
     stat_tile(cols[0], "Equity Invested", f"${total_cost_basis:,.2f}")
@@ -334,7 +339,7 @@ else:
     stat_tile(cols[2], "Unrealized P/L", f"${total_unrealized_pl:,.2f}", unrealized_color)
     stat_tile(cols[3], "Portfolio Heat", f"${total_heat_dollars:,.2f}")
     stat_tile(cols[4], "Portfolio Heat %",
-              f"{portfolio_heat_pct:.1f}%" if portfolio_heat_pct is not None else "N/A")
+              f"{portfolio_heat_pct:.1f}%" if portfolio_heat_pct is not None else "N/A (set account value)")
 
     st.divider()
 
