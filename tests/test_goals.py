@@ -15,40 +15,58 @@ import goals
 
 
 def test_daily_journal_pct_excludes_friday_and_saturday():
-    window = {"kind": "range", "start": date(2026, 8, 1), "end": date(2026, 8, 7)}
-    # Journaled: Sun 8/2, Mon 8/3, Tue 8/4 (3 of the 5 countable days:
-    # Sun/Mon/Tue/Wed/Thu - Sat 8/1 and Fri 8/7 don't count either way).
+    # window["end"] is always "today" (see resolve_window()'s "Monthly"
+    # case) - here that's Wed 8/5, so the countable days are 8/1
+    # through 8/4: Sat 8/1 is excluded (weekday), 8/5 itself is
+    # excluded (today, see the dedicated test below), leaving
+    # Sun/Mon/Tue (8/2-8/4) as the 3 countable days.
+    window = {"kind": "range", "start": date(2026, 8, 1), "end": date(2026, 8, 5)}
     context = {"journaled_dates": {date(2026, 8, 2), date(2026, 8, 3), date(2026, 8, 4)}}
     result = goals._daily_journal_pct(window, context)
-    assert result == 60.0
+    assert result == 100.0
 
 
 def test_daily_journal_pct_ignores_a_journal_entry_on_an_excluded_day():
     """Journaling ON a Friday/Saturday (e.g. catching up early) must not
     inflate the numerator - those days never enter the denominator
     either, so they should have zero effect on the result."""
-    window = {"kind": "range", "start": date(2026, 8, 1), "end": date(2026, 8, 7)}
+    window = {"kind": "range", "start": date(2026, 8, 1), "end": date(2026, 8, 5)}
     context = {"journaled_dates": {
-        date(2026, 8, 1), date(2026, 8, 7),  # Sat, Fri - excluded days, journaled anyway
-        date(2026, 8, 2), date(2026, 8, 3), date(2026, 8, 4),  # same 3 countable days as above
+        date(2026, 8, 1),  # Saturday - excluded day, journaled anyway
+        date(2026, 8, 2), date(2026, 8, 3),  # only 2 of the 3 countable days
     }}
     result = goals._daily_journal_pct(window, context)
-    assert result == 60.0
+    assert result == pytest.approx(2 / 3 * 100)
+
+
+def test_daily_journal_pct_excludes_today_even_if_already_journaled():
+    """Today (window["end"]) never enters the denominator, even if it's
+    already been journaled early - the % only ever reflects fully
+    completed days, per the user's own rule (tonight's entry isn't due
+    until tonight)."""
+    window = {"kind": "range", "start": date(2026, 8, 1), "end": date(2026, 8, 5)}
+    context = {"journaled_dates": {date(2026, 8, 2), date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5)}}
+    result = goals._daily_journal_pct(window, context)
+    assert result == 100.0  # not counted as a 4th day out of some larger denominator
 
 
 def test_daily_journal_pct_none_when_no_countable_days():
-    """A window that's ENTIRELY Friday/Saturday (e.g. the 1st of the
-    month lands on one of them) has nothing to count - None, not a
-    divide-by-zero."""
-    window = {"kind": "range", "start": date(2026, 8, 1), "end": date(2026, 8, 1)}  # just Saturday
+    """A window whose only completed day is a Friday/Saturday (e.g. it's
+    the 2nd of the month and the 1st was a Saturday) has nothing to
+    count yet - None, not a divide-by-zero."""
+    window = {"kind": "range", "start": date(2026, 8, 1), "end": date(2026, 8, 2)}  # today = Sunday 8/2
     context = {"journaled_dates": set()}
     assert goals._daily_journal_pct(window, context) is None
 
 
 def test_daily_journal_pct_full_month_all_journaled():
-    window = {"kind": "range", "start": date(2026, 8, 1), "end": date(2026, 8, 7)}
-    context = {"journaled_dates": {date(2026, 8, 2), date(2026, 8, 3), date(2026, 8, 4),
-                                    date(2026, 8, 5), date(2026, 8, 6)}}
+    # Spans two weekends - today = Wed 8/12, so countable days are
+    # 8/2-8/6 and 8/9-8/11 (8 days total), all journaled.
+    window = {"kind": "range", "start": date(2026, 8, 1), "end": date(2026, 8, 12)}
+    context = {"journaled_dates": {
+        date(2026, 8, 2), date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5), date(2026, 8, 6),
+        date(2026, 8, 9), date(2026, 8, 10), date(2026, 8, 11),
+    }}
     assert goals._daily_journal_pct(window, context) == 100.0
 
 

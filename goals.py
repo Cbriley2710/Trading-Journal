@@ -53,8 +53,9 @@ GOAL_LIBRARY = [
         "timeframes": ["Monthly"], "metric": "daily_journal_pct", "unit": "%",
         "direction": "higher_is_better",
         "data_source": (
-            "Days this month with a \"Today's Thoughts\" journal entry ÷ days so far "
-            "this month, excluding Friday and Saturday (Friday's session gets journaled Sunday)"
+            "Days this month with a \"Today's Thoughts\" journal entry ÷ days completed so far "
+            "this month, excluding Friday and Saturday (Friday's session gets journaled Sunday) "
+            "and today itself (that entry isn't due until tonight)"
         ),
     },
     {
@@ -128,13 +129,19 @@ def _daily_journal_pct(window, context):
     """% of days in the window with a Today's Thoughts journal entry -
     Friday and Saturday are excluded from both the numerator and the
     denominator (the user journals Friday's market action on Sunday, so
-    there's nothing to write on Friday or Saturday itself). None if the
-    window has no countable days at all (only possible if today is the
-    1st of the month and it's a Friday or Saturday)."""
+    there's nothing to write on Friday or Saturday itself). Today
+    itself is ALSO excluded - the journal entry for today gets written
+    tonight, so counting today as a miss before the day is even over
+    would unfairly drag the % down; window["end"] is always today (see
+    resolve_window()'s "Monthly" case), so window["end"] - 1 day is
+    "yesterday" without this function needing its own clock read. None
+    if the window has no countable days at all (e.g. it's the 1st of
+    the month, or the whole window is Friday/Saturday)."""
     journaled_dates = context["journaled_dates"]
     total = done = 0
     d = window["start"]
-    while d <= window["end"]:
+    last_countable_day = window["end"] - timedelta(days=1)
+    while d <= last_countable_day:
         if d.weekday() not in (4, 5):  # Friday=4, Saturday=5
             total += 1
             if d in journaled_dates:
