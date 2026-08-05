@@ -499,6 +499,60 @@ def trade_stats(direction, buy_price, sell_price, quantity, profit_loss, entry_d
     }
 
 
+def review_session_summary(reviews):
+    """
+    Aggregate stats across a Trade Review Session's reviewed trades -
+    batting average (win rate), win/loss $ (average AND total, since
+    either framing is useful - a good average with a small total isn't
+    the same story as a good total with a huge average), win/loss %
+    (average price move on winners vs losers, via trade_stats() above -
+    the same math the fact tiles and PDF already use for a single
+    trade), and a per-ticker breakdown. Returns None if `reviews` is
+    empty - nothing to summarize.
+
+    `reviews` is database.get_review_report()'s own "reviews" list -
+    shared by pages/1_Trade_Analyzer.py's Reflections screen (see
+    render_review_session()) and trade_review_report.py's emailed PDF,
+    so both always show the exact same numbers for the same session.
+    """
+    if not reviews:
+        return None
+
+    winners = [r for r in reviews if r["profit_loss"] >= 0]
+    losers = [r for r in reviews if r["profit_loss"] < 0]
+
+    def avg(values):
+        return sum(values) / len(values) if values else None
+
+    win_pcts, loss_pcts = [], []
+    for r in reviews:
+        stats = trade_stats(
+            r["direction"], r["buy_price"], r["sell_price"], r["quantity"],
+            r["profit_loss"], r["entry_date"], r["exit_date"])
+        (win_pcts if r["profit_loss"] >= 0 else loss_pcts).append(stats["pct_change"])
+
+    per_ticker = {}
+    for r in reviews:
+        row = per_ticker.setdefault(r["symbol"], {"trades": 0, "wins": 0, "net_pl": 0.0})
+        row["trades"] += 1
+        row["wins"] += 1 if r["profit_loss"] >= 0 else 0
+        row["net_pl"] += r["profit_loss"]
+
+    return {
+        "total": len(reviews),
+        "win_count": len(winners), "loss_count": len(losers),
+        "batting_avg": len(winners) / len(reviews) * 100,
+        "total_pl": sum(r["profit_loss"] for r in reviews),
+        "avg_win_dollar": avg([r["profit_loss"] for r in winners]),
+        "avg_loss_dollar": avg([r["profit_loss"] for r in losers]),
+        "total_win_dollar": sum(r["profit_loss"] for r in winners) if winners else None,
+        "total_loss_dollar": sum(r["profit_loss"] for r in losers) if losers else None,
+        "avg_win_pct": avg(win_pcts),
+        "avg_loss_pct": avg(loss_pcts),
+        "per_ticker": per_ticker,
+    }
+
+
 def build_report(closed_trades, open_long_lots, open_short_lots):
     """
     Takes the list of closed (matched) trades and prints a summary

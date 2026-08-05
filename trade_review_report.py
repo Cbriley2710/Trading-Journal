@@ -32,7 +32,7 @@ from PIL import Image
 
 import charting
 import database
-from analyze_trades import trade_stats
+from analyze_trades import review_session_summary, trade_stats
 from report_utils import get_secret, hex_to_rgb, safe_text
 
 PAGE_MARGIN_MM = 15
@@ -185,6 +185,76 @@ def _write_trade_review_page(pdf, review, jan1_balance):
         _write_snapshot_page(pdf, review["symbol"], timeframe, chart_image)
 
 
+def _write_review_summary_section(pdf, summary):
+    """
+    Writes the same Session Summary shown on the in-app Reflections
+    screen (see pages/1_Trade_Analyzer.py's _render_review_summary(),
+    both built from analyze_trades.review_session_summary()) onto the
+    emailed PDF's own Reflections page - batting average, win/loss $
+    and %, and a per-ticker breakdown table. Placed right above the
+    Reflections notes themselves, so the numbers that prompted them are
+    visible on the same page they were written against.
+    """
+    pdf.set_text_color(*TEXT_COLOR_RGB)
+    pdf.set_font("Helvetica", style="B", size=14)
+    pdf.cell(0, 9, safe_text("Session Summary"), new_x="LMARGIN", new_y="NEXT")
+
+    win_rgb = hex_to_rgb(charting.win_loss_color(True))
+    loss_rgb = hex_to_rgb(charting.win_loss_color(False))
+
+    pdf.set_font("Helvetica", size=11)
+    pdf.set_text_color(*MUTED_TEXT_RGB)
+    pdf.cell(
+        0, 7,
+        safe_text(
+            f"Batting Average: {summary['batting_avg']:.1f}%   "
+            f"Wins: {summary['win_count']}   Losses: {summary['loss_count']}"
+        ),
+        new_x="LMARGIN", new_y="NEXT",
+    )
+
+    pdf.set_font("Helvetica", style="B", size=11)
+    pdf.set_text_color(*(win_rgb if summary["total_pl"] >= 0 else loss_rgb))
+    pdf.cell(0, 7, safe_text(f"Total P/L: ${summary['total_pl']:,.2f}"), new_x="LMARGIN", new_y="NEXT")
+
+    pdf.set_font("Helvetica", size=10)
+    pdf.set_text_color(*win_rgb)
+    win_line = (
+        f"Avg Win: ${summary['avg_win_dollar']:,.2f} ({summary['avg_win_pct']:,.2f}%)"
+        if summary["avg_win_dollar"] is not None else "Avg Win: -"
+    )
+    pdf.cell(0, 6, safe_text(win_line), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_text_color(*loss_rgb)
+    loss_line = (
+        f"Avg Loss: ${summary['avg_loss_dollar']:,.2f} ({summary['avg_loss_pct']:,.2f}%)"
+        if summary["avg_loss_dollar"] is not None else "Avg Loss: -"
+    )
+    pdf.cell(0, 6, safe_text(loss_line), new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(3)
+
+    per_ticker_rows = sorted(summary["per_ticker"].items(), key=lambda kv: kv[1]["net_pl"], reverse=True)
+    pdf.set_text_color(*TEXT_COLOR_RGB)
+    pdf.set_font("Helvetica", size=10)
+    with pdf.table(
+        col_widths=(2, 1, 1, 1, 1.3, 1.3), text_align="LEFT",
+        borders_layout="NONE", width=CONTENT_WIDTH_MM * 0.6,
+    ) as table:
+        header_row = table.row()
+        for label in ("Symbol", "Trades", "Wins", "Losses", "Win Rate", "Net P/L"):
+            header_row.cell(safe_text(label))
+        for symbol, row in per_ticker_rows:
+            losses = row["trades"] - row["wins"]
+            win_rate = f"{row['wins'] / row['trades'] * 100:.0f}%"
+            table_row = table.row()
+            table_row.cell(safe_text(symbol))
+            table_row.cell(str(row["trades"]))
+            table_row.cell(str(row["wins"]))
+            table_row.cell(str(losses))
+            table_row.cell(win_rate)
+            table_row.cell(safe_text(f"${row['net_pl']:,.2f}"))
+    pdf.ln(4)
+
+
 def build_review_report_pdf(conn, report_id):
     """
     Builds one Trade Review Report as PDF bytes: a cover page (date
@@ -234,9 +304,19 @@ def build_review_report_pdf(conn, report_id):
     # The session's closing journal entry (see database.
     # save_review_reflections_notes()) - its own page at the end, same
     # treatment as a per-trade review page, since it's meant to be a
-    # real look-back over the whole session, not a quick aside.
+    # real look-back over the whole session, not a quick aside. The
+    # Session Summary (see _write_review_summary_section()) goes on
+    # this SAME page, above the notes - the same numbers shown on the
+    # in-app Reflections screen before you write them, so the emailed
+    # copy has the stats behind the reflection, not just the reflection
+    # itself.
     if report["reflections_notes"]:
         pdf.add_page()
+
+        summary = review_session_summary(report["reviews"])
+        if summary is not None:
+            _write_review_summary_section(pdf, summary)
+
         pdf.set_text_color(*TEXT_COLOR_RGB)
         pdf.set_font("Helvetica", style="B", size=18)
         pdf.cell(0, 11, safe_text("Reflections"), new_x="LMARGIN", new_y="NEXT")
