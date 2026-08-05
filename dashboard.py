@@ -81,8 +81,15 @@ realized_pl_this_year = database.get_realized_pl_since(conn, jan1_date)
 if jan1_balance:
     with st.spinner("Fetching current prices for account value..."):
         account_value = charting.get_calculated_account_value(conn)
+    # Backed out of account_value rather than re-fetching live prices a
+    # second time - get_calculated_account_value()'s own math is
+    # exactly jan1_balance + deposits_this_year + realized_pl_this_year
+    # + total_unrealized_pl_now (see its own docstring), so this is
+    # exact, not an approximation.
+    total_unrealized_pl_now = account_value - jan1_balance - deposits_this_year - realized_pl_this_year
 else:
     account_value = None
+    total_unrealized_pl_now = None
 
 st.divider()
 
@@ -182,27 +189,37 @@ st.divider()
 # --- Account performance by time period ----------------------------------
 # Uses trades_df (every closed trade), not `filtered` - this is meant to
 # answer "how has my whole account actually done," not whatever narrower
-# slice the sidebar filters happen to be set to. Realized P/L only (no
-# unrealized P/L from open positions). Every period's % is against the
-# Jan 1 baseline specifically, NOT today's calculated account_value -
-# that value already has this year's P/L (and today's unrealized P/L)
-# baked into it, so using it as the denominator would inflate as the
-# year goes on and systematically understate every period's return.
+# slice the sidebar filters happen to be set to. 7/30/90 Days are realized
+# P/L only - open positions' unrealized P/L is today's live mark-to-market
+# swing, not something that happened specifically IN that short window, so
+# folding it in would make a short window jump around on price noise from
+# a position that's been open for months. YTD and All-Time DO add today's
+# unrealized P/L on top (see total_unrealized_pl_now above) - those are
+# meant to read as "how's the account doing overall right now," matching
+# the Equity Curve chart's own YTD line further down this page, which
+# already mark-to-markets open positions the same way. Every period's % is
+# against the Jan 1 baseline specifically, NOT today's calculated
+# account_value - that value already has this year's P/L (and today's
+# unrealized P/L) baked into it, so using it as the denominator would
+# inflate as the year goes on and systematically understate every period's
+# return.
 if "Account Performance" in visible_sections:
     st.header("Account Performance")
     if jan1_balance:
         today = pd.Timestamp(timeutil.today_eastern())
         periods = [
-            ("7 Days", today - pd.Timedelta(days=7)),
-            ("30 Days", today - pd.Timedelta(days=30)),
-            ("90 Days", today - pd.Timedelta(days=90)),
-            ("YTD", pd.Timestamp(year=today.year, month=1, day=1)),
-            ("All-Time", None),
+            ("7 Days", today - pd.Timedelta(days=7), False),
+            ("30 Days", today - pd.Timedelta(days=30), False),
+            ("90 Days", today - pd.Timedelta(days=90), False),
+            ("YTD", pd.Timestamp(year=today.year, month=1, day=1), True),
+            ("All-Time", None, True),
         ]
         period_cols = st.columns(len(periods))
-        for col, (label, cutoff) in zip(period_cols, periods):
+        for col, (label, cutoff, include_unrealized) in zip(period_cols, periods):
             period_trades = trades_df if cutoff is None else trades_df[trades_df["date"] >= cutoff]
             period_pl = period_trades["profit_loss"].sum()
+            if include_unrealized:
+                period_pl += total_unrealized_pl_now
             period_pct = period_pl / jan1_balance * 100
             stat_tile(col, label, f"${period_pl:,.2f} ({period_pct:+.1f}%)",
                       charting.win_loss_color(period_pl >= 0))
