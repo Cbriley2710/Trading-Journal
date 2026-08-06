@@ -676,32 +676,42 @@ def render_lists_section(conn):
     st.caption("That ticker is no longer listed. Click one above to load its chart and journal.")
 
 
-def build_journal_queue(conn):
+def build_journal_queue(conn, list_ids=None):
     """
     Builds today's Journal Session queue: every open position first
     (richer detail - fact tiles and a stop-loss line), then every
     watchlist ticker not already covered by a position, in each list's
     existing order. A symbol that's both an open position and sitting
     on a watchlist is only journaled once, as the position.
+
+    `list_ids`, if given, restricts the queue to just these lists - 1-4
+    for the user's own watchlists, 5 for Open Positions (see
+    render_journal_list_selection()). None (the default, and what every
+    caller used before this parameter existed - including resuming a
+    paused session, see _reorder_for_resume()) means every list, same
+    as always.
     """
     queue = []
     seen_symbols = set()
 
-    for position in database.get_open_positions(conn):
-        is_short = position["direction"] == "SHORT"
-        queue.append({
-            "symbol": position["symbol"],
-            "source": "position",
-            "position": position,
-            "entry_point": {
-                "entry_date": position["entry_date"], "buy_price": position["avg_price"],
-                "direction": position["direction"],
-            },
-            "entry_label": "Short Entry" if is_short else "Entry",
-        })
-        seen_symbols.add(position["symbol"])
+    if list_ids is None or 5 in list_ids:
+        for position in database.get_open_positions(conn):
+            is_short = position["direction"] == "SHORT"
+            queue.append({
+                "symbol": position["symbol"],
+                "source": "position",
+                "position": position,
+                "entry_point": {
+                    "entry_date": position["entry_date"], "buy_price": position["avg_price"],
+                    "direction": position["direction"],
+                },
+                "entry_label": "Short Entry" if is_short else "Entry",
+            })
+            seen_symbols.add(position["symbol"])
 
     for entry in database.get_watchlist(conn):
+        if list_ids is not None and entry["list_id"] not in list_ids:
+            continue
         if entry["symbol"] in seen_symbols:
             continue
         queue.append({
@@ -969,10 +979,60 @@ def render_journal_session(conn):
         _advance_session(conn, session, queue)
 
 
+def render_journal_list_selection(conn):
+    """
+    The "which lists do you want to journal today" screen - shown after
+    clicking "Start Journal Session", before the guided step-through
+    begins. Mirrors Trade Review Session's own selection screen (see
+    pages/1_Trade_Analyzer.py's render_review_selection()): a checkbox
+    per option, a "Begin"/"Cancel" pair, and the choice only feeds into
+    building the queue - nothing about list selection itself needs to
+    be persisted (see build_journal_queue()'s own note on why resuming
+    a paused session doesn't need it either).
+
+    All 5 checked by default - so a user who doesn't care about this
+    screen can just click straight through to "Begin Journal Session"
+    and get exactly today's old, unfiltered behavior.
+    """
+    st.header("Choose Lists to Journal")
+    st.caption("Pick which lists to include in today's session - uncheck any you want to skip.")
+
+    watchlist = database.get_watchlist(conn)
+    open_position_count = len(database.get_open_positions(conn))
+    watchlist_names = database.get_watchlist_names(conn)
+
+    checked_list_ids = []
+    for list_id in range(1, 6):
+        if list_id == 5:
+            label, count = "Open Positions", open_position_count
+        else:
+            label = watchlist_names[list_id]
+            count = sum(1 for entry in watchlist if entry["list_id"] == list_id)
+        if st.checkbox(f"{label} ({count})", value=True, key=f"journal_list_checkbox_{list_id}"):
+            checked_list_ids.append(list_id)
+
+    action_cols = st.columns([1, 1, 3])
+    if action_cols[0].button("Begin Journal Session", type="primary", disabled=not checked_list_ids):
+        queue = build_journal_queue(conn, list_ids=checked_list_ids)
+        if not queue:
+            st.info("Nothing to journal in the lists you picked.")
+        else:
+            st.session_state["journal_session"] = {"queue": queue, "index": 0}
+            database.save_journal_session_progress(conn, _queue_symbol_pairs(queue), 0)
+            st.session_state["_scroll_to_session_anchor"] = True
+            del st.session_state["journal_selecting"]
+            st.rerun()
+    if action_cols[1].button("Cancel"):
+        del st.session_state["journal_selecting"]
+        st.rerun()
+
+
 conn = database.get_connection()
 
 if st.session_state.get("journal_session") is not None:
     render_journal_session(conn)
+elif st.session_state.get("journal_selecting"):
+    render_journal_list_selection(conn)
 else:
     # An unfinished session from earlier (or before the tab was closed,
     # or the app went idle) - see database.get_journal_session_progress().
@@ -1000,13 +1060,7 @@ else:
             database.clear_journal_session_progress(conn)
 
     if st.button("📝 Start Journal Session", type="primary"):
-        queue = build_journal_queue(conn)
-        if not queue:
-            st.info("Nothing to journal yet - add a ticker to a watchlist or open a position first.")
-        else:
-            st.session_state["journal_session"] = {"queue": queue, "index": 0}
-            database.save_journal_session_progress(conn, _queue_symbol_pairs(queue), 0)
-            st.session_state["_scroll_to_session_anchor"] = True
-            st.rerun()
+        st.session_state["journal_selecting"] = True
+        st.rerun()
     st.divider()
     render_lists_section(conn)
