@@ -86,17 +86,17 @@ def _write_ticker_page(pdf, section_label, symbol, entry):
     pdf.add_page()
 
     pdf.set_text_color(*MUTED_TEXT_RGB)
-    pdf.set_font("Helvetica", size=11)
-    pdf.cell(0, 7, safe_text(section_label), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", size=13)
+    pdf.cell(0, 8, safe_text(section_label), new_x="LMARGIN", new_y="NEXT")
 
     pdf.set_text_color(*TEXT_COLOR_RGB)
-    pdf.set_font("Helvetica", style="B", size=18)
-    pdf.cell(0, 11, safe_text(symbol), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", style="B", size=20)
+    pdf.cell(0, 12, safe_text(symbol), new_x="LMARGIN", new_y="NEXT")
     pdf.ln(2)
 
     if entry is None:
-        pdf.set_font("Helvetica", size=11)
-        pdf.cell(0, 6, "Not archived yet.", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", size=13)
+        pdf.cell(0, 7, "Not archived yet.", new_x="LMARGIN", new_y="NEXT")
         return
 
     if entry["chart_image"]:
@@ -108,7 +108,11 @@ def _write_ticker_page(pdf, section_label, symbol, entry):
         # below are accounted for. Cap it to whatever room remains and
         # scale the WIDTH down to match instead, keeping the image's
         # own aspect ratio rather than letting it run off the page.
-        room_for_notes_mm = 25
+        # Scaled up from 25 alongside the Plan/notes font size below
+        # (10 -> 12, the same ~1.2x this reserved budget needs to keep
+        # fitting the same number of lines at the new, taller line
+        # height) - see this function's own font-size-bump history.
+        room_for_notes_mm = 30
         max_height_mm = pdf.h - pdf.get_y() - pdf.b_margin - room_for_notes_mm
         if scaled_height_mm > max_height_mm:
             scaled_height_mm = max_height_mm
@@ -119,8 +123,8 @@ def _write_ticker_page(pdf, section_label, symbol, entry):
         pdf.image(image, x=x, w=image_width_mm)
         pdf.ln(3)
     else:
-        pdf.set_font("Helvetica", size=11)
-        pdf.cell(0, 6, "No chart archived for this day yet.", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", size=13)
+        pdf.cell(0, 7, "No chart archived for this day yet.", new_x="LMARGIN", new_y="NEXT")
 
     # A watchlist ticker's saved "trading plan for next time" (see
     # pages/2_Shortlist.py's render_journal_box()) - never set for an
@@ -133,9 +137,9 @@ def _write_ticker_page(pdf, section_label, symbol, entry):
         equity_text = " / ".join(
             f"{allocation}%: {loss:.1f}%" for allocation, loss in metrics["equity_loss_pcts"].items()
         )
-        pdf.set_font("Helvetica", style="B", size=10)
+        pdf.set_font("Helvetica", style="B", size=12)
         pdf.multi_cell(
-            0, 6,
+            0, 7,
             safe_text(
                 f"Plan: Entry ${plan_entry:,.2f}  ·  Stop ${plan_stop:,.2f}  ·  "
                 f"Risk to stop {metrics['price_loss_pct']:.1f}%  ·  "
@@ -145,8 +149,8 @@ def _write_ticker_page(pdf, section_label, symbol, entry):
         pdf.ln(1)
 
     notes_text = entry["notes"].strip() if entry["notes"] else ""
-    pdf.set_font("Helvetica", style="I", size=10)
-    pdf.multi_cell(0, 6, safe_text(notes_text or "No notes recorded for this day."))
+    pdf.set_font("Helvetica", style="I", size=12)
+    pdf.multi_cell(0, 7, safe_text(notes_text or "No notes recorded for this day."))
 
 
 def build_report_pdf(conn, report_date):
@@ -173,8 +177,8 @@ def build_report_pdf(conn, report_date):
     pdf.add_page()
 
     pdf.set_text_color(*TEXT_COLOR_RGB)
-    pdf.set_font("Helvetica", style="B", size=24)
-    pdf.cell(0, 16, safe_text(f"Daily Report - {report_date:%B %d, %Y}"), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", style="B", size=26)
+    pdf.cell(0, 17, safe_text(f"Daily Report - {report_date:%B %d, %Y}"), new_x="LMARGIN", new_y="NEXT")
 
     # The general, not-tied-to-any-ticker note from the guided Journal
     # Session's first step (see pages/2_Shortlist.py's
@@ -186,10 +190,10 @@ def build_report_pdf(conn, report_date):
     thoughts = database.get_daily_journal_note(conn, report_date)
     if thoughts and thoughts.strip():
         pdf.ln(4)
-        pdf.set_font("Helvetica", style="B", size=13)
-        pdf.cell(0, 8, "Today's Thoughts", new_x="LMARGIN", new_y="NEXT")
-        pdf.set_font("Helvetica", size=11)
-        pdf.multi_cell(0, 6, safe_text(thoughts.strip()))
+        pdf.set_font("Helvetica", style="B", size=15)
+        pdf.cell(0, 9, "Today's Thoughts", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", size=13)
+        pdf.multi_cell(0, 7, safe_text(thoughts.strip()))
 
     for list_id in range(1, 5):
         symbols = [w["symbol"] for w in watchlist if w["list_id"] == list_id]

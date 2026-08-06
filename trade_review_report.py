@@ -93,8 +93,8 @@ def _write_snapshot_page(pdf, symbol, timeframe, chart_image):
     actually read."""
     pdf.add_page()
     pdf.set_text_color(*MUTED_TEXT_RGB)
-    pdf.set_font("Helvetica", size=11)
-    pdf.cell(0, 7, safe_text(f"{symbol} - {timeframe}"), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", size=13)
+    pdf.cell(0, 8, safe_text(f"{symbol} - {timeframe}"), new_x="LMARGIN", new_y="NEXT")
     _draw_chart_image(pdf, chart_image)
 
 
@@ -112,13 +112,13 @@ def _write_trade_review_page(pdf, review, jan1_balance):
     short_tag = " (Short)" if review["direction"] == "SHORT" else ""
 
     pdf.set_text_color(*TEXT_COLOR_RGB)
-    pdf.set_font("Helvetica", style="B", size=18)
-    pdf.cell(0, 11, safe_text(f"{review['symbol']}{short_tag}"), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", style="B", size=20)
+    pdf.cell(0, 12, safe_text(f"{review['symbol']}{short_tag}"), new_x="LMARGIN", new_y="NEXT")
 
     pdf.set_text_color(*MUTED_TEXT_RGB)
-    pdf.set_font("Helvetica", size=11)
+    pdf.set_font("Helvetica", size=13)
     pdf.cell(
-        0, 7, safe_text(f"{review['entry_date']:%m/%d/%Y} to {review['exit_date']:%m/%d/%Y}"),
+        0, 8, safe_text(f"{review['entry_date']:%m/%d/%Y} to {review['exit_date']:%m/%d/%Y}"),
         new_x="LMARGIN", new_y="NEXT",
     )
 
@@ -135,7 +135,7 @@ def _write_trade_review_page(pdf, review, jan1_balance):
     exit_label = "Cover" if stats["is_short"] else "Exit"
     pdf.set_text_color(*MUTED_TEXT_RGB)
     pdf.cell(
-        0, 7,
+        0, 8,
         safe_text(
             f"{entry_label}: ${stats['entry_price']:,.2f}   {exit_label}: ${stats['exit_price']:,.2f}   "
             f"Shares: {review['quantity']:,.0f}   Days Held: {stats['days_held']}"
@@ -144,11 +144,11 @@ def _write_trade_review_page(pdf, review, jan1_balance):
     )
     outcome_rgb = hex_to_rgb(charting.win_loss_color(review["profit_loss"] >= 0))
     pdf.set_text_color(*outcome_rgb)
-    pdf.set_font("Helvetica", style="B", size=11)
+    pdf.set_font("Helvetica", style="B", size=13)
     pl_line = f"P/L: ${review['profit_loss']:,.2f}  ({stats['pct_change']:,.2f}%)"
     if stats["equity_contribution"] is not None:
         pl_line += f"   Equity Contribution: {stats['equity_contribution']:,.2f}%"
-    pdf.cell(0, 7, safe_text(pl_line), new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 8, safe_text(pl_line), new_x="LMARGIN", new_y="NEXT")
     pdf.ln(4)
 
     # The PRIMARY snapshot goes right here, on this same page - "Daily"
@@ -165,19 +165,22 @@ def _write_trade_review_page(pdf, review, jan1_balance):
     primary_timeframe = "Daily" if "Daily" in remaining_snapshots else next(iter(remaining_snapshots), None)
     if primary_timeframe:
         primary_image = remaining_snapshots.pop(primary_timeframe)
-        _draw_chart_image(pdf, primary_image, room_below_mm=30)
+        # Scaled up from 30 alongside the notes font size below (12 ->
+        # 14, ~1.17x) so this reserved budget keeps fitting the same
+        # number of lines at the new, taller line height.
+        _draw_chart_image(pdf, primary_image, room_below_mm=35)
         pdf.ln(3)
 
     notes_text = review["notes"].strip() if review["notes"] else ""
     pdf.set_text_color(*TEXT_COLOR_RGB)
-    pdf.set_font("Helvetica", style="I", size=12)
-    pdf.multi_cell(0, 7, safe_text(notes_text or "No notes recorded."))
+    pdf.set_font("Helvetica", style="I", size=14)
+    pdf.multi_cell(0, 8, safe_text(notes_text or "No notes recorded."))
 
     if not review["snapshots"]:
         pdf.ln(4)
         pdf.set_text_color(*MUTED_TEXT_RGB)
-        pdf.set_font("Helvetica", size=10)
-        pdf.cell(0, 6, "No chart snapshots were saved for this trade.", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", size=12)
+        pdf.cell(0, 7, "No chart snapshots were saved for this trade.", new_x="LMARGIN", new_y="NEXT")
 
     # Any OTHER captured timeframes beyond the primary one still get
     # their own full page each.
@@ -196,16 +199,16 @@ def _write_review_summary_section(pdf, summary):
     visible on the same page they were written against.
     """
     pdf.set_text_color(*TEXT_COLOR_RGB)
-    pdf.set_font("Helvetica", style="B", size=14)
-    pdf.cell(0, 9, safe_text("Session Summary"), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", style="B", size=16)
+    pdf.cell(0, 10, safe_text("Session Summary"), new_x="LMARGIN", new_y="NEXT")
 
     win_rgb = hex_to_rgb(charting.win_loss_color(True))
     loss_rgb = hex_to_rgb(charting.win_loss_color(False))
 
-    pdf.set_font("Helvetica", size=11)
+    pdf.set_font("Helvetica", size=13)
     pdf.set_text_color(*MUTED_TEXT_RGB)
     pdf.cell(
-        0, 7,
+        0, 8,
         safe_text(
             f"Batting Average: {summary['batting_avg']:.1f}%   "
             f"Wins: {summary['win_count']}   Losses: {summary['loss_count']}"
@@ -213,31 +216,35 @@ def _write_review_summary_section(pdf, summary):
         new_x="LMARGIN", new_y="NEXT",
     )
 
-    pdf.set_font("Helvetica", style="B", size=11)
+    pdf.set_font("Helvetica", style="B", size=13)
     pdf.set_text_color(*(win_rgb if summary["total_pl"] >= 0 else loss_rgb))
-    pdf.cell(0, 7, safe_text(f"Total P/L: ${summary['total_pl']:,.2f}"), new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 8, safe_text(f"Total P/L: ${summary['total_pl']:,.2f}"), new_x="LMARGIN", new_y="NEXT")
 
-    pdf.set_font("Helvetica", size=10)
+    pdf.set_font("Helvetica", size=12)
     pdf.set_text_color(*win_rgb)
     win_line = (
         f"Avg Win: ${summary['avg_win_dollar']:,.2f} ({summary['avg_win_pct']:,.2f}%)"
         if summary["avg_win_dollar"] is not None else "Avg Win: -"
     )
-    pdf.cell(0, 6, safe_text(win_line), new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 7, safe_text(win_line), new_x="LMARGIN", new_y="NEXT")
     pdf.set_text_color(*loss_rgb)
     loss_line = (
         f"Avg Loss: ${summary['avg_loss_dollar']:,.2f} ({summary['avg_loss_pct']:,.2f}%)"
         if summary["avg_loss_dollar"] is not None else "Avg Loss: -"
     )
-    pdf.cell(0, 6, safe_text(loss_line), new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 7, safe_text(loss_line), new_x="LMARGIN", new_y="NEXT")
     pdf.ln(3)
 
     per_ticker_rows = sorted(summary["per_ticker"].items(), key=lambda kv: kv[1]["net_pl"], reverse=True)
     pdf.set_text_color(*TEXT_COLOR_RGB)
-    pdf.set_font("Helvetica", size=10)
+    pdf.set_font("Helvetica", size=12)
     with pdf.table(
+        # Widened from 0.6 alongside the table's own font size (10 ->
+        # 12, ~1.2x) so a value like "$12,345.67" has the same relative
+        # breathing room in its column as before, instead of being more
+        # likely to wrap onto a second line now that it's bigger.
         col_widths=(2, 1, 1, 1, 1.3, 1.3), text_align="LEFT",
-        borders_layout="NONE", width=CONTENT_WIDTH_MM * 0.6,
+        borders_layout="NONE", width=CONTENT_WIDTH_MM * 0.72,
     ) as table:
         header_row = table.row()
         for label in ("Symbol", "Trades", "Wins", "Losses", "Win Rate", "Net P/L"):
@@ -272,16 +279,16 @@ def build_review_report_pdf(conn, report_id):
     pdf.add_page()
 
     pdf.set_text_color(*TEXT_COLOR_RGB)
-    pdf.set_font("Helvetica", style="B", size=24)
-    pdf.cell(0, 16, safe_text("Trade Review Report"), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", style="B", size=26)
+    pdf.cell(0, 17, safe_text("Trade Review Report"), new_x="LMARGIN", new_y="NEXT")
 
     if report["range_start"] and report["range_end"]:
         range_text = f"{report['range_start']:%m/%d/%Y} to {report['range_end']:%m/%d/%Y}"
     else:
         range_text = "All trades"
-    pdf.set_font("Helvetica", size=13)
+    pdf.set_font("Helvetica", size=15)
     pdf.cell(
-        0, 9, safe_text(f"{range_text} - {len(report['reviews'])} trade(s) reviewed"),
+        0, 10, safe_text(f"{range_text} - {len(report['reviews'])} trade(s) reviewed"),
         new_x="LMARGIN", new_y="NEXT",
     )
 
@@ -292,10 +299,10 @@ def build_review_report_pdf(conn, report_id):
     if report["predictions_notes"]:
         pdf.ln(4)
         pdf.set_text_color(*MUTED_TEXT_RGB)
-        pdf.set_font("Helvetica", style="I", size=11)
-        pdf.cell(0, 7, safe_text("Before You Begin"), new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", style="I", size=13)
+        pdf.cell(0, 8, safe_text("Before You Begin"), new_x="LMARGIN", new_y="NEXT")
         pdf.set_text_color(*TEXT_COLOR_RGB)
-        pdf.multi_cell(0, 7, safe_text(report["predictions_notes"]))
+        pdf.multi_cell(0, 8, safe_text(report["predictions_notes"]))
 
     jan1_balance = database.get_account_value(conn)
     for review in report["reviews"]:
@@ -318,11 +325,11 @@ def build_review_report_pdf(conn, report_id):
             _write_review_summary_section(pdf, summary)
 
         pdf.set_text_color(*TEXT_COLOR_RGB)
-        pdf.set_font("Helvetica", style="B", size=18)
-        pdf.cell(0, 11, safe_text("Reflections"), new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", style="B", size=20)
+        pdf.cell(0, 12, safe_text("Reflections"), new_x="LMARGIN", new_y="NEXT")
         pdf.ln(4)
-        pdf.set_font("Helvetica", style="I", size=12)
-        pdf.multi_cell(0, 7, safe_text(report["reflections_notes"]))
+        pdf.set_font("Helvetica", style="I", size=14)
+        pdf.multi_cell(0, 8, safe_text(report["reflections_notes"]))
 
     return bytes(pdf.output())
 
