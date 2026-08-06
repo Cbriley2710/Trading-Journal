@@ -386,15 +386,26 @@ ported over unchanged - drawing tools are additive, not a replacement.
         if (priceRange) repositionMarkers(priceRange);
     }
 
+    // Each bottom-of-chart marker type sits at its own fraction of the
+    // current price range, so they stack in a stable order (closest to
+    // 1 is highest) instead of overlapping - entry/exit above, earnings
+    // below - as the user pans/zooms. See build_figure()'s own
+    // marker_y/earnings_marker_y comments in charting.py for why these
+    // aren't fed into the y-axis autorange fit at all: this function is
+    // what keeps them in the right spot instead.
+    var MARKER_Y_FRACTIONS = {entry_exit_marker: 0.03, earnings_marker: 0.01};
+
     function repositionMarkers(priceRange) {
         var lo = priceRange[0], hi = priceRange[1];
-        var markerY = lo + (hi - lo) * 0.03;
-        var indices = [];
+        var indices = [], newYs = [];
         gd.data.forEach(function(trace, i) {
-            if (trace.meta === "entry_exit_marker") indices.push(i);
+            var fraction = MARKER_Y_FRACTIONS[trace.meta];
+            if (fraction === undefined) return;
+            var markerY = lo + (hi - lo) * fraction;
+            indices.push(i);
+            newYs.push(trace.y.map(function() { return markerY; }));
         });
         if (!indices.length) return;
-        var newYs = indices.map(function(i) { return gd.data[i].y.map(function() { return markerY; }); });
         Plotly.restyle(gd, {y: newYs}, indices);
     }
 

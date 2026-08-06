@@ -191,7 +191,8 @@ def render_trade_chart(conn, trade, key_prefix, anchor_id=None, timeframe_label=
 
     fig, fit_payload = charting.build_figure(
         trade["symbol"], history, entry_point, settings, overlay_history, interval=interval,
-        visible_range=(visible_start, visible_end), drawings=saved_drawings, bake_arrow_traces=False)
+        visible_range=(visible_start, visible_end), drawings=saved_drawings, bake_arrow_traces=False,
+        show_earnings_markers=True)
     chart_result = charting.render_interactive_chart(fig, fit_payload, saved_drawings, key=key_prefix)
     current_drawings = chart_result["drawings"]
 

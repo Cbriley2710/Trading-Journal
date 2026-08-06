@@ -727,6 +727,36 @@ def fetch_latest_price(symbol):
         return None if recent.empty else recent["Close"].iloc[-1]
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_earnings_dates_in_range(symbol, start_date, end_date):
+    """
+    Every earnings-release date for `symbol` (past or future) that falls
+    within [start_date, end_date] (plain dates, inclusive) - used by
+    build_figure()'s earnings marker (see its own docstring), not the
+    "within 10 days" badge (that's warm_earnings_cache_for_symbol()'s
+    persistent next_earnings_date, a completely different, forward-only
+    lookup). yfinance has no native "give me dates between X and Y"
+    query, only a `limit` on how many of the most-recent-around-now
+    records to return - 20 (versus warm_earnings_cache_for_symbol()'s
+    12, which only ever needs the next upcoming one) gives roughly 5
+    years of quarterly-earnings headroom either direction, plenty for
+    any trade this app would realistically be reviewing.
+
+    Returns [] on any failure (bad symbol, rate-limited, no data) - same
+    "a chart never crashes over one lookup" convention as
+    fetch_latest_price() above. Cached a full day, not the hour
+    fetch_history() uses - earnings dates don't change intraday.
+    """
+    try:
+        earnings = yf.Ticker(symbol).get_earnings_dates(limit=20)
+    except Exception:
+        return []
+    if earnings is None or earnings.empty:
+        return []
+    index = earnings.index.tz_localize(None) if earnings.index.tz is not None else earnings.index
+    return sorted(d.date() for d in index if start_date <= d.date() <= end_date)
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_period_return_pct(symbol, period_start):
     """
@@ -1111,7 +1141,7 @@ def build_trade_review_snapshot(
 
     fig, _fit_payload = build_figure(
         symbol, history, entry_point, settings, entry_label=entry_label, interval=interval,
-        visible_range=(visible_start, visible_end), drawings=drawings)
+        visible_range=(visible_start, visible_end), drawings=drawings, show_earnings_markers=True)
     return render_png(fig)
 
 
@@ -1257,7 +1287,8 @@ def _format_trade_moment(dt):
 
 def build_figure(symbol, history, entry_point, settings, overlay_history=None, entry_label="Entry", interval="1d",
                   visible_range=None, stop_loss=None, drawings=None, bake_arrow_traces=True,
-                  show_earnings_flag=False, conn=None, plan_entry_price=None, plan_stop_price=None):
+                  show_earnings_flag=False, conn=None, plan_entry_price=None, plan_stop_price=None,
+                  show_earnings_markers=False):
     """
     Builds the go.Figure for a price chart: candlestick or line, moving
     averages, an entry marker (plus an exit marker and connecting line if
@@ -1312,6 +1343,17 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
     so free-browsing a chart elsewhere in the app doesn't show it.
     Requires `conn` when True (falls back to database.get_connection()
     if not given).
+
+    `show_earnings_markers`, if True, is a DIFFERENT feature from
+    `show_earnings_flag` above - not a status-bar warning about an
+    UPCOMING release, but a small red circled "E" marker plotted
+    directly on the chart (see fetch_earnings_dates_in_range()) for
+    EVERY earnings release, past or future, that falls within the
+    visible window - useful context when reviewing a closed trade for
+    understanding a big price move. Only Trade Analyzer's single-trade
+    view and Review Session pass this (see pages/1_Trade_Analyzer.py's
+    render_trade_chart()) - the Journal Session's watchlist-planning
+    chart doesn't, since it isn't reviewing a past trade.
     """
     entry_date = entry_point["entry_date"]
     buy_price = entry_point["buy_price"]
@@ -1519,6 +1561,27 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
             text=[hover_text],
             hovertemplate="%{text}<extra></extra>",
         ), row=1, col=1)
+
+    if show_earnings_markers:
+        earnings_dates = fetch_earnings_dates_in_range(
+            symbol, range_history.index.min().date(), range_history.index.max().date())
+        if earnings_dates:
+            # A band BELOW the entry/exit markers (a bigger downward
+            # offset than marker_y's own 0.08 - see its own comment
+            # above) so the two never visually collide on a date they
+            # share. Not fed into fit_payload, same reasoning as
+            # marker_y itself - see repositionMarkers() in
+            # chart_component/index.html for how this gets kept in
+            # that same relative band as the user pans/zooms.
+            earnings_marker_y = marker_y - (range_history["High"].max() - range_history["Low"].min()) * 0.06
+            fig.add_trace(go.Scatter(
+                x=earnings_dates, y=[earnings_marker_y] * len(earnings_dates),
+                mode="markers+text",
+                marker=dict(symbol="circle-open", size=16, color="red", line=dict(width=2, color="red")),
+                text=["E"] * len(earnings_dates), textfont=dict(color="red", size=10),
+                textposition="middle center", name="Earnings", showlegend=False, meta="earnings_marker",
+                hovertemplate="Earnings release<br>%{x|%b %d, %Y}<extra></extra>",
+            ), row=1, col=1)
 
     if stop_loss is not None:
         fig.add_hline(
