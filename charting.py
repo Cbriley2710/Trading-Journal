@@ -1645,11 +1645,13 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
             ],
             hovertemplate="%{text}<extra></extra>",
         ), row=1, col=1)
-    else:
-        hover_text = (
-            f"Added to watchlist<br>{_format_trade_moment(entry_date)}" if entry_label == "Added"
-            else f"{entry_label}<br>{_format_trade_moment(entry_date)} · ${buy_price:,.2f}"
-        )
+    elif entry_label != "Added":
+        # No marker at all for a plain watchlist ticker ("Added") - a
+        # watchlist add isn't a real trade, and the arrow was clutter
+        # on a chart that has no actual entry to point at. Still drawn
+        # for an open position ("Entry"/"Short Entry") - that IS a real
+        # trade, just not closed yet.
+        hover_text = f"{entry_label}<br>{_format_trade_moment(entry_date)} · ${buy_price:,.2f}"
         fig.add_trace(go.Scatter(
             x=[entry_date], y=[marker_y], mode="markers",
             marker=dict(size=14, symbol=entry_symbol, color=outcome_color),
