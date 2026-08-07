@@ -57,7 +57,7 @@ through quickly):
 
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import psycopg2
 from psycopg2.extras import Json, execute_values
@@ -277,6 +277,20 @@ def init_db(conn):
         CREATE TABLE IF NOT EXISTS watchlist_names (
             list_id INTEGER PRIMARY KEY,
             name TEXT NOT NULL
+        )
+    """)
+    # Tracks WHEN a symbol was last removed from every watchlist -
+    # `watchlist` itself only ever holds currently-tracked tickers (a
+    # removal is a hard DELETE, no history kept there), so this is the
+    # only record of "it's been gone for N days" that
+    # symbol_archive_report.archive_and_delete_stale_watchlist_symbols()
+    # needs. remove_from_watchlist() writes a row here; add_to_watchlist()
+    # deletes it (re-adding resets the countdown, same as if it had
+    # never been removed).
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS watchlist_removals (
+            symbol TEXT PRIMARY KEY,
+            removed_at TIMESTAMP NOT NULL
         )
     """)
     cur.execute("""
@@ -1190,6 +1204,88 @@ def get_logbook_entry(conn, symbol, entry_date):
     }
 
 
+def get_logbook_entries_for_symbol(conn, symbol):
+    """
+    Returns every logbook row ever recorded for `symbol`, oldest first,
+    as a list of {entry_date, notes, chart_image, archived_at,
+    plan_entry_price, plan_stop_price} dicts - the "one symbol, every
+    date" counterpart to get_logbook_entries_for_date()'s "one date,
+    every symbol". Used by symbol_archive_report.py to build one PDF
+    covering a watchlist-only ticker's whole journal history before
+    it's deleted.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT entry_date, notes, chart_image, archived_at, plan_entry_price, plan_stop_price
+        FROM logbook_entries WHERE symbol = %s ORDER BY entry_date
+        """,
+        (symbol,),
+    )
+    return [
+        {
+            "entry_date": row[0],
+            "notes": row[1],
+            "chart_image": bytes(row[2]) if row[2] is not None else None,
+            "archived_at": row[3],
+            "plan_entry_price": row[4],
+            "plan_stop_price": row[5],
+        }
+        for row in cur.fetchall()
+    ]
+
+
+def has_trade_history(conn, symbol):
+    """
+    Whether `symbol` appears anywhere in the `trades` table (an open OR
+    closed position, ever) - symbol_archive_report.py's line between
+    "this was just a watchlist idea that never went anywhere" (eligible
+    for auto-archive-and-delete once removed long enough) and "this was
+    a real trade" (Logbook kept forever, regardless of watchlist
+    status). Checking `trades` rather than get_open_positions() also
+    catches a symbol that WAS traded and has since fully closed out -
+    still real trade history, not just a watchlist idea.
+    """
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM trades WHERE symbol = %s LIMIT 1", (symbol,))
+    return cur.fetchone() is not None
+
+
+def get_stale_watchlist_removals(conn, older_than_days):
+    """
+    Returns the symbols in watchlist_removals whose removed_at is more
+    than `older_than_days` days ago - candidates for
+    symbol_archive_report.py's auto-archive-and-delete (still subject
+    to that function's own has_trade_history() exemption check on top
+    of this).
+    """
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT symbol FROM watchlist_removals WHERE removed_at < %s",
+        (timeutil.now_eastern() - timedelta(days=older_than_days),),
+    )
+    return [row[0] for row in cur.fetchall()]
+
+
+def delete_symbol_logbook_history(conn, symbol):
+    """
+    Permanently deletes EVERYTHING keyed by `symbol` except `trades`/
+    `transactions` (real trade history is never touched by this) -
+    logbook_entries (notes + chart images), chart_drawings,
+    position_stops, price_cache, and its own watchlist_removals
+    tracking row. Called by symbol_archive_report.py only AFTER the
+    archive PDF has been successfully emailed - never before, since
+    this has no undo.
+    """
+    cur = conn.cursor()
+    cur.execute("DELETE FROM logbook_entries WHERE symbol = %s", (symbol,))
+    cur.execute("DELETE FROM chart_drawings WHERE symbol = %s", (symbol,))
+    cur.execute("DELETE FROM position_stops WHERE symbol = %s", (symbol,))
+    cur.execute("DELETE FROM price_cache WHERE symbol = %s", (symbol,))
+    cur.execute("DELETE FROM watchlist_removals WHERE symbol = %s", (symbol,))
+    conn.commit()
+
+
 def has_logbook_chart_image(conn, symbol, entry_date):
     """
     Whether a symbol's logbook row for entry_date already has a chart
@@ -1386,6 +1482,10 @@ def add_to_watchlist(conn, symbol, list_id=1):
             "INSERT INTO watchlist (symbol, list_id, added_at) VALUES (%s, %s, %s)",
             (symbol, list_id, timeutil.now_eastern()),
         )
+        # Being (re-)added means it's no longer "removed" - clears any
+        # stale-removal countdown symbol_archive_report.py is tracking,
+        # same as if it had never been removed at all.
+        cur.execute("DELETE FROM watchlist_removals WHERE symbol = %s", (symbol,))
         conn.commit()
         return "added", None
 
@@ -1403,10 +1503,23 @@ def remove_from_watchlist(conn, symbol):
     Removes a ticker from whichever watchlist it's in - it stops being
     archived going forward, but its existing logbook_entries history is
     untouched, same as a closed trade's logbook staying permanently
-    archived.
+    archived (unless it's later auto-archived-and-deleted - see
+    watchlist_removals below and symbol_archive_report.py).
+
+    Records WHEN this happened in watchlist_removals - the starting
+    point for that 1-week countdown. ON CONFLICT (re-removing a symbol
+    that already had a stale, uncleaned-up row for some reason) resets
+    removed_at to now rather than leaving the older timestamp.
     """
     cur = conn.cursor()
     cur.execute("DELETE FROM watchlist WHERE symbol = %s", (symbol,))
+    cur.execute(
+        """
+        INSERT INTO watchlist_removals (symbol, removed_at) VALUES (%s, %s)
+        ON CONFLICT (symbol) DO UPDATE SET removed_at = EXCLUDED.removed_at
+        """,
+        (symbol, timeutil.now_eastern()),
+    )
     conn.commit()
 
 

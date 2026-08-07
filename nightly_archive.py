@@ -18,6 +18,12 @@ when used - this script's job is really just to catch whatever didn't
 get done by hand on a given day, not the primary way either one
 happens.
 
+Also runs symbol_archive_report.py's storage-management pass - PDFing,
+emailing, and deleting the Logbook of any watchlist-only ticker that's
+been removed from every watchlist for over a week (real trades are
+never touched) - this one has no manual on-demand equivalent, it's
+purely automatic.
+
 NOT a Streamlit page - a plain script, meant to be run once a night by
 a scheduled GitHub Actions workflow (see
 .github/workflows/nightly_archive.yml), since Streamlit Community Cloud
@@ -28,6 +34,7 @@ has no scheduler of its own. Can also be run manually any time (e.g.
 import archiving
 import daily_report
 import database
+import symbol_archive_report
 import timeutil
 
 
@@ -82,6 +89,11 @@ def main():
         print(f"Chart archiving failed unexpectedly: {exc}")
 
     send_daily_report_fallback(conn, today)
+
+    try:
+        symbol_archive_report.archive_and_delete_stale_watchlist_symbols(conn)
+    except Exception as exc:
+        print(f"Stale-watchlist archiving failed unexpectedly: {exc}")
 
     # The "discard after midnight" half of the price cache's lifecycle
     # (see database.clear_stale_price_cache() and warm_price_cache.py) -

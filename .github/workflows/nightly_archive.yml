@@ -45,6 +45,7 @@ jobs:
           REPORT_EMAIL_FROM: ${{ secrets.REPORT_EMAIL_FROM }}
           REPORT_EMAIL_APP_PASSWORD: ${{ secrets.REPORT_EMAIL_APP_PASSWORD }}
           REPORT_EMAIL_RECIPIENTS: ${{ secrets.REPORT_EMAIL_RECIPIENTS }}
+          ARCHIVE_EMAIL_RECIPIENTS: ${{ secrets.ARCHIVE_EMAIL_RECIPIENTS }}
         run: python nightly_archive.py
 
       # Same script, same repo, but pointed at a second person's own
@@ -61,4 +62,5 @@ jobs:
           REPORT_EMAIL_FROM: ${{ secrets.FRIEND_REPORT_EMAIL_FROM }}
           REPORT_EMAIL_APP_PASSWORD: ${{ secrets.FRIEND_REPORT_EMAIL_APP_PASSWORD }}
           REPORT_EMAIL_RECIPIENTS: ${{ secrets.FRIEND_REPORT_EMAIL_RECIPIENTS }}
+          ARCHIVE_EMAIL_RECIPIENTS: ${{ secrets.FRIEND_ARCHIVE_EMAIL_RECIPIENTS }}
         run: python nightly_archive.py
