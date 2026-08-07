@@ -370,7 +370,7 @@ if "Equity Curve" in visible_sections:
         equity_window = window_col.radio(
             "Window", window_labels, index=3, horizontal=True, key="equity_window")
         overlay_choice = overlay_col.radio(
-            "Overlay", ["None", "SPY", "QQQ"], horizontal=True, key="equity_overlay")
+            "Overlay", ["None", "SPY", "QQQ"], index=1, horizontal=True, key="equity_overlay")
 
         today = pd.Timestamp(timeutil.today_eastern())
         window_cutoffs = {
