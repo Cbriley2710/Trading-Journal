@@ -1010,8 +1010,10 @@ def build_archive_snapshot(symbol, entry_date, buy_price, entry_label, as_of, di
     `stop_loss`, if given, draws the same thin grey stop line the
     interactive chart shows. Also includes this symbol's saved
     drawings (see database.get_drawings()), the same as the
-    interactive chart. Returns PNG bytes, or None if no price data
-    was found.
+    interactive chart. Returns PNG bytes, or None if no price data was
+    found, OR if the most recent trading day's candle isn't actually in
+    the fetched data yet - see the completeness check right after the
+    fetch below.
     """
     conn = database.get_connection()
     saved_prefs = database.get_chart_preferences(conn)
@@ -1037,6 +1039,23 @@ def build_archive_snapshot(symbol, entry_date, buy_price, entry_label, as_of, di
     history = fetch_history(
         symbol, fetch_start, display_start, display_end, "1d", settings["ma_periods"], settings["ma_type"])
     if history.empty:
+        return None
+
+    # A real production bug: Yahoo Finance sometimes hasn't published a
+    # trading day's finalized daily candle yet at the moment this runs
+    # (right after close, or a holiday/weekend with no new candle at
+    # all) - fetch_history() then silently returns data that only
+    # reaches through the PREVIOUS trading day, with no error of any
+    # kind. Without this check, that got baked into the Logbook as if
+    # it were a complete "as of today" chart, permanently missing
+    # today's candle - confirmed for real against a SNOW journal entry
+    # whose archived chart was actually one day stale. Refusing here
+    # (same as the "no data at all" case above) means the caller's
+    # existing "couldn't build a chart" handling kicks in instead - for
+    # the live Tweet flow, a clear message and no chart image; for the
+    # nightly job, the entry is simply retried on its next run once
+    # the real data is ready.
+    if history.index[-1].date() != as_of.date():
         return None
 
     entry_point = {"entry_date": entry_date, "buy_price": buy_price, "direction": direction} if buy_price is not None \

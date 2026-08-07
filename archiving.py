@@ -32,18 +32,35 @@ def archive_ticker(conn, symbol, entry_date, buy_price, entry_label, today, as_o
     return True
 
 
-def archive_all(conn, today):
+def archive_all(conn, today, skip_if_already_archived=False):
     """Archives every open position's and every watchlist ticker's chart
     for `today`. Returns the set of symbols archived as open positions,
     so a ticker that's both an open position and on a watchlist isn't
     processed twice with a less meaningful "Added" marker overwriting
-    the real "Entry" one."""
+    the real "Entry" one.
+
+    `skip_if_already_archived`, if True, skips a ticker entirely (no
+    Yahoo Finance call, no chart render) when it already has a chart
+    image saved for `today` - used by nightly_archive.py, which reruns
+    every night regardless of whether `today` (see
+    timeutil.expected_last_trading_day()) actually advanced to a new
+    trading day since its last run (e.g. Saturday and Sunday night both
+    still resolve to Friday). daily_report.py's on-demand "Generate &
+    Email Report" button deliberately leaves this False - pressing that
+    button means "get me fresh charts right now," even if today was
+    already archived earlier.
+    """
     as_of = datetime.combine(today, datetime.min.time())
 
     positions = database.get_open_positions(conn)
     print(f"Found {len(positions)} open position(s) to archive.")
     archived_symbols = set()
     for position in positions:
+        symbol = position["symbol"]
+        if skip_if_already_archived and database.has_logbook_chart_image(conn, symbol, today):
+            print(f"  {symbol}: already archived for {today}, skipping.")
+            archived_symbols.add(symbol)
+            continue
         # Wrapped per-ticker (not around the whole loop) so one bad/
         # delisted symbol only skips itself - it used to be possible for
         # a single failure here to abort archiving every OTHER position
@@ -52,21 +69,26 @@ def archive_all(conn, today):
         try:
             is_short = position["direction"] == "SHORT"
             archive_ticker(
-                conn, position["symbol"], position["entry_date"], position["avg_price"],
+                conn, symbol, position["entry_date"], position["avg_price"],
                 "Short Entry" if is_short else "Entry", today, as_of, direction=position["direction"],
-                stop_loss=database.get_stop_loss(conn, position["symbol"]))
+                stop_loss=database.get_stop_loss(conn, symbol))
         except Exception as exc:
-            print(f"  {position['symbol']}: archiving failed unexpectedly ({exc}), skipping.")
-        archived_symbols.add(position["symbol"])
+            print(f"  {symbol}: archiving failed unexpectedly ({exc}), skipping.")
+        archived_symbols.add(symbol)
 
     watchlist = database.get_watchlist(conn)
     watchlist = [w for w in watchlist if w["symbol"] not in archived_symbols]
     print(f"Found {len(watchlist)} watchlist ticker(s) to archive.")
     for entry in watchlist:
+        symbol = entry["symbol"]
+        if skip_if_already_archived and database.has_logbook_chart_image(conn, symbol, today):
+            print(f"  {symbol}: already archived for {today}, skipping.")
+            archived_symbols.add(symbol)
+            continue
         try:
-            archive_ticker(conn, entry["symbol"], entry["added_at"], None, "Added", today, as_of)
+            archive_ticker(conn, symbol, entry["added_at"], None, "Added", today, as_of)
         except Exception as exc:
-            print(f"  {entry['symbol']}: archiving failed unexpectedly ({exc}), skipping.")
-        archived_symbols.add(entry["symbol"])
+            print(f"  {symbol}: archiving failed unexpectedly ({exc}), skipping.")
+        archived_symbols.add(symbol)
 
     return archived_symbols

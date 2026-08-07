@@ -45,10 +45,9 @@ def today_eastern():
 def expected_last_trading_day():
     """
     The most recent date the market should already have a completed
-    close for: today, unless today is a Saturday or Sunday, in which
-    case it's Friday. A simple weekday-only approximation (it doesn't
-    know about market holidays), matching this project's existing
-    "good enough, not a full trading calendar" approach elsewhere.
+    close for. A simple weekday-only approximation (it doesn't know
+    about market holidays), matching this project's existing "good
+    enough, not a full trading calendar" approach elsewhere.
 
     Used to tag and check the persistent price cache (see charting.py's
     warm_price_cache_for_symbol()/_daily_history_from_cache() and
@@ -67,10 +66,26 @@ def expected_last_trading_day():
     cached row keeps matching this same function's own answer all
     weekend, and still correctly expires once Monday's real trading
     day arrives.
+
+    Also rolls back a calendar day BEFORE the weekend check whenever
+    it's still early morning (before the market could plausibly have
+    opened, let alone closed, today) - this is what makes
+    nightly_archive.py's ~midnight-to-1am GitHub Actions run correctly
+    target the trading day that just finished, rather than the brand
+    new calendar day it's already rolled over into by the time it
+    executes. A real bug found in production: that job archives each
+    ticker's chart under whatever day THIS function returns, and
+    without this adjustment it was archiving under a day that hadn't
+    traded yet (Yahoo Finance had no close for it at all), while the
+    actual just-finished trading day's own Logbook entry never got
+    revisited/fixed by this nightly "safety net" run at all.
     """
-    today = today_eastern()
-    if today.weekday() == 5:  # Saturday
-        return today - timedelta(days=1)
-    if today.weekday() == 6:  # Sunday
-        return today - timedelta(days=2)
-    return today
+    now = now_eastern()
+    reference_date = now.date()
+    if now.hour < 9 or (now.hour == 9 and now.minute < 30):
+        reference_date -= timedelta(days=1)
+    if reference_date.weekday() == 5:  # Saturday
+        return reference_date - timedelta(days=1)
+    if reference_date.weekday() == 6:  # Sunday
+        return reference_date - timedelta(days=2)
+    return reference_date

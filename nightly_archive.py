@@ -53,7 +53,14 @@ def send_daily_report_fallback(conn, today):
 
 def main():
     conn = database.get_connection()
-    today = timeutil.today_eastern()
+    # expected_last_trading_day(), NOT today_eastern() - this job's own
+    # GitHub Actions cron fires ~midnight-to-1am Eastern, which on a
+    # plain weekday has already rolled over into a brand new calendar
+    # day that hasn't traded yet. today_eastern() here used to archive
+    # (and email the Daily Report for) that not-yet-started day instead
+    # of the trading day that actually just closed - see
+    # expected_last_trading_day()'s own docstring for the full story.
+    today = timeutil.expected_last_trading_day()
 
     # archive_all() already guards each individual ticker (see
     # archiving.py) - this outer try/except is a second layer, for
@@ -62,7 +69,15 @@ def main():
     # so send_daily_report_fallback() below always gets a chance to run
     # even in that case.
     try:
-        archiving.archive_all(conn, today)
+        # skip_if_already_archived=True: this job runs every night
+        # regardless of whether today ended up being a new trading day
+        # (weekends included) - once a trading day's charts are already
+        # correctly archived, a later run targeting that SAME day (e.g.
+        # Saturday and Sunday night both still resolve to Friday - see
+        # expected_last_trading_day()) has nothing new to do and would
+        # just be spending Yahoo Finance calls/render time re-creating
+        # an identical image.
+        archiving.archive_all(conn, today, skip_if_already_archived=True)
     except Exception as exc:
         print(f"Chart archiving failed unexpectedly: {exc}")
 

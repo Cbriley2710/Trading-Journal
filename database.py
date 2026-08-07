@@ -1190,6 +1190,23 @@ def get_logbook_entry(conn, symbol, entry_date):
     }
 
 
+def has_logbook_chart_image(conn, symbol, entry_date):
+    """
+    Whether a symbol's logbook row for entry_date already has a chart
+    image saved - a lightweight existence check (no chart_image BYTEA
+    pulled over the wire, unlike get_logbook_entry()) for
+    archiving.archive_all()'s skip_if_already_archived option, which
+    calls this once per ticker on every nightly run.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT chart_image IS NOT NULL FROM logbook_entries WHERE symbol = %s AND entry_date = %s",
+        (symbol, entry_date),
+    )
+    row = cur.fetchone()
+    return row is not None and row[0]
+
+
 def get_logbook_entries_for_date(conn, entry_date):
     """
     Returns every symbol's logbook row for `entry_date` as {symbol: {...}}
