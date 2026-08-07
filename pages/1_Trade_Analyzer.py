@@ -42,6 +42,7 @@ import auth
 import charting
 import database
 import nav
+import twitter_post
 import ui
 from analyze_trades import review_session_summary, trade_label, trade_stats
 
@@ -522,7 +523,18 @@ def render_review_session(conn):
     # submit"; this widget instance just never renders again), which is
     # what makes a single st.columns() band - and true flush alignment
     # with no gap - possible at all.
-    notes_col, timeframe_col, buttons_col = st.columns([3, 1, 1])
+    notes_col, timeframe_col, buttons_col, checkbox_col = st.columns([3, 1, 1, 0.6])
+
+    # Same shape as Shortlist's Journal Session "Tweet" checkbox (see
+    # render_journal_box()) - checked here, it's acted on down at
+    # "Save & Next →" below, reusing whatever chart snapshot is ALREADY
+    # guaranteed to exist by then (the Daily one - see the guaranteed-
+    # baseline capture there) rather than building a new one, unlike
+    # the Journal Session side of this feature which has no snapshot
+    # available yet at that point and has to build one on the spot.
+    post_to_x = checkbox_col.checkbox(
+        "Tweet", key=f"{key_prefix}_post_to_x",
+        help="Post this chart + these notes to X after saving")
 
     if timeframe_col.button("📸 Save this timeframe", key=f"{key_prefix}_capture"):
         # Passing current_view_range means this captures wherever the
@@ -588,7 +600,24 @@ def render_review_session(conn):
             database.update_trade_review(conn, existing_review["id"], notes, pending)
         else:
             database.save_trade_review(conn, session["report_id"], trade, notes, pending)
-        _advance_review_session(conn, session)
+
+        if post_to_x:
+            # The Daily snapshot just guaranteed above always wins as
+            # the tweet image if present; falls back to whatever OTHER
+            # timeframe was manually captured on the rare chance Daily
+            # itself had no price data (daily_snapshot is None above).
+            tweet_image = pending.get("Daily") or next(iter(pending.values()), None)
+            if tweet_image is not None:
+                st.session_state["pending_tweet"] = {
+                    "symbol": trade["symbol"], "image": tweet_image,
+                    "caption": twitter_post.truncate_caption(notes), "session_key": "review_session",
+                }
+                st.rerun()
+            else:
+                st.warning("No chart snapshot available to tweet - review saved, skipping the tweet.")
+                _advance_review_session(conn, session)
+        else:
+            _advance_review_session(conn, session)
     elif clicked == "Skip":
         _advance_review_session(conn, session)
 
@@ -747,7 +776,20 @@ if not trades:
 
 conn = database.get_connection()
 
-if st.session_state.get("review_session") is not None:
+pending_tweet = st.session_state.get("pending_tweet")
+if pending_tweet is not None and pending_tweet.get("session_key") == "review_session":
+    # Takes priority over the normal review_session dispatch below -
+    # see render_review_session()'s own note on where this gets set,
+    # right at "Save & Next →" with the Tweet box checked. The session
+    # only actually moves to the next trade once Post/Cancel resolves.
+    tweet_result = twitter_post.render_tweet_preview(pending_tweet)
+    if tweet_result == "post":
+        success, message = twitter_post.post_tweet(pending_tweet["image"], pending_tweet["caption"])
+        st.toast(message, icon="✅" if success else "⚠️")
+    if tweet_result in ("post", "cancel"):
+        del st.session_state["pending_tweet"]
+        _advance_review_session(conn, st.session_state["review_session"])
+elif st.session_state.get("review_session") is not None:
     render_review_session(conn)
 elif st.session_state.get("review_selecting"):
     render_review_selection(conn, trades)

@@ -44,6 +44,7 @@ import daily_report
 import database
 import nav
 import timeutil
+import twitter_post
 import ui
 
 st.set_page_config(page_title="Shortlist", page_icon="📈", layout="wide", initial_sidebar_state="collapsed")
@@ -181,7 +182,8 @@ def render_price_chart(conn, symbol, entry_point, entry_label, key_prefix, stop_
     return entry_point
 
 
-def render_journal_box(conn, symbol, key_prefix, submit_labels=("Save",), on_watchlist=False):
+def render_journal_box(conn, symbol, key_prefix, submit_labels=("Save",), on_watchlist=False,
+                        show_tweet_checkbox=False):
     """
     One row, left to right: yesterday's entry (read-only), today's
     entry (a short text box - a journal entry here is usually a
@@ -235,16 +237,25 @@ def render_journal_box(conn, symbol, key_prefix, submit_labels=("Save",), on_wat
     a watchlist entry to remove) - see this function's callers. It also
     gates the Plan Entry/Plan Stop boxes: only a watchlist "setup" gets
     a plan, since an open position already has its real entry/stop
-    tracked on the Positions & Stop-Loss table.
+    tracked on the Positions & Stop-Loss table. `show_tweet_checkbox`
+    (unlike `on_watchlist`, applies to open positions too) should only
+    be True from a caller that actually acts on `post_to_x` afterward
+    (the guided Journal Session) - the standalone single-ticker view
+    leaves it False, so it never shows a checkbox that would silently
+    do nothing when checked.
 
     Returns (clicked_label_or_None, notes, remove_from_watchlist,
-    plan_entry_price, plan_stop_price) - notes is always whatever's in
-    the box at submit time regardless of which button was clicked;
-    remove_from_watchlist is only ever True if `on_watchlist` was True
-    AND that checkbox was checked at submit. plan_entry_price/
-    plan_stop_price are the current Plan Entry/Plan Stop box values (a
-    blank/0 box reads as None, meaning "no plan"/"clear the plan"), or
-    always (None, None) when `on_watchlist` is False.
+    plan_entry_price, plan_stop_price, post_to_x) - notes is always
+    whatever's in the box at submit time regardless of which button was
+    clicked; remove_from_watchlist is only ever True if `on_watchlist`
+    was True AND that checkbox was checked at submit; post_to_x only
+    ever True if `show_tweet_checkbox` was True AND that checkbox was
+    checked at submit. plan_entry_price/plan_stop_price are the current
+    Plan Entry/Plan Stop box values (a blank/0 box reads as None,
+    meaning "no plan"/"clear the plan"), or
+    always (None, None) when `on_watchlist` is False. post_to_x is
+    whether the "Tweet" checkbox was checked at submit - shown (and can
+    be True) regardless of `on_watchlist`, unlike remove_from_watchlist.
     """
     today = timeutil.today_eastern()
     existing_entry = database.get_logbook_entry(conn, symbol, today)
@@ -264,6 +275,7 @@ def render_journal_box(conn, symbol, key_prefix, submit_labels=("Save",), on_wat
 
     clicked = None
     remove_from_watchlist = False
+    post_to_x = False
     plan_entry_price = plan_stop_price = None
     with st.form(key=f"{key_prefix}_{symbol}_journal_form", clear_on_submit=True, border=False):
         if on_watchlist:
@@ -322,6 +334,19 @@ def render_journal_box(conn, symbol, key_prefix, submit_labels=("Save",), on_wat
             if button_col.form_submit_button(secondary_label, width="stretch"):
                 clicked = secondary_label
 
+        if show_tweet_checkbox:
+            # Gated on this (not on_watchlist - shown for open
+            # positions too, not just watchlist tickers) rather than
+            # always rendered, so the single-ticker view - which
+            # doesn't wire up what checking this actually does - never
+            # shows a checkbox that would silently do nothing when
+            # checked. See twitter_post.py's own module docstring for
+            # what it actually does (a read-only preview after Save,
+            # never posted silently).
+            post_to_x = checkbox_col.checkbox(
+                "Tweet", key=f"{key_prefix}_{symbol}_post_to_x",
+                help="Post this chart + today's notes to X after saving")
+
         if on_watchlist:
             # Short label ("Remove" rather than "Remove from watchlist")
             # plus a hover tooltip spelling that out - this column is
@@ -331,7 +356,7 @@ def render_journal_box(conn, symbol, key_prefix, submit_labels=("Save",), on_wat
                 "Remove", key=f"{key_prefix}_{symbol}_remove_from_watchlist",
                 help="Remove from watchlist")
 
-    return clicked, notes, remove_from_watchlist, plan_entry_price, plan_stop_price
+    return clicked, notes, remove_from_watchlist, plan_entry_price, plan_stop_price, post_to_x
 
 
 def save_journal_entry(conn, symbol, entry_point, entry_label, notes, stop_loss=None,
@@ -388,7 +413,11 @@ def render_chart_and_journal(conn, symbol, entry_point, entry_label, key_prefix,
     if entry_point is None:
         return
 
-    clicked, notes, remove_from_watchlist, plan_entry_price, plan_stop_price = render_journal_box(
+    # show_tweet_checkbox left at its default (False) - this standalone
+    # single-ticker view doesn't wire up posting to X, only the guided
+    # Journal Session does (see render_journal_session() below), per
+    # the user's own scoping of this feature.
+    clicked, notes, remove_from_watchlist, plan_entry_price, plan_stop_price, _post_to_x = render_journal_box(
         conn, symbol, key_prefix, on_watchlist=on_watchlist)
 
     if clicked:
@@ -951,9 +980,9 @@ def render_journal_session(conn):
         # looking for a box that was never going to exist.
         ui.focus_textarea("Today's Journal")
 
-    clicked, notes, remove_from_watchlist, plan_entry_price, plan_stop_price = render_journal_box(
+    clicked, notes, remove_from_watchlist, plan_entry_price, plan_stop_price, post_to_x = render_journal_box(
         conn, symbol, key_prefix, submit_labels=("Save & Next →", "Skip"),
-        on_watchlist=is_watchlist_item)
+        on_watchlist=is_watchlist_item, show_tweet_checkbox=True)
 
     if remove_from_watchlist and clicked:
         # Honored on either button, not just "Save & Next" - checking
@@ -962,7 +991,32 @@ def render_journal_session(conn):
         database.remove_from_watchlist(conn, symbol)
         st.toast(f"Removed {symbol} from its watchlist. Its Logbook history is kept.")
 
-    if clicked == "Save & Next →":
+    if clicked == "Save & Next →" and post_to_x:
+        # Built synchronously here (unlike the deferred-to-session-end
+        # path below) since the tweet preview needs a real image to
+        # show before Post/Cancel - the same cost save_journal_entry()
+        # already pays for the single-ticker view's Save button, just
+        # paid here instead of at session end. The result is used for
+        # the real Logbook archive too (chart_image= below), so this
+        # ticker doesn't ALSO get queued into pending_archives and
+        # rendered a second time for nothing.
+        with st.spinner("Building chart for the tweet preview..."):
+            png_bytes = charting.build_archive_snapshot(
+                symbol, entry_point["entry_date"], entry_point["buy_price"], item["entry_label"],
+                datetime.combine(timeutil.today_eastern(), datetime.min.time()),
+                direction=entry_point.get("direction", "LONG"), stop_loss=stop_loss)
+        database.upsert_logbook_entry(conn, symbol, timeutil.today_eastern(), notes=notes, chart_image=png_bytes)
+        database.save_journal_plan(conn, symbol, timeutil.today_eastern(), plan_entry_price, plan_stop_price)
+        if png_bytes is not None:
+            st.session_state["pending_tweet"] = {
+                "symbol": symbol, "image": png_bytes,
+                "caption": twitter_post.truncate_caption(notes), "session_key": "journal_session",
+            }
+            st.rerun()
+        else:
+            st.warning("No price data available to build a chart for the tweet - notes saved, skipping the tweet.")
+            _advance_session(conn, session, queue)
+    elif clicked == "Save & Next →":
         # Notes save instantly; the chart snapshot itself is deferred to
         # _archive_pending_snapshots() at the end of the session - see
         # its own docstring for why (rendering one right now would cost
@@ -1029,7 +1083,22 @@ def render_journal_list_selection(conn):
 
 conn = database.get_connection()
 
-if st.session_state.get("journal_session") is not None:
+pending_tweet = st.session_state.get("pending_tweet")
+if pending_tweet is not None and pending_tweet.get("session_key") == "journal_session":
+    # Takes priority over the normal journal_session dispatch below -
+    # this interstitial is what "Save & Next →" with the Tweet box
+    # checked switches into instead of immediately advancing (see
+    # render_journal_session()'s own note on this) - the session only
+    # actually moves to the next ticker once Post/Cancel resolves it.
+    tweet_result = twitter_post.render_tweet_preview(pending_tweet)
+    if tweet_result == "post":
+        success, message = twitter_post.post_tweet(pending_tweet["image"], pending_tweet["caption"])
+        st.toast(message, icon="✅" if success else "⚠️")
+    if tweet_result in ("post", "cancel"):
+        del st.session_state["pending_tweet"]
+        active_session = st.session_state["journal_session"]
+        _advance_session(conn, active_session, active_session["queue"])
+elif st.session_state.get("journal_session") is not None:
     render_journal_session(conn)
 elif st.session_state.get("journal_selecting"):
     render_journal_list_selection(conn)
