@@ -368,6 +368,8 @@ if "Equity Curve" in visible_sections:
         window_labels = ["1M", "3M", "6M", "YTD", "1Y", "3Y", "All Time"]
         equity_window = st.radio(
             "Window", window_labels, index=3, horizontal=True, key="equity_window")
+        overlay_choice = st.radio(
+            "Overlay", ["None", "SPY", "QQQ"], horizontal=True, key="equity_overlay")
 
         today = pd.Timestamp(timeutil.today_eastern())
         window_cutoffs = {
@@ -412,8 +414,42 @@ if "Equity Curve" in visible_sections:
             y=window_pct.values,
             mode="lines",
             line=dict(color=LINE_COLOR, width=2),
-            hovertemplate="%{x|%b %d, %Y}<br>Cumulative: %{y:+.2f}%<extra></extra>",
+            name="Account", showlegend=overlay_choice != "None",
+            hovertemplate="%{x|%b %d, %Y}<br>Account: %{y:+.2f}%<extra></extra>",
         ))
+
+        # A benchmark overlay - SPY/QQQ's own % price change, rebased to
+        # 0% at the SAME window_start the account's own curve is rebased
+        # to (see window_curve above), so the two lines are directly
+        # comparable at a glance ("am I beating the market over this
+        # stretch") without needing a secondary y-axis the way the raw-
+        # price overlay on Trade Analyzer/Shortlist charts needs - both
+        # curves here are already in the same "% gain" unit.
+        if overlay_choice != "None":
+            # Fetched starting a week before window_start, not exactly
+            # AT it - window_start itself is often a non-trading day
+            # (the YTD default is Jan 1, always a holiday), which would
+            # leave nothing earlier in the series to forward-fill a
+            # baseline from and made .asof(window_start) come back NaN.
+            # Trimmed back to window_start below, after the baseline is
+            # safely known.
+            with st.spinner(f"Fetching {overlay_choice} for comparison..."):
+                benchmark_closes = charting.fetch_daily_closes(
+                    overlay_choice, window_start - pd.Timedelta(days=7), today)
+            benchmark_baseline = benchmark_closes.asof(window_start) if not benchmark_closes.empty else None
+            if benchmark_baseline and not pd.isna(benchmark_baseline):
+                benchmark_pct = (benchmark_closes.loc[window_start:] / benchmark_baseline - 1) * 100
+                equity_chart.add_trace(go.Scatter(
+                    x=benchmark_pct.index,
+                    y=benchmark_pct.values,
+                    mode="lines",
+                    line=dict(color=MUTED_COLOR, width=2, dash="dot"),
+                    name=overlay_choice, showlegend=True,
+                    hovertemplate=f"%{{x|%b %d, %Y}}<br>{overlay_choice}: " + "%{y:+.2f}%<extra></extra>",
+                ))
+            else:
+                st.warning(f"No price data available for {overlay_choice} - showing account curve only.")
+
         st.plotly_chart(charting.style_simple_chart(equity_chart, "% Gain"), theme=None)
 
 # --- Holding period vs. return scatter -------------------------------------
