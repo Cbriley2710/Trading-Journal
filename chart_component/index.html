@@ -60,8 +60,28 @@ ported over unchanged - drawing tools are additive, not a replacement.
     #summary {
         font-size: 0.85rem; font-weight: 600; padding: 6px 10px 0 10px; white-space: nowrap;
     }
+    #chart-wrapper { position: relative; }
     #plotly-chart { width: 100%; }
     #plotly-chart .nsewdrag { cursor: crosshair !important; }
+    #price-crosshair-label {
+        position: absolute;
+        /* left is set dynamically in JS (updatePriceLabel()) to line up
+        with the MA/last-price badges (Plotly annotations anchored at
+        "x domain"=1, i.e. the right edge of the plot's DATA area) -
+        not the far right edge of this whole component, which sits
+        further out past those badges' own margin space. */
+        transform: translateY(-50%);
+        background: var(--accent-color);
+        color: #fff;
+        font-size: 0.75rem;
+        font-weight: 600;
+        padding: 2px 6px;
+        border-radius: 3px;
+        white-space: nowrap;
+        pointer-events: none;
+        display: none;
+        z-index: 10;
+    }
 </style>
 </head>
 <body>
@@ -80,7 +100,10 @@ ported over unchanged - drawing tools are additive, not a replacement.
     <button class="tool-btn" id="clear-all-btn">Clear All</button>
 </div>
 <div id="summary">&nbsp;</div>
-<div id="plotly-chart"></div>
+<div id="chart-wrapper">
+    <div id="plotly-chart"></div>
+    <div id="price-crosshair-label"></div>
+</div>
 <script src="https://cdn.plot.ly/plotly-2.35.3.min.js"></script>
 <script>
 (function() {
@@ -408,6 +431,90 @@ ported over unchanged - drawing tools are additive, not a replacement.
         if (!indices.length) return;
         Plotly.restyle(gd, {y: newYs}, indices);
     }
+
+    // ---- Crosshair price label - a floating badge on the right edge
+    // that follows the mouse vertically, showing the price the
+    // horizontal crosshair line (spikesnap="cursor" in charting.py's
+    // build_figure()) is currently sitting at. Plotly has no built-in
+    // way to show this - `yaxis.showspikes` just draws the line, it
+    // doesn't label it - so this reads the mouse position directly and
+    // does the pixel-to-price conversion by hand, matching how
+    // repositionMarkers() above already reaches into gd._fullLayout
+    // for axis internals.
+    //
+    // Deliberately a plain `mousemove` listener, not Plotly's own
+    // plotly_hover event: hovermode="x" (see build_figure()) only
+    // reports points at the nearest bar's X, snapped to actual trace
+    // values - it can't tell us the exact price under the cursor's Y,
+    // which is what spikesnap="cursor" means the drawn line itself is
+    // actually following.
+    //
+    // priceLabel lives OUTSIDE #plotly-chart (a sibling in
+    // #chart-wrapper, not a child) on purpose - Plotly.purge(gd) above
+    // wipes out everything inside #plotly-chart on every re-init
+    // (switching Timeframe, a Chart Settings change), which would
+    // silently delete this element and break the label on the very
+    // next chart load if it lived inside there instead.
+    var priceLabel = document.getElementById("price-crosshair-label");
+
+    // The MA/last-price badges' real rendered left edge - where this
+    // label needs to start too so it sits inline with (and can overlap)
+    // them. NOT computed as gd._fullLayout._size.l + .w ("x domain"=1
+    // in plot-internal units): that consistently measured ~80px to the
+    // right of where those badges actually render for this figure's
+    // secondary-y subplot setup (make_subplots(specs=[[{"secondary_y":
+    // True}], [{}]]) in charting.py - present on every chart, whether
+    // or not an overlay ticker is actually plotted), a gap confirmed by
+    // comparing computed vs. actual getBoundingClientRect() live rather
+    // than trusting the math. Reading a real badge's own rendered
+    // position sidesteps needing to know exactly why that gap exists.
+    function badgeLeftEdge() {
+        var groups = gd.querySelectorAll("g.annotation");
+        for (var i = 0; i < groups.length; i++) {
+            // Badges are the only annotations whose text is a plain
+            // number ("326.30") - "Stop"'s label and the big ticker
+            // watermark text aren't, and sit at different x positions.
+            if (!isNaN(parseFloat(groups[i].textContent))) {
+                return groups[i].getBoundingClientRect().left;
+            }
+        }
+        return null;
+    }
+
+    function updatePriceLabel(event) {
+        var priceAxis = gd._fullLayout && gd._fullLayout.yaxis;
+        if (!priceAxis || !priceAxis.range || priceAxis._offset === undefined) {
+            priceLabel.style.display = "none";
+            return;
+        }
+        var gdRect = gd.getBoundingClientRect();
+        var localY = event.clientY - gdRect.top;
+        var axisTop = priceAxis._offset, axisBottom = priceAxis._offset + priceAxis._length;
+        if (localY < axisTop || localY > axisBottom) {
+            // Outside the price row entirely (over the volume row, the
+            // toolbar, etc.) - nothing meaningful to show.
+            priceLabel.style.display = "none";
+            return;
+        }
+        var left = badgeLeftEdge();
+        if (left === null) {
+            priceLabel.style.display = "none";
+            return;
+        }
+        // Price axis pixels run top-to-bottom as HIGH-to-LOW (range[1]
+        // at the top), the opposite direction of the fraction below.
+        var fractionFromTop = (localY - axisTop) / priceAxis._length;
+        var price = priceAxis.range[1] - fractionFromTop * (priceAxis.range[1] - priceAxis.range[0]);
+
+        priceLabel.textContent = formatPrice(price);
+        priceLabel.style.top = localY + "px";
+        priceLabel.style.left = (left - gdRect.left) + "px";
+        priceLabel.style.background = THEME.accent;
+        priceLabel.style.display = "block";
+    }
+
+    gd.addEventListener("mousemove", updatePriceLabel);
+    gd.addEventListener("mouseleave", function() { priceLabel.style.display = "none"; });
 
     function barKey(x) {
         var s = String(x).replace("T", " ");
