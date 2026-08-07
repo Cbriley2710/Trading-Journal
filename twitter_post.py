@@ -82,14 +82,23 @@ def post_tweet(image_bytes, caption_text):
         auth = tweepy.OAuth1UserHandler(api_key, api_secret, access_token, access_secret)
         v1_api = tweepy.API(auth)
         media = v1_api.media_upload(filename="chart.png", file=io.BytesIO(image_bytes))
+    except Exception as exc:
+        # Split from the create_tweet() call below on purpose: a 403 here
+        # means the *image upload* step failed (commonly a free-tier X API
+        # plan, which doesn't include the v1.1 media endpoint tweepy.API
+        # uses), a 403 below means the *tweet text* step failed (commonly
+        # the developer app being set to Read-only instead of Read+Write).
+        # One shared except swallowed which step actually broke.
+        return False, f"Could not upload chart image to X: {exc}"
 
+    try:
         client = tweepy.Client(
             consumer_key=api_key, consumer_secret=api_secret,
             access_token=access_token, access_token_secret=access_secret,
         )
         client.create_tweet(text=caption_text, media_ids=[media.media_id])
     except Exception as exc:
-        return False, f"Could not post to X: {exc}"
+        return False, f"Could not post tweet text to X: {exc}"
 
     return True, "Posted to X."
 
