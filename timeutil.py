@@ -89,3 +89,37 @@ def expected_last_trading_day():
     if reference_date.weekday() == 6:  # Sunday
         return reference_date - timedelta(days=2)
     return reference_date
+
+
+def today_market_has_closed():
+    """
+    True once today's regular trading session has closed - False on a
+    weekend (nothing closes "today" specifically) or any time before
+    4:30pm Eastern on a weekday. The 30-minute buffer past the literal
+    4:00pm close matches this project's other post-close jobs (see
+    warm_price_cache.py's own ~4:30pm ET schedule) - Yahoo Finance's
+    own data isn't necessarily finalized the instant the closing bell
+    rings.
+
+    NOT the same question expected_last_trading_day() answers (that
+    one seriously means "which trading day should already have SOME
+    completed close, treating an in-progress today as not it yet" -
+    used for cache freshness, where a live in-progress "today" IS
+    valid/wanted during market hours). This one exists specifically
+    for nightly_archive.py's automatic Logbook archiving: even once
+    expected_last_trading_day() resolves to today (any time from
+    9:30am on), Yahoo Finance already has A row for today the whole
+    time the market's open - live-updating, not finalized - so the
+    existing "does the data reach the target day" completeness check
+    in charting.build_archive_snapshot() can't tell "today, still
+    trading" apart from "today, actually closed" on its own. A real
+    bug found in production: GitHub Actions' scheduling delay landed
+    this job at 10:48am ET one day, well after 9:30am, so it archived
+    every tracked ticker's chart using that morning's still-forming
+    candle as if it were the day's final one - hours before the
+    session was actually over.
+    """
+    now = now_eastern()
+    if now.weekday() >= 5:
+        return False
+    return (now.hour, now.minute) >= (16, 30)

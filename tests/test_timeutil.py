@@ -61,3 +61,42 @@ def test_exactly_at_market_open_returns_the_same_day(monkeypatch):
 def test_one_minute_before_market_open_rolls_back(monkeypatch):
     _set_now(monkeypatch, datetime(2026, 8, 5, 9, 29))  # Wednesday 9:29am
     assert timeutil.expected_last_trading_day() == date(2026, 8, 4)
+
+
+# --- today_market_has_closed() ---
+# Added after a real production bug: GitHub Actions' scheduling delay
+# landed the nightly archiving job at 10:48am ET (well after market
+# open) one day, and it archived every tracked ticker's chart using
+# that morning's still-forming candle as if it were the day's final
+# one - expected_last_trading_day() had already resolved to "today" by
+# then (correctly, per that function's own job), but nothing was
+# checking whether today's SESSION had actually finished yet.
+
+def test_mid_morning_market_has_not_closed(monkeypatch):
+    _set_now(monkeypatch, datetime(2026, 8, 7, 10, 48))  # Friday 10:48am - the real incident
+    assert timeutil.today_market_has_closed() is False
+
+
+def test_just_before_close_has_not_closed(monkeypatch):
+    _set_now(monkeypatch, datetime(2026, 8, 7, 15, 59))  # Friday 3:59pm
+    assert timeutil.today_market_has_closed() is False
+
+
+def test_right_at_close_has_not_closed_yet_within_buffer(monkeypatch):
+    _set_now(monkeypatch, datetime(2026, 8, 7, 16, 0))  # Friday 4:00pm - inside the 30min buffer
+    assert timeutil.today_market_has_closed() is False
+
+
+def test_after_the_close_buffer_has_closed(monkeypatch):
+    _set_now(monkeypatch, datetime(2026, 8, 7, 16, 30))  # Friday 4:30pm
+    assert timeutil.today_market_has_closed() is True
+
+
+def test_late_evening_has_closed(monkeypatch):
+    _set_now(monkeypatch, datetime(2026, 8, 7, 22, 0))  # Friday 10pm
+    assert timeutil.today_market_has_closed() is True
+
+
+def test_weekend_never_has_closed(monkeypatch):
+    _set_now(monkeypatch, datetime(2026, 8, 8, 20, 0))  # Saturday 8pm
+    assert timeutil.today_market_has_closed() is False

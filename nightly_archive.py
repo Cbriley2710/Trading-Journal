@@ -69,24 +69,40 @@ def main():
     # expected_last_trading_day()'s own docstring for the full story.
     today = timeutil.expected_last_trading_day()
 
-    # archive_all() already guards each individual ticker (see
-    # archiving.py) - this outer try/except is a second layer, for
-    # anything that could fail before/between those per-ticker guards
-    # (e.g. the initial get_open_positions()/get_watchlist() calls),
-    # so send_daily_report_fallback() below always gets a chance to run
-    # even in that case.
-    try:
-        # skip_if_already_archived=True: this job runs every night
-        # regardless of whether today ended up being a new trading day
-        # (weekends included) - once a trading day's charts are already
-        # correctly archived, a later run targeting that SAME day (e.g.
-        # Saturday and Sunday night both still resolve to Friday - see
-        # expected_last_trading_day()) has nothing new to do and would
-        # just be spending Yahoo Finance calls/render time re-creating
-        # an identical image.
-        archiving.archive_all(conn, today, skip_if_already_archived=True)
-    except Exception as exc:
-        print(f"Chart archiving failed unexpectedly: {exc}")
+    # If `today` resolved to literally today (any time from 9:30am
+    # Eastern on - see expected_last_trading_day()), that does NOT mean
+    # today's session is actually over: GitHub Actions' scheduling
+    # delay for this job is unpredictable enough that it's landed well
+    # into market hours before (10:48am ET one day, confirmed in
+    # production) - see timeutil.today_market_has_closed()'s own
+    # docstring for the real bug this caused (every tracked ticker
+    # archived using that morning's still-forming candle as if it were
+    # final). Skipping here just means there's nothing new to do YET -
+    # a later run (hopefully after close) picks it up instead.
+    if today == timeutil.today_eastern() and not timeutil.today_market_has_closed():
+        print(
+            f"Today's session hasn't closed yet ({timeutil.now_eastern():%I:%M %p} ET) - "
+            "nothing new to archive, skipping until a later run."
+        )
+    else:
+        # archive_all() already guards each individual ticker (see
+        # archiving.py) - this outer try/except is a second layer, for
+        # anything that could fail before/between those per-ticker guards
+        # (e.g. the initial get_open_positions()/get_watchlist() calls),
+        # so send_daily_report_fallback() below always gets a chance to run
+        # even in that case.
+        try:
+            # skip_if_already_archived=True: this job runs every night
+            # regardless of whether today ended up being a new trading day
+            # (weekends included) - once a trading day's charts are already
+            # correctly archived, a later run targeting that SAME day (e.g.
+            # Saturday and Sunday night both still resolve to Friday - see
+            # expected_last_trading_day()) has nothing new to do and would
+            # just be spending Yahoo Finance calls/render time re-creating
+            # an identical image.
+            archiving.archive_all(conn, today, skip_if_already_archived=True)
+        except Exception as exc:
+            print(f"Chart archiving failed unexpectedly: {exc}")
 
     send_daily_report_fallback(conn, today)
 
