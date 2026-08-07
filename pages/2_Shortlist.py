@@ -295,8 +295,13 @@ def render_journal_box(conn, symbol, key_prefix, submit_labels=("Save",), on_wat
 
         if plan_col is not None:
             with plan_col:
-                with st.container(border=True):
-                    st.caption("Plan for next setup")
+                # Collapsed by default when there's no saved plan yet -
+                # expanded automatically once one exists, so the box
+                # doesn't take up visual space for every single ticker
+                # in a session, but still surfaces an already-set plan
+                # without an extra click.
+                has_saved_plan = existing_plan_entry is not None or existing_plan_stop is not None
+                with st.expander("Plan for next setup", expanded=has_saved_plan):
                     entry_sub, stop_sub = st.columns(2)
                     entry_input = entry_sub.number_input(
                         "Entry $", min_value=0.0, step=0.01, format="%.2f",
