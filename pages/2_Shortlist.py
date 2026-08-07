@@ -1010,7 +1010,7 @@ def render_journal_session(conn):
         if png_bytes is not None:
             st.session_state["pending_tweet"] = {
                 "symbol": symbol, "image": png_bytes,
-                "caption": twitter_post.truncate_caption(notes), "session_key": "journal_session",
+                "caption": twitter_post.build_caption(notes, symbol), "session_key": "journal_session",
             }
             st.rerun()
         else:

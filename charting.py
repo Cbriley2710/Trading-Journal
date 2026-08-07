@@ -267,11 +267,13 @@ DEFAULT_SETTINGS = {
 ARCHIVE_VISIBLE_TRADING_DAYS = 110
 
 # Extra blank space added after today's candle, as a fraction of
-# ARCHIVE_VISIBLE_TRADING_DAYS, so today sits at roughly 3/4 of the way
-# across the chart instead of jammed against the right edge. 1/3 of the
-# real candles gives about 25% extra blank width - e.g. 110 real candles
-# plus ~37 blank ones puts today at 110/147, about 75%.
-ARCHIVE_RIGHT_MARGIN_FRACTION = 1 / 3
+# ARCHIVE_VISIBLE_TRADING_DAYS, so today doesn't sit jammed right against
+# the right edge. Was 1/3 (~2 empty months trailing off the chart) until
+# the user asked for just a little breathing room instead, once that
+# much blank space started showing up in tweeted chart images - 1/12
+# gives about 8% extra width, e.g. 110 real candles plus ~9 blank ones
+# puts today at 110/119, about 92%.
+ARCHIVE_RIGHT_MARGIN_FRACTION = 1 / 12
 
 
 def parse_ma_periods(text):
@@ -1045,7 +1047,7 @@ def build_archive_snapshot(symbol, entry_date, buy_price, entry_label, as_of, di
 
     fig, _fit_payload = build_figure(
         symbol, history, entry_point, settings, entry_label=entry_label, visible_range=visible_range,
-        stop_loss=stop_loss, drawings=drawings)
+        stop_loss=stop_loss, drawings=drawings, include_summary_header=True)
     return render_png(fig)
 
 
@@ -1141,7 +1143,8 @@ def build_trade_review_snapshot(
 
     fig, _fit_payload = build_figure(
         symbol, history, entry_point, settings, entry_label=entry_label, interval=interval,
-        visible_range=(visible_start, visible_end), drawings=drawings, show_earnings_markers=True)
+        visible_range=(visible_start, visible_end), drawings=drawings, show_earnings_markers=True,
+        include_summary_header=True)
     return render_png(fig)
 
 
@@ -1285,10 +1288,66 @@ def _format_trade_moment(dt):
     return f"{dt:%b %d, %Y %I:%M %p}"
 
 
+def _format_price_for_header(value):
+    if value is None or pd.isna(value):
+        return "N/A"
+    return f"{value:,.2f}"
+
+
+def _format_volume_for_header(value):
+    if value is None or pd.isna(value):
+        return "N/A"
+    if value >= 1e9:
+        return f"{value / 1e9:.1f}B"
+    if value >= 1e6:
+        return f"{value / 1e6:.1f}M"
+    if value >= 1e3:
+        return f"{value / 1e3:.1f}K"
+    return f"{value:,.0f}"
+
+
+def _summary_header_text(history, symbol, interval_label):
+    """
+    A frozen, one-line version of the interactive chart's own live
+    "summary line" (see chart_component/index.html's showDailyInfo()) -
+    same wording/format, but for the LAST real bar in `history` instead
+    of whichever bar the cursor is hovering, since a static PNG has no
+    cursor. Used for the archived Logbook/Trade Review/tweet images,
+    which otherwise had no way to show what the chart itself is looking
+    at (which day, and its OHLC) - only the interactive version had that.
+    """
+    last = history.iloc[-1]
+    date_str = f"{last.name.strftime('%b')} {last.name.day}, {last.name.year}"
+    parts = [
+        f"{symbol} · {interval_label}",
+        date_str,
+        f"O {_format_price_for_header(last['Open'])}",
+        f"H {_format_price_for_header(last['High'])}",
+        f"L {_format_price_for_header(last['Low'])}",
+        f"C {_format_price_for_header(last['Close'])}",
+        f"V {_format_volume_for_header(last['Volume'])}",
+    ]
+    text = "    ".join(parts)
+
+    if len(history) >= 2:
+        prev_close = history.iloc[-2]["Close"]
+        chg = last["Close"] - prev_close
+        pct = (chg / prev_close) * 100 if prev_close else None
+        if pct is not None and not pd.isna(pct):
+            sign = "+" if chg >= 0 else ""
+            color = GOOD_COLOR if chg >= 0 else CRITICAL_COLOR
+            text += (
+                f"    <span style='color:{color}'>"
+                f"Chg {sign}{_format_price_for_header(chg)}"
+                f"    Chg% {sign}{pct:.2f}%</span>"
+            )
+    return text
+
+
 def build_figure(symbol, history, entry_point, settings, overlay_history=None, entry_label="Entry", interval="1d",
                   visible_range=None, stop_loss=None, drawings=None, bake_arrow_traces=True,
                   show_earnings_flag=False, conn=None, plan_entry_price=None, plan_stop_price=None,
-                  show_earnings_markers=False):
+                  show_earnings_markers=False, include_summary_header=False):
     """
     Builds the go.Figure for a price chart: candlestick or line, moving
     averages, an entry marker (plus an exit marker and connecting line if
@@ -1321,6 +1380,16 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
     time" (see database.get_logbook_entry()'s plan_entry_price/
     plan_stop_price and pages/2_Shortlist.py's render_journal_box()).
     Independent of each other - either can be set without the other.
+
+    `include_summary_header`, if True, bakes a frozen version of the
+    interactive chart's live OHLC "summary line" (symbol/date/O/H/L/C/
+    V/Chg) into the figure itself, for the LAST bar in `history` - see
+    _summary_header_text(). Only the static-image builders
+    (build_archive_snapshot(), build_trade_review_snapshot()) pass True;
+    the interactive chart leaves this False since it already shows this
+    same information in its own live, cursor-driven summary line
+    (chart_component/index.html's #summary div) - baking it into the
+    figure too would just duplicate it.
 
     `drawings`, if given, is a symbol's saved line/rect/arrow_up/
     arrow_down shapes (see database.get_drawings()). Line/rect ones are
@@ -1678,13 +1747,29 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
             bgcolor=ma_colors[period], borderpad=3,
         )
 
+    if include_summary_header:
+        # Anchored at the SAME paper y (1.02) the MA legend uses just
+        # below, then lifted a fixed PIXEL amount above it via yshift -
+        # deliberately not a bigger fraction like y=1.15 instead: paper
+        # y/1 here spans the full two-row (price+volume) figure, so a
+        # fraction that looks like a small nudge is actually a much
+        # bigger pixel jump than it looks, and one attempt at y=1.15
+        # pushed the text entirely off the top of the canvas (invisible,
+        # not just misplaced) - a pixel-based yshift keeps this exact
+        # regardless of how tall the combined subplot domain is.
+        fig.add_annotation(
+            x=0, xref="paper", y=1.02, yref="paper", xanchor="left", yanchor="bottom", yshift=22,
+            text=_summary_header_text(history, symbol, INTERVAL_LABELS.get(interval, interval)),
+            showarrow=False, align="left", font=dict(color=CHART_TEXT_COLOR, size=13),
+        )
+
     fig.update_layout(
         height=560,
         # The overlay's own axis needs room on the left when it's
         # active; otherwise there's nothing over there since the price
         # scale itself lives on the right (see the side="right" update
         # below) - no need to reserve the space when it's not in use.
-        margin=dict(t=30, b=35, l=50 if has_overlay else 10, r=60),
+        margin=dict(t=55 if include_summary_header else 30, b=35, l=50 if has_overlay else 10, r=60),
         yaxis_title="Price ($)",
         yaxis_type="log" if settings["price_scale"] == "Log" else "linear",
         plot_bgcolor=CHART_BACKGROUND,

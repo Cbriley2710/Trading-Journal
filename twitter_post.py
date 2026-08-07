@@ -55,6 +55,22 @@ def truncate_caption(text, limit=TWEET_CHAR_LIMIT):
     return cutoff.rstrip() + "…"
 
 
+def build_caption(notes, symbol, limit=TWEET_CHAR_LIMIT):
+    """
+    The full caption text to post: `notes` truncated (see
+    truncate_caption()) with a trailing "$SYMBOL" cashtag always
+    appended - e.g. notes="Broke out of the range" + symbol="NVDA"
+    -> "Broke out of the range $NVDA". Space for the cashtag is
+    reserved BEFORE truncating notes, so the cashtag always survives
+    even when notes alone would already hit the limit - a plain
+    truncate_caption(notes) + cashtag afterward could silently cut the
+    cashtag off the end.
+    """
+    cashtag = f"${symbol}"
+    truncated_notes = truncate_caption(notes, limit=limit - len(cashtag) - 1)
+    return f"{truncated_notes} {cashtag}".strip()
+
+
 def post_tweet(image_bytes, caption_text):
     """
     Posts one tweet: `image_bytes` (PNG, already rendered by

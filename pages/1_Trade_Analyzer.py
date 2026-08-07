@@ -610,7 +610,7 @@ def render_review_session(conn):
             if tweet_image is not None:
                 st.session_state["pending_tweet"] = {
                     "symbol": trade["symbol"], "image": tweet_image,
-                    "caption": twitter_post.truncate_caption(notes), "session_key": "review_session",
+                    "caption": twitter_post.build_caption(notes, trade["symbol"]), "session_key": "review_session",
                 }
                 st.rerun()
             else:
