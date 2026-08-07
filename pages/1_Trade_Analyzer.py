@@ -42,6 +42,7 @@ import auth
 import charting
 import database
 import nav
+import session_keys as sk
 import twitter_post
 import ui
 from analyze_trades import review_session_summary, trade_label, trade_stats
@@ -274,7 +275,7 @@ def _jump_review_session(conn, session, new_index):
     session["pending_snapshots"] = {}
     database.save_review_session_progress(
         conn, session["report_id"], _queue_natural_keys(session["queue"]), session["index"])
-    st.session_state["_scroll_to_review_anchor"] = True
+    st.session_state[sk.SCROLL_TO_REVIEW_ANCHOR] = True
     st.rerun()
 
 
@@ -287,7 +288,7 @@ def _advance_review_session(conn, session):
     session["pending_snapshots"] = {}
     database.save_review_session_progress(
         conn, session["report_id"], _queue_natural_keys(session["queue"]), session["index"])
-    st.session_state["_scroll_to_review_anchor"] = True
+    st.session_state[sk.SCROLL_TO_REVIEW_ANCHOR] = True
     st.rerun()
 
 
@@ -394,7 +395,7 @@ def render_review_session(conn):
     entry before the first trade and after the last (see
     _render_review_intro()/_render_review_outro() above).
     """
-    session = st.session_state["review_session"]
+    session = st.session_state[sk.REVIEW_SESSION]
     queue, index = session["queue"], session["index"]
 
     report = database.get_review_report(conn, session["report_id"])
@@ -422,14 +423,14 @@ def render_review_session(conn):
                 "See the Logbook page's Trade Reviews section to browse or email it."
             )
         if st.button("Back to Trade Analyzer"):
-            del st.session_state["review_session"]
+            del st.session_state[sk.REVIEW_SESSION]
             st.rerun()
         return
 
     trade = queue[index]
     key_prefix = f"review_{index}"
     anchor_id = f"{key_prefix}_review_anchor"
-    should_scroll = st.session_state.pop("_scroll_to_review_anchor", False)
+    should_scroll = st.session_state.pop(sk.SCROLL_TO_REVIEW_ANCHOR, False)
 
     # Whatever's already saved for THIS trade in THIS report, if
     # anything - non-None whenever the trade-jump dropdown or Previous
@@ -456,7 +457,7 @@ def render_review_session(conn):
         # Deliberately does NOT clear the persisted progress - exiting
         # mid-session is exactly the "didn't finish" case the saved
         # progress is for, so it's still there to resume next time.
-        del st.session_state["review_session"]
+        del st.session_state[sk.REVIEW_SESSION]
         st.rerun()
     st.progress(index / len(queue))
 
@@ -608,9 +609,9 @@ def render_review_session(conn):
             # itself had no price data (daily_snapshot is None above).
             tweet_image = pending.get("Daily") or next(iter(pending.values()), None)
             if tweet_image is not None:
-                st.session_state["pending_tweet"] = {
+                st.session_state[sk.PENDING_TWEET] = {
                     "symbol": trade["symbol"], "image": tweet_image,
-                    "caption": twitter_post.build_caption(notes, trade["symbol"]), "session_key": "review_session",
+                    "caption": twitter_post.build_caption(notes, trade["symbol"]), "session_key": sk.REVIEW_SESSION,
                 }
                 st.rerun()
             else:
@@ -670,25 +671,25 @@ def render_review_selection(conn, trades):
     preset_cols = st.columns([2, 2, 3])
     week_choice = preset_cols[0].selectbox(
         "Jump to a week", options=["Choose a week..."] + list(week_options), key="review_week_picker")
-    if week_choice != "Choose a week..." and week_choice != st.session_state.get("_applied_week_choice"):
-        st.session_state["_applied_week_choice"] = week_choice
+    if week_choice != "Choose a week..." and week_choice != st.session_state.get(sk.APPLIED_WEEK_CHOICE):
+        st.session_state[sk.APPLIED_WEEK_CHOICE] = week_choice
         monday = week_options[week_choice]
-        st.session_state["review_date_range"] = clamped_preset(monday, monday + timedelta(days=6))
-        st.session_state["_review_precheck"] = True
+        st.session_state[sk.REVIEW_DATE_RANGE] = clamped_preset(monday, monday + timedelta(days=6))
+        st.session_state[sk.REVIEW_PRECHECK] = True
         st.rerun()
 
     month_choice = preset_cols[1].selectbox(
         "Jump to a month", options=["Choose a month..."] + list(month_options), key="review_month_picker")
-    if month_choice != "Choose a month..." and month_choice != st.session_state.get("_applied_month_choice"):
-        st.session_state["_applied_month_choice"] = month_choice
+    if month_choice != "Choose a month..." and month_choice != st.session_state.get(sk.APPLIED_MONTH_CHOICE):
+        st.session_state[sk.APPLIED_MONTH_CHOICE] = month_choice
         first_of_month = month_options[month_choice]
-        st.session_state["review_date_range"] = clamped_preset(first_of_month, month_end(first_of_month))
-        st.session_state["_review_precheck"] = True
+        st.session_state[sk.REVIEW_DATE_RANGE] = clamped_preset(first_of_month, month_end(first_of_month))
+        st.session_state[sk.REVIEW_PRECHECK] = True
         st.rerun()
 
     date_range = st.date_input(
         "Filter by exit date", value=(min_exit, max_exit),
-        min_value=min_exit, max_value=max_exit, key="review_date_range",
+        min_value=min_exit, max_value=max_exit, key=sk.REVIEW_DATE_RANGE,
     )
 
     range_start = range_end = None
@@ -713,7 +714,7 @@ def render_review_selection(conn, trades):
     # its own key is instantiated anyway (see the key comment just
     # below), which is exactly this same one render - after that,
     # Streamlit remembers whatever the user actually left it at.
-    precheck = st.session_state.pop("_review_precheck", False)
+    precheck = st.session_state.pop(sk.REVIEW_PRECHECK, False)
 
     def _checkbox_key(i, t):
         return f"review_pick_{i}_{_trade_key(t)}"
@@ -749,15 +750,15 @@ def render_review_selection(conn, trades):
     action_cols = st.columns([1, 1, 3])
     if action_cols[0].button("Begin Review", type="primary", disabled=not checked):
         report_id = database.create_review_report(conn, range_start, range_end)
-        st.session_state["review_session"] = {
+        st.session_state[sk.REVIEW_SESSION] = {
             "report_id": report_id, "queue": checked, "index": 0, "pending_snapshots": {},
         }
         database.save_review_session_progress(conn, report_id, _queue_natural_keys(checked), 0)
-        st.session_state["_scroll_to_review_anchor"] = True
-        del st.session_state["review_selecting"]
+        st.session_state[sk.SCROLL_TO_REVIEW_ANCHOR] = True
+        del st.session_state[sk.REVIEW_SELECTING]
         st.rerun()
     if action_cols[1].button("Cancel"):
-        del st.session_state["review_selecting"]
+        del st.session_state[sk.REVIEW_SELECTING]
         st.rerun()
 
 
@@ -776,8 +777,8 @@ if not trades:
 
 conn = database.get_connection()
 
-pending_tweet = st.session_state.get("pending_tweet")
-if pending_tweet is not None and pending_tweet.get("session_key") == "review_session":
+pending_tweet = st.session_state.get(sk.PENDING_TWEET)
+if pending_tweet is not None and pending_tweet.get("session_key") == sk.REVIEW_SESSION:
     # Takes priority over the normal review_session dispatch below -
     # see render_review_session()'s own note on where this gets set,
     # right at "Save & Next →" with the Tweet box checked. The session
@@ -787,11 +788,11 @@ if pending_tweet is not None and pending_tweet.get("session_key") == "review_ses
         success, message = twitter_post.post_tweet(pending_tweet["image"], pending_tweet["caption"])
         st.toast(message, icon="✅" if success else "⚠️")
     if tweet_result in ("post", "cancel"):
-        del st.session_state["pending_tweet"]
-        _advance_review_session(conn, st.session_state["review_session"])
-elif st.session_state.get("review_session") is not None:
+        del st.session_state[sk.PENDING_TWEET]
+        _advance_review_session(conn, st.session_state[sk.REVIEW_SESSION])
+elif st.session_state.get(sk.REVIEW_SESSION) is not None:
     render_review_session(conn)
-elif st.session_state.get("review_selecting"):
+elif st.session_state.get(sk.REVIEW_SELECTING):
     render_review_selection(conn, trades)
 else:
     # An unfinished Review Session from earlier (or before the tab was
@@ -807,11 +808,11 @@ else:
             st.info(f"You have an unfinished Review Session ({resume_index + 1} of {len(resumed_queue)}).")
             resume_cols = st.columns([1, 1, 3])
             if resume_cols[0].button("▶ Resume Review", type="primary"):
-                st.session_state["review_session"] = {
+                st.session_state[sk.REVIEW_SESSION] = {
                     "report_id": saved_progress["report_id"], "queue": resumed_queue,
                     "index": resume_index, "pending_snapshots": {},
                 }
-                st.session_state["_scroll_to_review_anchor"] = True
+                st.session_state[sk.SCROLL_TO_REVIEW_ANCHOR] = True
                 st.rerun()
             if resume_cols[1].button("Discard", key="discard_review"):
                 database.delete_review_report(conn, saved_progress["report_id"])
@@ -825,7 +826,7 @@ else:
             database.clear_review_session_progress(conn)
 
     if st.button("🔍 Start Review Session"):
-        st.session_state["review_selecting"] = True
+        st.session_state[sk.REVIEW_SELECTING] = True
         st.rerun()
     st.divider()
 

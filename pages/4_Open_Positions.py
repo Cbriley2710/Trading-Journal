@@ -32,6 +32,7 @@ import charting
 import database
 import ma_strategy
 import nav
+import session_keys as sk
 import timeutil
 from ui import scroll_to_anchor, stat_tile
 
@@ -168,7 +169,7 @@ if positions:
     # st.rerun() below, then land back here (not the page's outer top)
     # on the rerun that follows.
     positions_anchor_id = "open_positions_table_anchor"
-    should_scroll_to_positions = st.session_state.pop("_scroll_to_positions_anchor", False)
+    should_scroll_to_positions = st.session_state.pop(sk.SCROLL_TO_POSITIONS_ANCHOR, False)
     st.markdown(f'<div id="{positions_anchor_id}"></div>', unsafe_allow_html=True)
     if should_scroll_to_positions:
         scroll_to_anchor(positions_anchor_id)
@@ -253,7 +254,7 @@ if positions:
                 # Setting or moving a stop stays one step - there's
                 # nothing to lose by acting on it immediately.
                 database.set_stop_loss(conn, symbol, round(new_stop, 2))
-                st.session_state["_scroll_to_positions_anchor"] = True
+                st.session_state[sk.SCROLL_TO_POSITIONS_ANCHOR] = True
                 st.rerun()
             else:
                 # Clearing a REAL stop (0/blank while one was actually
@@ -265,7 +266,7 @@ if positions:
                 stop_col.caption("Clear stop?")
                 if stop_col.button("Confirm clear", key=f"confirm_clear_stop_{symbol}", width="stretch"):
                     database.delete_stop_loss(conn, symbol)
-                    st.session_state["_scroll_to_positions_anchor"] = True
+                    st.session_state[sk.SCROLL_TO_POSITIONS_ANCHOR] = True
                     st.rerun()
 
         current_mode = e["ma_settings"]["mode"]
@@ -281,7 +282,7 @@ if positions:
                 # numbers rather than a per-ticker override (see
                 # database.get_position_ma_settings()).
                 database.save_position_ma_settings(conn, symbol, mode_value, None, None, None, None, None)
-                st.session_state["_scroll_to_positions_anchor"] = True
+                st.session_state[sk.SCROLL_TO_POSITIONS_ANCHOR] = True
                 st.rerun()
 
         if e["ma_signal"] is not None:

@@ -42,6 +42,7 @@ import auth
 import charting
 import database
 import nav
+import session_keys as sk
 import timeutil
 import trade_review_report
 import ui
@@ -184,8 +185,8 @@ with tab_reviews:
         "you saved for it. Generate a PDF here any time, even for an old one."
     )
 
-    if "review_report_message" in st.session_state:
-        st.info(st.session_state.pop("review_report_message"))
+    if sk.REVIEW_REPORT_MESSAGE in st.session_state:
+        st.info(st.session_state.pop(sk.REVIEW_REPORT_MESSAGE))
 
     review_reports = database.get_review_reports(conn)
     if not review_reports:
@@ -201,7 +202,7 @@ with tab_reviews:
         review_index = st.selectbox(
             "Choose a review report", options=range(len(review_reports)),
             format_func=lambda i: review_report_label(review_reports[i]),
-            key="review_report_picker",
+            key=sk.REVIEW_REPORT_PICKER,
         )
         selected_report_summary = review_reports[review_index]
 
@@ -244,9 +245,9 @@ with tab_reviews:
                 # list is shorter - clearing it resets to the default
                 # (first report) instead of risking an out-of-range
                 # selection.
-                if "review_report_picker" in st.session_state:
-                    del st.session_state["review_report_picker"]
-                st.session_state["review_report_message"] = "Deleted the review report."
+                if sk.REVIEW_REPORT_PICKER in st.session_state:
+                    del st.session_state[sk.REVIEW_REPORT_PICKER]
+                st.session_state[sk.REVIEW_REPORT_MESSAGE] = "Deleted the review report."
                 st.rerun()
 
         report_detail = database.get_review_report(conn, selected_report_summary["id"])

@@ -11,6 +11,8 @@ forgets the gate entirely).
 
 import streamlit as st
 
+import session_keys as sk
+
 
 def check_password():
     """
@@ -19,7 +21,7 @@ def check_password():
     dashboard.py's module docstring) - it's never written in this
     file, so it's never something Git/GitHub would ever see.
     """
-    if st.session_state.get("authenticated"):
+    if st.session_state.get(sk.AUTHENTICATED):
         return True
 
     st.title("Trading Journal")
@@ -27,7 +29,7 @@ def check_password():
 
     if entered:
         if entered == st.secrets.get("DASHBOARD_PASSWORD"):
-            st.session_state["authenticated"] = True
+            st.session_state[sk.AUTHENTICATED] = True
             st.rerun()
         else:
             st.error("Incorrect password.")

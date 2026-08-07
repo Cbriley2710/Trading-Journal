@@ -43,6 +43,7 @@ import charting
 import daily_report
 import database
 import nav
+import session_keys as sk
 import timeutil
 import twitter_post
 import ui
@@ -438,9 +439,9 @@ def render_chart_and_journal(conn, symbol, entry_point, entry_label, key_prefix,
             )
         if remove_from_watchlist:
             database.remove_from_watchlist(conn, symbol)
-            selected = st.session_state.get("watchlist_selected")
+            selected = st.session_state.get(sk.WATCHLIST_SELECTED)
             if selected and selected.get("source") == "watchlist" and selected.get("symbol") == symbol:
-                del st.session_state["watchlist_selected"]
+                del st.session_state[sk.WATCHLIST_SELECTED]
             st.toast(f"Removed {symbol} from its watchlist. Its Logbook history is kept.")
         # Lands back on the chart/journal box (not the page's outer top,
         # above the nav bar and lists) - a plain rerun from a form
@@ -548,8 +549,8 @@ def render_lists_section(conn):
     # A message from the previous button click (add/remove), stashed in
     # session state so it survives the st.rerun() that refreshes the
     # lists - showing it directly before rerunning would lose it.
-    if "watchlist_message" in st.session_state:
-        st.info(st.session_state.pop("watchlist_message"))
+    if sk.WATCHLIST_MESSAGE in st.session_state:
+        st.info(st.session_state.pop(sk.WATCHLIST_MESSAGE))
 
     columns = st.columns(5)
 
@@ -627,7 +628,7 @@ def render_lists_section(conn):
                     )
                     parts.append(f"Moved to {new_name}: {moved_desc}.")
                 if parts:
-                    st.session_state["watchlist_message"] = " ".join(parts)
+                    st.session_state[sk.WATCHLIST_MESSAGE] = " ".join(parts)
                 st.rerun()
 
             if remove_clicked and list_symbols:
@@ -637,11 +638,11 @@ def render_lists_section(conn):
                 else:
                     for sym in list_symbols:
                         database.remove_from_watchlist(conn, sym)
-                    selected = st.session_state.get("watchlist_selected")
+                    selected = st.session_state.get(sk.WATCHLIST_SELECTED)
                     if selected and selected.get("source") == "watchlist" and selected.get("symbol") in list_symbols:
-                        del st.session_state["watchlist_selected"]
+                        del st.session_state[sk.WATCHLIST_SELECTED]
                     del st.session_state[remove_confirm_key]
-                    st.session_state["watchlist_message"] = (
+                    st.session_state[sk.WATCHLIST_MESSAGE] = (
                         f"Cleared {new_name} ({len(list_symbols)} ticker(s)). Their Logbook history is kept."
                     )
                     st.rerun()
@@ -657,7 +658,7 @@ def render_lists_section(conn):
                     if ticker_cols[0].button(
                         entry["symbol"], key=f"wl_{list_id}_{entry['symbol']}", width="stretch",
                     ):
-                        st.session_state["watchlist_selected"] = {"symbol": entry["symbol"], "source": "watchlist"}
+                        st.session_state[sk.WATCHLIST_SELECTED] = {"symbol": entry["symbol"], "source": "watchlist"}
                     # One click, not two - removing a single ticker this
                     # way is common day-to-day list grooming (unlike
                     # "Remove All" above, which stays a two-click confirm
@@ -666,10 +667,10 @@ def render_lists_section(conn):
                     # isn't a real loss - just re-add the ticker.
                     if ticker_cols[1].button("✕", key=f"wlx_{list_id}_{entry['symbol']}"):
                         database.remove_from_watchlist(conn, entry["symbol"])
-                        selected = st.session_state.get("watchlist_selected")
+                        selected = st.session_state.get(sk.WATCHLIST_SELECTED)
                         if selected and selected.get("source") == "watchlist" and selected.get("symbol") == entry["symbol"]:
-                            del st.session_state["watchlist_selected"]
-                        st.session_state["watchlist_message"] = (
+                            del st.session_state[sk.WATCHLIST_SELECTED]
+                        st.session_state[sk.WATCHLIST_MESSAGE] = (
                             f"Removed {entry['symbol']}. Its Logbook history is kept."
                         )
                         st.rerun()
@@ -685,11 +686,11 @@ def render_lists_section(conn):
                 st.caption("No open positions right now.")
             for position in positions:
                 if st.button(position_label(position), key=f"wl_pos_{position['symbol']}", width="stretch"):
-                    st.session_state["watchlist_selected"] = {"symbol": position["symbol"], "source": "position"}
+                    st.session_state[sk.WATCHLIST_SELECTED] = {"symbol": position["symbol"], "source": "position"}
 
     st.divider()
 
-    selected = st.session_state.get("watchlist_selected")
+    selected = st.session_state.get(sk.WATCHLIST_SELECTED)
     if not selected:
         st.caption("Click a ticker above to load its chart and journal.")
         return
@@ -793,7 +794,7 @@ def _advance_session(conn, session, queue):
     """
     session["index"] += 1
     database.save_journal_session_progress(conn, _queue_symbol_pairs(queue), session["index"])
-    st.session_state["_scroll_to_session_anchor"] = True
+    st.session_state[sk.SCROLL_TO_SESSION_ANCHOR] = True
     st.rerun()
 
 
@@ -857,7 +858,7 @@ def _render_todays_thoughts_step(conn, today):
 
     anchor_id = "todays_thoughts_anchor"
     st.markdown(f'<div id="{anchor_id}"></div>', unsafe_allow_html=True)
-    if st.session_state.pop("_scroll_to_session_anchor", False):
+    if st.session_state.pop(sk.SCROLL_TO_SESSION_ANCHOR, False):
         ui.scroll_to_anchor(anchor_id)
 
     st.subheader("Today's Thoughts")
@@ -873,7 +874,7 @@ def _render_todays_thoughts_step(conn, today):
 
     if submitted:
         database.save_daily_journal_note(conn, today, thoughts)
-        st.session_state["_scroll_to_session_anchor"] = True
+        st.session_state[sk.SCROLL_TO_SESSION_ANCHOR] = True
         st.rerun()
 
     return False
@@ -919,7 +920,7 @@ def render_journal_session(conn):
     once-a-day general note (see _render_todays_thoughts_step()) before
     getting into individual tickers.
     """
-    session = st.session_state["journal_session"]
+    session = st.session_state[sk.JOURNAL_SESSION]
     queue, index = session["queue"], session["index"]
 
     if not _render_todays_thoughts_step(conn, timeutil.today_eastern()):
@@ -931,7 +932,7 @@ def render_journal_session(conn):
         st.success(f"Session complete - journaled {len(queue)} ticker(s) today.")
         _send_report_after_session(conn)
         if st.button("Back to Shortlist"):
-            del st.session_state["journal_session"]
+            del st.session_state[sk.JOURNAL_SESSION]
             st.rerun()
         return
 
@@ -939,7 +940,7 @@ def render_journal_session(conn):
     symbol = item["symbol"]
     key_prefix = f"session_{index}"
     anchor_id = f"{key_prefix}_journal_anchor"
-    should_scroll = st.session_state.pop("_scroll_to_session_anchor", False)
+    should_scroll = st.session_state.pop(sk.SCROLL_TO_SESSION_ANCHOR, False)
 
     header_cols = st.columns([5, 1])
     header_cols[0].subheader(f"Reviewing {index + 1} of {len(queue)}: {symbol}")
@@ -947,7 +948,7 @@ def render_journal_session(conn):
         # Deliberately does NOT clear the persisted progress - exiting
         # mid-session is exactly the "didn't finish" case the saved
         # progress is for, so it's still there to resume next time.
-        del st.session_state["journal_session"]
+        del st.session_state[sk.JOURNAL_SESSION]
         st.rerun()
     st.progress(index / len(queue))
 
@@ -1013,9 +1014,9 @@ def render_journal_session(conn):
         database.upsert_logbook_entry(conn, symbol, timeutil.today_eastern(), notes=notes, chart_image=png_bytes)
         database.save_journal_plan(conn, symbol, timeutil.today_eastern(), plan_entry_price, plan_stop_price)
         if png_bytes is not None:
-            st.session_state["pending_tweet"] = {
+            st.session_state[sk.PENDING_TWEET] = {
                 "symbol": symbol, "image": png_bytes,
-                "caption": twitter_post.build_caption(notes, symbol), "session_key": "journal_session",
+                "caption": twitter_post.build_caption(notes, symbol), "session_key": sk.JOURNAL_SESSION,
             }
             st.rerun()
         else:
@@ -1076,20 +1077,20 @@ def render_journal_list_selection(conn):
         if not queue:
             st.info("Nothing to journal in the lists you picked.")
         else:
-            st.session_state["journal_session"] = {"queue": queue, "index": 0}
+            st.session_state[sk.JOURNAL_SESSION] = {"queue": queue, "index": 0}
             database.save_journal_session_progress(conn, _queue_symbol_pairs(queue), 0)
-            st.session_state["_scroll_to_session_anchor"] = True
-            del st.session_state["journal_selecting"]
+            st.session_state[sk.SCROLL_TO_SESSION_ANCHOR] = True
+            del st.session_state[sk.JOURNAL_SELECTING]
             st.rerun()
     if action_cols[1].button("Cancel"):
-        del st.session_state["journal_selecting"]
+        del st.session_state[sk.JOURNAL_SELECTING]
         st.rerun()
 
 
 conn = database.get_connection()
 
-pending_tweet = st.session_state.get("pending_tweet")
-if pending_tweet is not None and pending_tweet.get("session_key") == "journal_session":
+pending_tweet = st.session_state.get(sk.PENDING_TWEET)
+if pending_tweet is not None and pending_tweet.get("session_key") == sk.JOURNAL_SESSION:
     # Takes priority over the normal journal_session dispatch below -
     # this interstitial is what "Save & Next →" with the Tweet box
     # checked switches into instead of immediately advancing (see
@@ -1100,12 +1101,12 @@ if pending_tweet is not None and pending_tweet.get("session_key") == "journal_se
         success, message = twitter_post.post_tweet(pending_tweet["image"], pending_tweet["caption"])
         st.toast(message, icon="✅" if success else "⚠️")
     if tweet_result in ("post", "cancel"):
-        del st.session_state["pending_tweet"]
-        active_session = st.session_state["journal_session"]
+        del st.session_state[sk.PENDING_TWEET]
+        active_session = st.session_state[sk.JOURNAL_SESSION]
         _advance_session(conn, active_session, active_session["queue"])
-elif st.session_state.get("journal_session") is not None:
+elif st.session_state.get(sk.JOURNAL_SESSION) is not None:
     render_journal_session(conn)
-elif st.session_state.get("journal_selecting"):
+elif st.session_state.get(sk.JOURNAL_SELECTING):
     render_journal_list_selection(conn)
 else:
     # An unfinished session from earlier (or before the tab was closed,
@@ -1121,8 +1122,8 @@ else:
             st.info(f"You have an unfinished Journal Session ({resume_index + 1} of {len(resumed_queue)}).")
             resume_cols = st.columns([1, 1, 3])
             if resume_cols[0].button("▶ Resume Session", type="primary"):
-                st.session_state["journal_session"] = {"queue": resumed_queue, "index": resume_index}
-                st.session_state["_scroll_to_session_anchor"] = True
+                st.session_state[sk.JOURNAL_SESSION] = {"queue": resumed_queue, "index": resume_index}
+                st.session_state[sk.SCROLL_TO_SESSION_ANCHOR] = True
                 st.rerun()
             if resume_cols[1].button("Discard"):
                 database.clear_journal_session_progress(conn)
@@ -1134,7 +1135,7 @@ else:
             database.clear_journal_session_progress(conn)
 
     if st.button("📝 Start Journal Session", type="primary"):
-        st.session_state["journal_selecting"] = True
+        st.session_state[sk.JOURNAL_SELECTING] = True
         st.rerun()
     st.divider()
     render_lists_section(conn)
