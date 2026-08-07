@@ -48,8 +48,8 @@ def test_truncate_caption_custom_limit():
     assert result.endswith("…")
 
 
-def test_build_caption_appends_cashtag():
-    assert twitter_post.build_caption("Broke out of the range", "NVDA") == "Broke out of the range $NVDA"
+def test_build_caption_prepends_cashtag():
+    assert twitter_post.build_caption("Broke out of the range", "NVDA") == "$NVDA Broke out of the range"
 
 
 def test_build_caption_with_empty_notes():
@@ -60,4 +60,4 @@ def test_build_caption_cashtag_always_survives_truncation():
     text = "word " * 100  # way over the limit on its own
     result = twitter_post.build_caption(text, "NVDA", limit=50)
     assert len(result) <= 50
-    assert result.endswith("$NVDA")
+    assert result.startswith("$NVDA")
