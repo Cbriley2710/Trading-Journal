@@ -366,9 +366,10 @@ if "Equity Curve" in visible_sections:
         st.warning("No trades match the current filters.")
     else:
         window_labels = ["1M", "3M", "6M", "YTD", "1Y", "3Y", "All Time"]
-        equity_window = st.radio(
+        window_col, overlay_col = st.columns([3, 1])
+        equity_window = window_col.radio(
             "Window", window_labels, index=3, horizontal=True, key="equity_window")
-        overlay_choice = st.radio(
+        overlay_choice = overlay_col.radio(
             "Overlay", ["None", "SPY", "QQQ"], horizontal=True, key="equity_overlay")
 
         today = pd.Timestamp(timeutil.today_eastern())
