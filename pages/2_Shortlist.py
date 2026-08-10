@@ -186,23 +186,28 @@ def render_price_chart(conn, symbol, entry_point, entry_label, key_prefix, stop_
 def render_journal_box(conn, symbol, key_prefix, submit_labels=("Save",), on_watchlist=False,
                         show_tweet_checkbox=False):
     """
-    One row, left to right: yesterday's entry (read-only), today's
+    One row, left to right: the last journal entry (read-only), today's
     entry (a short text box - a journal entry here is usually a
     sentence or two, not a full-width essay box), a Plan Entry/Plan Stop
     pair (watchlist tickers only - see below), the Save/Next/Skip
     button(s) stacked in their own narrow column, and (if `on_watchlist`)
     a compact "remove from watchlist" checkbox - everything in one
-    compact row near the bottom of the chart instead of yesterday's
-    entry sitting in its own full-width block above it, pushing the
-    actual controls further down the screen.
+    compact row near the bottom of the chart instead of the last entry
+    sitting in its own full-width block above it, pushing the actual
+    controls further down the screen.
 
-    Yesterday's entry (if there is one) is shown read-only so you can
-    see what you said before writing today's - otherwise reviewing that
-    means leaving this view for the Logbook. Always rendered inside its
-    own bordered box (a muted "No entry." placeholder when there isn't
-    one) so that column holds a consistent width/position across
-    tickers instead of the row's shape shifting depending on whether
-    yesterday had anything written.
+    The last entry (if there is one) is shown read-only so you can see
+    what you said before writing today's - otherwise reviewing that
+    means leaving this view for the Logbook. It's the last JOURNALING
+    day's entry (see timeutil.last_journaling_day()), not just literal
+    calendar-yesterday - on a Sunday, calendar-yesterday is Saturday,
+    which never has an entry (nothing trades Friday evening or
+    Saturday), so this skips back to Thursday's instead, the most
+    recent day that actually has something written. Always rendered
+    inside its own bordered box (a muted "No entry." placeholder when
+    there isn't one) so that column holds a consistent width/position
+    across tickers instead of the row's shape shifting depending on
+    whether that day had anything written.
 
     Wrapped in a form (rather than a plain text_area + button) for two
     things a plain widget can't do: Ctrl+Enter while typing in the box
@@ -264,9 +269,9 @@ def render_journal_box(conn, symbol, key_prefix, submit_labels=("Save",), on_wat
     existing_plan_entry = existing_entry["plan_entry_price"] if existing_entry else None
     existing_plan_stop = existing_entry["plan_stop_price"] if existing_entry else None
 
-    yesterday = today - timedelta(days=1)
-    yesterday_entry = database.get_logbook_entry(conn, symbol, yesterday)
-    yesterday_notes = yesterday_entry["notes"] if yesterday_entry and yesterday_entry["notes"] else ""
+    last_journal_day = timeutil.last_journaling_day(today)
+    last_journal_entry = database.get_logbook_entry(conn, symbol, last_journal_day)
+    last_journal_notes = last_journal_entry["notes"] if last_journal_entry and last_journal_entry["notes"] else ""
 
     # Computed from the ALREADY-SAVED plan (not whatever's currently in
     # the boxes below, which may be about to clear on this very submit -
@@ -280,15 +285,15 @@ def render_journal_box(conn, symbol, key_prefix, submit_labels=("Save",), on_wat
     plan_entry_price = plan_stop_price = None
     with st.form(key=f"{key_prefix}_{symbol}_journal_form", clear_on_submit=True, border=False):
         if on_watchlist:
-            yesterday_col, box_col, plan_col, button_col, checkbox_col = st.columns([1.3, 1.3, 1.6, 1, 0.6])
+            last_journal_col, box_col, plan_col, button_col, checkbox_col = st.columns([1.3, 1.3, 1.6, 1, 0.6])
         else:
-            yesterday_col, box_col, button_col, checkbox_col = st.columns([2, 2, 1, 0.6])
+            last_journal_col, box_col, button_col, checkbox_col = st.columns([2, 2, 1, 0.6])
             plan_col = None
 
-        with yesterday_col:
+        with last_journal_col:
             with st.container(border=True):
-                st.caption(f"Yesterday's Journal ({yesterday:%m/%d/%Y})")
-                st.write(yesterday_notes.strip() if yesterday_notes.strip() else "No entry.")
+                st.caption(f"Last Entry ({last_journal_day:%a %m/%d})")
+                st.write(last_journal_notes.strip() if last_journal_notes.strip() else "No entry.")
 
         notes = box_col.text_area(
             "Today's Journal", value=existing_notes or "",

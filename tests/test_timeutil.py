@@ -100,3 +100,45 @@ def test_late_evening_has_closed(monkeypatch):
 def test_weekend_never_has_closed(monkeypatch):
     _set_now(monkeypatch, datetime(2026, 8, 8, 20, 0))  # Saturday 8pm
     assert timeutil.today_market_has_closed() is False
+
+
+# --- is_journaling_day() / last_journaling_day() ---
+# Added after a real bug: render_journal_box() showed "yesterday's"
+# journal entry using plain calendar-yesterday, so opening the app on a
+# Sunday always showed "No entry" (calendar-yesterday is Saturday, a
+# day the user never journals) even though a real entry existed from
+# Thursday. Friday is ALSO excluded - the user writes up Friday's
+# session on Sunday, under Sunday's own date, so Friday's date itself
+# never has anything saved under it either.
+
+def test_monday_through_thursday_are_journaling_days():
+    for day in (date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5), date(2026, 8, 6)):  # Mon-Thu
+        assert timeutil.is_journaling_day(day) is True
+
+
+def test_friday_and_saturday_are_not_journaling_days():
+    assert timeutil.is_journaling_day(date(2026, 8, 7)) is False  # Friday
+    assert timeutil.is_journaling_day(date(2026, 8, 8)) is False  # Saturday
+
+
+def test_sunday_is_a_journaling_day():
+    # Friday's session gets written up here, under Sunday's own date.
+    assert timeutil.is_journaling_day(date(2026, 8, 9)) is True
+
+
+def test_last_journaling_day_on_sunday_skips_back_to_thursday():
+    assert timeutil.last_journaling_day(date(2026, 8, 9)) == date(2026, 8, 6)  # Sun -> Thu
+
+
+def test_last_journaling_day_on_monday_is_sunday():
+    # Sunday already has an entry (Friday's session, written up then) -
+    # unaffected by this fix, matches plain calendar-yesterday.
+    assert timeutil.last_journaling_day(date(2026, 8, 10)) == date(2026, 8, 9)  # Mon -> Sun
+
+
+def test_last_journaling_day_on_a_midweek_day_is_plain_yesterday():
+    assert timeutil.last_journaling_day(date(2026, 8, 5)) == date(2026, 8, 4)  # Wed -> Tue
+
+
+def test_last_journaling_day_on_saturday_skips_back_to_thursday():
+    assert timeutil.last_journaling_day(date(2026, 8, 8)) == date(2026, 8, 6)  # Sat -> Thu

@@ -255,21 +255,22 @@ def _first_of_next_month(any_date_in_month):
 def _daily_journal_pct(window, context):
     """% of days in the window with a Today's Thoughts journal entry -
     Friday and Saturday are excluded from both the numerator and the
-    denominator (the user journals Friday's market action on Sunday, so
-    there's nothing to write on Friday or Saturday itself). Today
-    itself is ALSO excluded - the journal entry for today gets written
-    tonight, so counting today as a miss before the day is even over
-    would unfairly drag the % down; window["end"] is always today (see
-    resolve_window()'s "Monthly" case), so window["end"] - 1 day is
-    "yesterday" without this function needing its own clock read. None
-    if the window has no countable days at all (e.g. it's the 1st of
-    the month, or the whole window is Friday/Saturday)."""
+    denominator (see timeutil.is_journaling_day() - the user journals
+    Friday's market action on Sunday, so there's nothing to write on
+    Friday or Saturday itself). Today itself is ALSO excluded - the
+    journal entry for today gets written tonight, so counting today as
+    a miss before the day is even over would unfairly drag the % down;
+    window["end"] is always today (see resolve_window()'s "Monthly"
+    case), so window["end"] - 1 day is "yesterday" without this
+    function needing its own clock read. None if the window has no
+    countable days at all (e.g. it's the 1st of the month, or the whole
+    window is Friday/Saturday)."""
     journaled_dates = context["journaled_dates"]
     total = done = 0
     d = window["start"]
     last_countable_day = window["end"] - timedelta(days=1)
     while d <= last_countable_day:
-        if d.weekday() not in (4, 5):  # Friday=4, Saturday=5
+        if timeutil.is_journaling_day(d):
             total += 1
             if d in journaled_dates:
                 done += 1

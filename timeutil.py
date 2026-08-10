@@ -91,6 +91,42 @@ def expected_last_trading_day():
     return reference_date
 
 
+def is_journaling_day(day):
+    """
+    False for Friday and Saturday - the user doesn't write a journal
+    entry on either (Friday's session gets written up on Sunday
+    instead, and there's no Saturday session to journal about). True
+    for every other day, Sunday included, since a Sunday entry is where
+    Friday's session actually gets covered.
+
+    This is the SAME Friday/Saturday exclusion goals.py's own
+    _daily_journal_pct() already uses when counting which days count
+    toward the "Daily Journal %" goal - kept here as one shared
+    definition so a future change to which days get excluded only has
+    to happen in one place.
+    """
+    return day.weekday() not in (4, 5)  # Friday=4, Saturday=5
+
+
+def last_journaling_day(day):
+    """
+    The most recent date strictly before `day` that's a real journaling
+    day (see is_journaling_day() above) - e.g. called with a Sunday,
+    this skips back over Saturday AND Friday to land on Thursday, since
+    Friday's own date never has an entry saved under it (that session
+    gets journaled ON Sunday, under Sunday's date, not Friday's).
+
+    Used for showing "your last journal entry" as context while writing
+    today's - plain calendar-yesterday would land on Saturday (or
+    Friday, if called on a Saturday) and always show "No entry", even
+    though a real entry exists a day or two further back.
+    """
+    d = day - timedelta(days=1)
+    while not is_journaling_day(d):
+        d -= timedelta(days=1)
+    return d
+
+
 def today_market_has_closed():
     """
     True once today's regular trading session has closed - False on a
