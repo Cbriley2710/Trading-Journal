@@ -52,7 +52,7 @@ LINE_COLOR = charting.CATEGORICAL_PALETTE[0]  # the single line in the equity cu
 MUTED_COLOR = charting.MUTED_COLOR  # neutral labels (stat tile captions) and the zero-line on charts
 BASELINE_COLOR = charting.MUTED_COLOR
 
-st.set_page_config(page_title="Trading Journal", page_icon="📈", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Trading Journal", page_icon="ðŸ“ˆ", layout="wide", initial_sidebar_state="collapsed")
 
 if not auth.check_password():
     st.stop()
@@ -110,7 +110,7 @@ if trades_df.empty:
     st.page_link(
         "pages/5_Settings.py",
         label="Import your trade history to get started.",
-        icon="↗️",
+        icon="â†—ï¸",
     )
     st.stop()
 
@@ -228,121 +228,6 @@ if "Account Performance" in visible_sections:
 
     st.divider()
 
-def build_mark_to_market_curve(trades_records, open_positions, daily_index):
-    """
-    Builds a day-by-day account P/L series across every day in
-    `daily_index` - a real, mark-to-market equity curve, not just "credit
-    the whole gain to the day a position was sold." A CLOSED trade
-    contributes its actual day-by-day paper gain/loss (from real daily
-    closing prices - see charting.fetch_daily_closes()) for every day it
-    was open, then its real realized profit_loss (not a price estimate)
-    from its exit day onward. A currently OPEN position contributes that
-    same day-by-day paper gain/loss all the way through to today.
-
-    Without this, a position held for two months but sold in one big win
-    showed up as a single vertical jump on the day it was sold - real,
-    accurate P/L, but visually misleading, since none of the gain was
-    actually "made" that one day; it built up gradually while the
-    position was open. This spreads it back out across the days it
-    actually happened.
-
-    `trades_records`/`open_positions` are plain dict records (from
-    DataFrame.to_dict("records") / database.get_open_positions()) rather
-    than DataFrames, since this loops row by row anyway.
-
-    Fetches each symbol's price history ONCE (the widest window any of
-    its trades/positions need), not once per trade - a symbol traded
-    many times used to mean that many separate calls to charting.
-    fetch_daily_closes(), each with a different exact (symbol, start,
-    end) cache key, so its st.cache_data caching almost never actually
-    hit for a repeatedly-traded symbol. Slicing each trade's own
-    [entry, exit] window out of the one wider fetch afterward gives
-    numerically identical results (the wider fetch's forward-fill can
-    only ever have MORE valid data behind any given day, never less),
-    just far fewer live Yahoo Finance calls.
-    """
-    # .normalize() (here and at every other pd.Timestamp(...) conversion
-    # in this function) drops entry_date/date down to midnight before
-    # using it as a lookup key against daily_index/symbol_closes, which
-    # are always midnight-stamped, one entry per calendar day. Without
-    # it, a SnapTrade-sourced trade's now-real execution time (see
-    # database.get_trades()) would shift every day-level slice/lookup
-    # below by however many hours past midnight the trade happened -
-    # e.g. losing an entire day's contribution off either end of a
-    # .loc[entry:exit_] slice, or writing the real booked profit_loss
-    # onto a timestamp that doesn't exist in the index instead of
-    # actually overwriting the exit day's estimate (see below).
-    symbol_windows = {}
-    for trade in trades_records:
-        entry, exit_ = pd.Timestamp(trade["entry_date"]).normalize(), pd.Timestamp(trade["date"]).normalize()
-        lo, hi = symbol_windows.get(trade["symbol"], (entry, exit_))
-        symbol_windows[trade["symbol"]] = (min(lo, entry), max(hi, exit_))
-    for position in open_positions:
-        entry = pd.Timestamp(position["entry_date"]).normalize()
-        lo, hi = symbol_windows.get(position["symbol"], (entry, daily_index.max()))
-        symbol_windows[position["symbol"]] = (min(lo, entry), max(hi, daily_index.max()))
-
-    symbol_closes = {
-        symbol: charting.fetch_daily_closes(symbol, window_start, window_end)
-        for symbol, (window_start, window_end) in symbol_windows.items()
-    }
-
-    total = pd.Series(0.0, index=daily_index)
-
-    for trade in trades_records:
-        entry = pd.Timestamp(trade["entry_date"]).normalize()
-        exit_ = pd.Timestamp(trade["date"]).normalize()
-        is_short = trade["direction"] == "SHORT"
-        entry_price = trade["sell_price"] if is_short else trade["buy_price"]
-
-        closes = symbol_closes[trade["symbol"]].loc[entry:exit_]
-        if closes.empty:
-            # No price history for this stretch - fall back to crediting
-            # the whole gain on the exit day rather than losing it entirely.
-            contribution = pd.Series(0.0, index=daily_index)
-            contribution.loc[contribution.index >= exit_] = trade["profit_loss"]
-            total += contribution
-            continue
-
-        # Converts the real, un-adjusted price/quantity from the actual
-        # trade into the SAME "today's share count" terms fetch_daily_
-        # closes() already returns - see split_adjustment_factor()'s own
-        # docstring for why comparing them directly (without this) can
-        # show a fake, enormous one-day "gain" for a stock that later
-        # did a split (SQQQ's reverse splits are what surfaced this).
-        factor = charting.split_adjustment_factor(trade["symbol"], entry)
-        adjusted_entry_price = entry_price / factor
-        adjusted_quantity = trade["quantity"] * factor
-
-        paper_pl = (closes - adjusted_entry_price) * adjusted_quantity * (-1 if is_short else 1)
-        # The exit day's own estimate (from that day's closing price) is
-        # replaced with the REAL booked profit_loss - a real fill price
-        # during the day can differ slightly from that day's close, and
-        # this is the one number we actually know for certain. Reindexing
-        # onto the full daily_index and forward-filling then carries that
-        # real number forward through every day after (today included).
-        paper_pl.loc[exit_] = trade["profit_loss"]
-        contribution = paper_pl.reindex(daily_index).ffill().fillna(0)
-        total += contribution
-
-    for position in open_positions:
-        entry = pd.Timestamp(position["entry_date"]).normalize()
-        is_short = position["direction"] == "SHORT"
-
-        closes = symbol_closes[position["symbol"]].loc[entry:daily_index.max()]
-        if closes.empty:
-            continue
-
-        factor = charting.split_adjustment_factor(position["symbol"], entry)
-        adjusted_entry_price = position["avg_price"] / factor
-        adjusted_quantity = position["quantity"] * factor
-
-        paper_pl = (closes - adjusted_entry_price) * adjusted_quantity * (-1 if is_short else 1)
-        total += paper_pl.reindex(daily_index).ffill().fillna(0)
-
-    return total
-
-
 # --- Equity curve ---------------------------------------------------------
 # Shown as % gain, not $ - so it lines up with the Account Performance
 # tiles above, which use the same convention: every % is against the
@@ -350,7 +235,7 @@ def build_mark_to_market_curve(trades_records, open_positions, daily_index):
 # (we don't have historical account-VALUE snapshots to build a true
 # equity curve from - see Account Performance's own comment above for
 # why - but we DO have real daily PRICE history, which is what
-# build_mark_to_market_curve() above uses). Each window re-starts its
+# charting.build_mark_to_market_curve() uses). Each window re-starts its
 # cumulative total at 0% at the start of that window, so "1 Year" shows
 # the gain made DURING the last year, not the whole account's history
 # compressed into one window.
@@ -392,7 +277,7 @@ if "Equity Curve" in visible_sections:
         # re-fetch anything, it just re-slices numbers already in hand.
         # .normalize() so a real (non-midnight) entry_date doesn't shift
         # every day in full_daily_index by that same offset - see
-        # build_mark_to_market_curve()'s own note on this same pattern.
+        # charting.build_mark_to_market_curve()'s own note on this same pattern.
         full_start = filtered["entry_date"].min().normalize()
         full_daily_index = pd.date_range(start=full_start, end=today, freq="D")
         open_positions_for_curve = [
@@ -400,7 +285,7 @@ if "Equity Curve" in visible_sections:
         ]
 
         with st.spinner("Fetching price history for the equity curve..."):
-            full_curve_pl = build_mark_to_market_curve(
+            full_curve_pl = charting.build_mark_to_market_curve(
                 filtered.to_dict("records"), open_positions_for_curve, full_daily_index)
 
         window_start = max(cutoff, full_daily_index.min()) if cutoff is not None else full_daily_index.min()
@@ -571,8 +456,8 @@ if "Equity Allocation" in visible_sections:
 # --- Expectancy -----------------------------------------------------------
 # The average $ result of a single trade - mathematically identical to
 # filtered["profit_loss"].mean(), just split into the two halves that
-# combine to make it up: how much winning trades contribute (win rate ×
-# average win) and how much losing trades take back (loss rate × average
+# combine to make it up: how much winning trades contribute (win rate Ã—
+# average win) and how much losing trades take back (loss rate Ã— average
 # loss, already negative). Splitting it out this way is what makes an
 # expectancy chart useful rather than just another number - the same net
 # result can come from winning often but small, or rarely but big, and
@@ -590,8 +475,8 @@ if "Expectancy" in visible_sections:
         # code/math box instead of plain "$142.50" text (caught by
         # actually loading the page, not just reading the source).
         f"On average, every trade nets **\\${expectancy:,.2f}** - "
-        f"a {win_rate:.1f}% win rate × \\${avg_win:,.2f} average win, "
-        f"offset by a {loss_rate_pct:.1f}% loss rate × \\${avg_loss:,.2f} average loss."
+        f"a {win_rate:.1f}% win rate Ã— \\${avg_win:,.2f} average win, "
+        f"offset by a {loss_rate_pct:.1f}% loss rate Ã— \\${avg_loss:,.2f} average loss."
     )
 
     expectancy_labels = ["Win Contribution", "Loss Contribution", "Expectancy (Net)"]
@@ -668,7 +553,7 @@ st.divider()
 st.header("Trades")
 
 table = filtered.sort_values("date", ascending=False).copy()
-table["Result"] = table["profit_loss"].apply(lambda v: "✅ Win" if v > 0 else "❌ Loss" if v < 0 else "Breakeven")
+table["Result"] = table["profit_loss"].apply(lambda v: "âœ… Win" if v > 0 else "âŒ Loss" if v < 0 else "Breakeven")
 # For a SHORT trade the stored buy_price is the COVER (the exit event)
 # and sell_price is the short sale (the entry event) - the opposite
 # pairing from a long trade (see match_trades_lifo in analyze_trades.py).

@@ -33,6 +33,8 @@ Met/Not Met.
 import calendar
 from datetime import timedelta
 
+import pandas as pd
+
 import charting
 import database
 import timeutil
@@ -104,25 +106,79 @@ GOAL_LIBRARY = [
         "timeframes": ["Monthly", "Yearly"], "metric": "equity_growth_pct", "unit": "%",
         "direction": "higher_is_better",
         "data_source": (
-            "Realized P/L closed since the start of the period ÷ Jan 1 account value baseline "
-            "(Settings page) - same convention as the Dashboard's own Account Performance tiles"
+            "Mark-to-market P/L since the start of the period ÷ Jan 1 account value baseline "
+            "(Settings page) - realized P/L from trades closed in the period PLUS open positions' "
+            "day-by-day paper gain/loss over that same period (today's price vs. price at the start "
+            "of the period, not vs. entry), same method as the Dashboard's own Equity Curve chart, "
+            "so this always agrees with what that chart shows for the same window"
         ),
     },
     {
         "key": "equity_growth_vs_spy", "name": "Equity Growth vs SPY", "category": "Statistical",
         "timeframes": ["Monthly", "Yearly"], "metric": "equity_growth_vs_spy", "unit": "%",
         "direction": "higher_is_better",
-        "data_source": "Equity Growth % minus SPY's own % price change over the same period (excess return)",
+        "data_source": "Equity Growth % (mark-to-market, see above) minus SPY's own % price change over the same period (excess return)",
     },
     {
         "key": "equity_growth_vs_qqq", "name": "Equity Growth vs QQQ", "category": "Statistical",
         "timeframes": ["Monthly", "Yearly"], "metric": "equity_growth_vs_qqq", "unit": "%",
         "direction": "higher_is_better",
-        "data_source": "Equity Growth % minus QQQ's own % price change over the same period (excess return)",
+        "data_source": "Equity Growth % (mark-to-market, see above) minus QQQ's own % price change over the same period (excess return)",
     },
 ]
 
 GOAL_BY_KEY = {g["key"]: g for g in GOAL_LIBRARY}
+
+
+def _make_mark_to_market_pl_since(trades, open_positions):
+    """
+    Returns a `window_start -> float or None` function: the account's
+    REAL mark-to-market P/L change from window_start through today -
+    realized P/L from trades that closed in that span, plus open
+    positions' day-by-day paper gain/loss over that SAME span (today's
+    price vs. window_start's price, not vs. entry - a position opened
+    before window_start only counts the part of its move that happened
+    DURING the window). Reuses charting.build_mark_to_market_curve(),
+    the exact math the Dashboard's Equity Curve chart already uses, so
+    a tracked Equity Growth goal always agrees with what that chart
+    shows for the same window instead of drifting apart the way a
+    realized-P/L-only number would.
+
+    The underlying day-by-day curve is expensive to build (fetches
+    price history for every symbol ever traded/held) but doesn't depend
+    on which window is being asked about, so it's built at most ONCE
+    per returned function (cached in the `_curve` closure cell below)
+    and reused across every Equity Growth/vs SPY/vs QQQ goal tracked in
+    the same page render, not rebuilt per goal.
+
+    Returned as a function (not computed eagerly here) for the same
+    reason build_context()'s "fetch_period_return_pct" is: most page
+    renders won't have an Equity Growth goal tracked at all, so this
+    only pays for the price fetch when one actually is - and tests can
+    swap in a fake without touching the network, see tests/test_goals.py.
+    """
+    _curve = {}
+
+    def mark_to_market_pl_since(window_start):
+        if "value" not in _curve:
+            if not trades and not open_positions:
+                _curve["value"] = None
+            else:
+                starts = [t["entry_date"] for t in trades] + [p["entry_date"] for p in open_positions]
+                full_start = pd.Timestamp(min(starts)).normalize()
+                today = pd.Timestamp(timeutil.today_eastern())
+                daily_index = pd.date_range(start=full_start, end=today, freq="D")
+                _curve["value"] = charting.build_mark_to_market_curve(trades, open_positions, daily_index)
+        curve = _curve["value"]
+        if curve is None:
+            return None
+        window_start_ts = max(pd.Timestamp(window_start), curve.index.min())
+        baseline = curve.asof(window_start_ts)
+        if baseline is None or pd.isna(baseline):
+            return None
+        return curve.iloc[-1] - baseline
+
+    return mark_to_market_pl_since
 
 
 def build_context(conn):
@@ -130,25 +186,28 @@ def build_context(conn):
     Everything a metric function might need, fetched once per page
     render rather than once per tracked goal.
 
-    "fetch_period_return_pct" is stored as a function reference (not
-    called here) rather than pre-fetching every benchmark/timeframe
-    combination up front - most page renders won't have every Equity
-    Growth vs SPY/QQQ goal tracked at once, so this only pays for a
-    live price fetch for whichever ones actually are. Injected this way
-    (not called directly from charting.py inside the metric functions
-    below) so tests can swap in a fake without touching the network -
-    see tests/test_goals.py.
+    "fetch_period_return_pct" and "mark_to_market_pl_since" are stored
+    as function references (not called here) rather than pre-fetching
+    every benchmark/timeframe combination up front - most page renders
+    won't have every Equity Growth/vs SPY/vs QQQ goal tracked at once,
+    so this only pays for a live price fetch for whichever ones
+    actually are. Injected this way (not called directly from
+    charting.py inside the metric functions below) so tests can swap in
+    a fake without touching the network - see tests/test_goals.py.
     """
     today = timeutil.today_eastern()
     year_start = today.replace(month=1, day=1)
+    trades = sorted(database.get_trades(conn), key=lambda t: t["date"])
+    open_positions = database.get_open_positions(conn)
     return {
-        "trades": sorted(database.get_trades(conn), key=lambda t: t["date"]),
+        "trades": trades,
         "journaled_dates": database.get_journal_note_dates(conn, year_start, today),
         "reviewed_trade_keys": database.get_reviewed_trade_keys(conn),
         "jan1_balance": database.get_account_value(conn),
         "conn": conn,
         "fetch_period_return_pct": charting.fetch_period_return_pct,
-        "open_positions": database.get_open_positions(conn),
+        "mark_to_market_pl_since": _make_mark_to_market_pl_since(trades, open_positions),
+        "open_positions": open_positions,
         "stop_losses": database.get_all_stop_losses(conn),
         "stop_loss_events": database.get_stop_loss_events(conn),
     }
@@ -357,18 +416,23 @@ def _reward_risk_ratio(window, context):
 
 
 def _equity_growth_pct(window, context):
-    """Realized P/L closed since the start of the period, as a % of the
-    Jan 1 account value baseline - the SAME convention (period P/L ÷
-    Jan1 baseline, not the fully-calculated current value) already used
-    by the Dashboard's own Account Performance tiles, deliberately kept
-    consistent rather than re-deriving a different "growth" number here
-    (dividing by current value instead of Jan1 baseline was a real bug
-    there once - it self-inflates as the year goes on). None if no Jan
-    1 baseline has been set (Dashboard's Account Settings)."""
+    """Mark-to-market P/L since the start of the period, as a % of the
+    Jan 1 account value baseline - realized P/L from trades closed in
+    the period PLUS open positions' day-by-day paper gain/loss over
+    that same period (see build_context()'s "mark_to_market_pl_since"),
+    so a position you're still holding counts too, not just ones
+    already closed. Same ÷ Jan1-baseline convention (not the fully-
+    calculated current value) already used by the Dashboard's own
+    Account Performance tiles - dividing by current value instead was a
+    real bug there once, it self-inflates as the year goes on. None if
+    no Jan 1 baseline has been set (Dashboard's Account Settings), or
+    there's no price data reaching back to the start of the period."""
     jan1_balance = context.get("jan1_balance")
     if not jan1_balance:
         return None
-    period_pl = database.get_realized_pl_since(context["conn"], window["start"])
+    period_pl = context["mark_to_market_pl_since"](window["start"])
+    if period_pl is None:
+        return None
     return period_pl / jan1_balance * 100
 
 

@@ -5,6 +5,7 @@ against hand-built context dicts, no real database needed.
 """
 from datetime import date, datetime
 
+import pandas as pd
 import pytest
 
 import goals
@@ -288,23 +289,35 @@ def test_reward_risk_ratio_ignores_trades_outside_window():
     assert goals._reward_risk_ratio(window, context) == pytest.approx(10.0 / 5.0)
 
 
-def test_equity_growth_pct_basic(monkeypatch):
-    monkeypatch.setattr(goals.database, "get_realized_pl_since", lambda conn, start: 5000.0)
-    context = {"jan1_balance": 100000.0, "conn": None}
+def test_equity_growth_pct_basic():
+    # 5000.0 mark-to-market P/L since the window start - see
+    # goals._make_mark_to_market_pl_since() for what a real one does
+    # (realized P/L from closed trades + open positions' paper P/L
+    # change over the window); faked here so this test doesn't need a
+    # real database or live price history.
+    context = {"jan1_balance": 100000.0, "conn": None, "mark_to_market_pl_since": lambda start: 5000.0}
     window = {"start": date(2026, 1, 1), "end": date(2026, 8, 5)}
     assert goals._equity_growth_pct(window, context) == 5.0
 
 
 def test_equity_growth_pct_none_without_jan1_balance():
-    context = {"jan1_balance": None, "conn": None}
+    context = {"jan1_balance": None, "conn": None, "mark_to_market_pl_since": lambda start: 5000.0}
     window = {"start": date(2026, 1, 1), "end": date(2026, 8, 5)}
     assert goals._equity_growth_pct(window, context) is None
 
 
-def test_equity_growth_vs_spy_excess_return(monkeypatch):
-    monkeypatch.setattr(goals.database, "get_realized_pl_since", lambda conn, start: 5000.0)
+def test_equity_growth_pct_none_when_curve_unavailable():
+    """No trade/position history (or no price data reaching back to the
+    window start) to build a mark-to-market curve from - unknown, not 0."""
+    context = {"jan1_balance": 100000.0, "conn": None, "mark_to_market_pl_since": lambda start: None}
+    window = {"start": date(2026, 1, 1), "end": date(2026, 8, 5)}
+    assert goals._equity_growth_pct(window, context) is None
+
+
+def test_equity_growth_vs_spy_excess_return():
     context = {
         "jan1_balance": 100000.0, "conn": None,
+        "mark_to_market_pl_since": lambda start: 5000.0,
         "fetch_period_return_pct": lambda symbol, start: 3.0 if symbol == "SPY" else None,
     }
     window = {"start": date(2026, 1, 1), "end": date(2026, 8, 5)}
@@ -312,14 +325,14 @@ def test_equity_growth_vs_spy_excess_return(monkeypatch):
     assert goals._equity_growth_vs_spy(window, context) == pytest.approx(2.0)
 
 
-def test_equity_growth_vs_qqq_none_when_benchmark_unavailable(monkeypatch):
+def test_equity_growth_vs_qqq_none_when_benchmark_unavailable():
     """A failed/rate-limited price fetch for the benchmark (see
     charting.fetch_period_return_pct()'s own None case) must not crash
     or silently show 0 - the whole goal is unknown until that data's
     available."""
-    monkeypatch.setattr(goals.database, "get_realized_pl_since", lambda conn, start: 5000.0)
     context = {
         "jan1_balance": 100000.0, "conn": None,
+        "mark_to_market_pl_since": lambda start: 5000.0,
         "fetch_period_return_pct": lambda symbol, start: None,
     }
     window = {"start": date(2026, 1, 1), "end": date(2026, 8, 5)}
@@ -329,10 +342,57 @@ def test_equity_growth_vs_qqq_none_when_benchmark_unavailable(monkeypatch):
 def test_equity_growth_vs_benchmark_none_without_jan1_balance():
     context = {
         "jan1_balance": None, "conn": None,
+        "mark_to_market_pl_since": lambda start: 5000.0,
         "fetch_period_return_pct": lambda symbol, start: 3.0,
     }
     window = {"start": date(2026, 1, 1), "end": date(2026, 8, 5)}
     assert goals._equity_growth_vs_spy(window, context) is None
+
+
+def test_mark_to_market_pl_since_uses_change_from_window_start(monkeypatch):
+    """The whole point of mark-to-market-P/L over realized-P/L-only: an
+    open position's gain built up BEFORE the window shouldn't count -
+    only the slice of the curve from window_start onward should."""
+    monkeypatch.setattr(goals.timeutil, "today_eastern", lambda: date(2026, 8, 5))
+    daily_index = pd.date_range(start="2026-07-01", end="2026-08-05", freq="D")
+    # A curve that's already worth 1000 by 7/11 (built up 7/1-7/10, outside
+    # the window below) then climbs another 500 through today.
+    curve = pd.Series(1000.0, index=daily_index)
+    curve.loc["2026-07-11":] += pd.Series(
+        range(len(daily_index[daily_index >= pd.Timestamp("2026-07-11")])),
+        index=daily_index[daily_index >= pd.Timestamp("2026-07-11")], dtype=float,
+    )
+    monkeypatch.setattr(goals.charting, "build_mark_to_market_curve", lambda trades, positions, idx: curve)
+
+    trade = _trade_with_pl("AAPL", date(2026, 7, 1), date(2026, 7, 10), 100.0, 110.0, 1000.0)
+    fn = goals._make_mark_to_market_pl_since([trade], [])
+    result = fn(date(2026, 7, 11))
+    assert result == pytest.approx(curve.iloc[-1] - curve.asof(pd.Timestamp("2026-07-11")))
+    assert result == pytest.approx(len(daily_index[daily_index >= pd.Timestamp("2026-07-11")]) - 1)
+
+
+def test_mark_to_market_pl_since_builds_curve_once_per_call_regardless_of_window(monkeypatch):
+    """The expensive part (fetching price history) must not re-run for
+    every goal/window - see _make_mark_to_market_pl_since()'s own note
+    on why the curve is cached in its closure."""
+    monkeypatch.setattr(goals.timeutil, "today_eastern", lambda: date(2026, 8, 5))
+    daily_index = pd.date_range(start="2026-07-01", end="2026-08-05", freq="D")
+    curve = pd.Series(range(len(daily_index)), index=daily_index, dtype=float)
+    calls = []
+    monkeypatch.setattr(
+        goals.charting, "build_mark_to_market_curve",
+        lambda trades, positions, idx: calls.append(1) or curve,
+    )
+    trade = _trade_with_pl("AAPL", date(2026, 7, 1), date(2026, 7, 10), 100.0, 110.0, 1000.0)
+    fn = goals._make_mark_to_market_pl_since([trade], [])
+    fn(date(2026, 7, 1))
+    fn(date(2026, 7, 15))
+    assert len(calls) == 1
+
+
+def test_mark_to_market_pl_since_none_with_no_trades_or_positions():
+    fn = goals._make_mark_to_market_pl_since([], [])
+    assert fn(date(2026, 7, 1)) is None
 
 
 def test_status_zone_higher_is_better():

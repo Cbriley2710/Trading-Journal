@@ -830,6 +830,127 @@ def get_calculated_account_value(conn):
     return jan1_balance + deposits_this_year + realized_pl_this_year + total_unrealized_pl_now
 
 
+def build_mark_to_market_curve(trades_records, open_positions, daily_index):
+    """
+    Builds a day-by-day account P/L series across every day in
+    `daily_index` - a real, mark-to-market equity curve, not just "credit
+    the whole gain to the day a position was sold." A CLOSED trade
+    contributes its actual day-by-day paper gain/loss (from real daily
+    closing prices - see fetch_daily_closes() below) for every day it
+    was open, then its real realized profit_loss (not a price estimate)
+    from its exit day onward. A currently OPEN position contributes that
+    same day-by-day paper gain/loss all the way through to today.
+
+    Without this, a position held for two months but sold in one big win
+    showed up as a single vertical jump on the day it was sold - real,
+    accurate P/L, but visually misleading, since none of the gain was
+    actually "made" that one day; it built up gradually while the
+    position was open. This spreads it back out across the days it
+    actually happened.
+
+    `trades_records`/`open_positions` are plain dict records (from
+    DataFrame.to_dict("records") / database.get_open_positions()) rather
+    than DataFrames, since this loops row by row anyway.
+
+    Fetches each symbol's price history ONCE (the widest window any of
+    its trades/positions need), not once per trade - a symbol traded
+    many times used to mean that many separate calls to fetch_daily_
+    closes(), each with a different exact (symbol, start, end) cache
+    key, so its st.cache_data caching almost never actually hit for a
+    repeatedly-traded symbol. Slicing each trade's own [entry, exit]
+    window out of the one wider fetch afterward gives numerically
+    identical results (the wider fetch's forward-fill can only ever have
+    MORE valid data behind any given day, never less), just far fewer
+    live Yahoo Finance calls.
+
+    Shared by the Dashboard's own Equity Curve chart and goals.py's
+    Equity Growth goals (see goals.build_context()'s
+    "mark_to_market_pl_since") so both read the account's performance
+    the exact same way - moved here from dashboard.py for that reason,
+    rather than goals.py growing its own second copy of this math.
+    """
+    # .normalize() (here and at every other pd.Timestamp(...) conversion
+    # in this function) drops entry_date/date down to midnight before
+    # using it as a lookup key against daily_index/symbol_closes, which
+    # are always midnight-stamped, one entry per calendar day. Without
+    # it, a SnapTrade-sourced trade's now-real execution time (see
+    # database.get_trades()) would shift every day-level slice/lookup
+    # below by however many hours past midnight the trade happened -
+    # e.g. losing an entire day's contribution off either end of a
+    # .loc[entry:exit_] slice, or writing the real booked profit_loss
+    # onto a timestamp that doesn't exist in the index instead of
+    # actually overwriting the exit day's estimate (see below).
+    symbol_windows = {}
+    for trade in trades_records:
+        entry, exit_ = pd.Timestamp(trade["entry_date"]).normalize(), pd.Timestamp(trade["date"]).normalize()
+        lo, hi = symbol_windows.get(trade["symbol"], (entry, exit_))
+        symbol_windows[trade["symbol"]] = (min(lo, entry), max(hi, exit_))
+    for position in open_positions:
+        entry = pd.Timestamp(position["entry_date"]).normalize()
+        lo, hi = symbol_windows.get(position["symbol"], (entry, daily_index.max()))
+        symbol_windows[position["symbol"]] = (min(lo, entry), max(hi, daily_index.max()))
+
+    symbol_closes = {
+        symbol: fetch_daily_closes(symbol, window_start, window_end)
+        for symbol, (window_start, window_end) in symbol_windows.items()
+    }
+
+    total = pd.Series(0.0, index=daily_index)
+
+    for trade in trades_records:
+        entry = pd.Timestamp(trade["entry_date"]).normalize()
+        exit_ = pd.Timestamp(trade["date"]).normalize()
+        is_short = trade["direction"] == "SHORT"
+        entry_price = trade["sell_price"] if is_short else trade["buy_price"]
+
+        closes = symbol_closes[trade["symbol"]].loc[entry:exit_]
+        if closes.empty:
+            # No price history for this stretch - fall back to crediting
+            # the whole gain on the exit day rather than losing it entirely.
+            contribution = pd.Series(0.0, index=daily_index)
+            contribution.loc[contribution.index >= exit_] = trade["profit_loss"]
+            total += contribution
+            continue
+
+        # Converts the real, un-adjusted price/quantity from the actual
+        # trade into the SAME "today's share count" terms fetch_daily_
+        # closes() already returns - see split_adjustment_factor()'s own
+        # docstring for why comparing them directly (without this) can
+        # show a fake, enormous one-day "gain" for a stock that later
+        # did a split (SQQQ's reverse splits are what surfaced this).
+        factor = split_adjustment_factor(trade["symbol"], entry)
+        adjusted_entry_price = entry_price / factor
+        adjusted_quantity = trade["quantity"] * factor
+
+        paper_pl = (closes - adjusted_entry_price) * adjusted_quantity * (-1 if is_short else 1)
+        # The exit day's own estimate (from that day's closing price) is
+        # replaced with the REAL booked profit_loss - a real fill price
+        # during the day can differ slightly from that day's close, and
+        # this is the one number we actually know for certain. Reindexing
+        # onto the full daily_index and forward-filling then carries that
+        # real number forward through every day after (today included).
+        paper_pl.loc[exit_] = trade["profit_loss"]
+        contribution = paper_pl.reindex(daily_index).ffill().fillna(0)
+        total += contribution
+
+    for position in open_positions:
+        entry = pd.Timestamp(position["entry_date"]).normalize()
+        is_short = position["direction"] == "SHORT"
+
+        closes = symbol_closes[position["symbol"]].loc[entry:daily_index.max()]
+        if closes.empty:
+            continue
+
+        factor = split_adjustment_factor(position["symbol"], entry)
+        adjusted_entry_price = position["avg_price"] / factor
+        adjusted_quantity = position["quantity"] * factor
+
+        paper_pl = (closes - adjusted_entry_price) * adjusted_quantity * (-1 if is_short else 1)
+        total += paper_pl.reindex(daily_index).ffill().fillna(0)
+
+    return total
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_daily_closes(symbol, start, end):
     """
