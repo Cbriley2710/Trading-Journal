@@ -1205,7 +1205,24 @@ def build_archive_snapshot(symbol, entry_date, buy_price, entry_label, as_of, di
     # the live Tweet flow, a clear message and no chart image; for the
     # nightly job, the entry is simply retried on its next run once
     # the real data is ready.
-    if history.index[-1].date() != as_of.date():
+    #
+    # Only enforced when as_of's own day is ALREADY supposed to have a
+    # finished close (as_of.date() <= expected_last_trading_day()) -
+    # another real production bug this same check used to cause: the
+    # Shortlist page's Save button and Journal Session both archive
+    # using as_of=today's literal date, even for a pre-market or
+    # intraday session run before today's close, not just an evening
+    # one. Demanding today's FINAL candle in that case asks for
+    # something that, by definition, doesn't exist yet - every same-day
+    # archive attempted before the close came back None (silently
+    # missing chart, then a Daily Report with none of today's charts in
+    # it) for that reason alone, nothing to do with the Yahoo
+    # publish-lag this check actually exists to catch. When as_of is
+    # still-open today, this accepts whatever's most recently available
+    # instead - today's own still-forming candle if the market's open,
+    # or yesterday's if it's pre-market - the same live view the
+    # interactive chart already shows during the day.
+    if as_of.date() <= timeutil.expected_last_trading_day() and history.index[-1].date() != as_of.date():
         return None
 
     entry_point = {"entry_date": entry_date, "buy_price": buy_price, "direction": direction} if buy_price is not None \
