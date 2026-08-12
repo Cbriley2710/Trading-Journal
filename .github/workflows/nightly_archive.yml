@@ -48,6 +48,21 @@ jobs:
           ARCHIVE_EMAIL_RECIPIENTS: ${{ secrets.ARCHIVE_EMAIL_RECIPIENTS }}
         run: python nightly_archive.py
 
+      # A real incident: this whole job runs nightly_archive.py TWICE
+      # back-to-back, self then friend, with nothing pacing Yahoo
+      # Finance requests ACROSS the two runs (each run's own per-ticker
+      # calls are paced now - see archiving.py's PAUSE_BETWEEN_TICKERS_
+      # SECONDS - but that resets at the start of each script). If the
+      # self run above already used up Yahoo's rate-limit budget for a
+      # stretch, the friend run below - always second - used to walk
+      # straight into requests still getting rate-limited, and quietly
+      # archived nothing for the night (the job still "succeeded" and
+      # still emailed a report, just with no charts in it). A flat 30s
+      # pause here gives that window a chance to clear before the
+      # second run starts.
+      - name: Pause before the friend run
+        run: sleep 30
+
       # Same script, same repo, but pointed at a second person's own
       # database and email via their own set of repository secrets
       # (prefixed FRIEND_) - this is what lets one shared app/repo run

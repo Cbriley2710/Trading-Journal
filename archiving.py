@@ -10,11 +10,25 @@ whatever's already there - doing everything the nightly job would
 have done, on demand).
 """
 
+import time
 from datetime import datetime
 
 import charting
 import database
 import timeutil
+
+# A short pause after each ticker that actually needed a fresh chart
+# (skipped when skip_if_already_archived already short-circuited it -
+# that path makes no Yahoo Finance call at all, so there's nothing to
+# pace), matching warm_price_cache.py's own PAUSE_BETWEEN_SYMBOLS_
+# SECONDS pattern for the same reason: nightly_archive.yml runs this
+# whole module TWICE back-to-back in one job (the user's own account,
+# then immediately the friend's), with no gap between them - a real
+# incident where the user's own run left Yahoo Finance's rate limit
+# still cooling down going into the friend's run, and every one of the
+# friend's charts silently failed to archive that night as a result
+# (see charting.fetch_history()'s own note on the matching retry fix).
+PAUSE_BETWEEN_TICKERS_SECONDS = 1
 
 
 def archive_ticker(conn, symbol, entry_date, buy_price, entry_label, today, as_of, direction="LONG", stop_loss=None):
@@ -75,6 +89,7 @@ def archive_all(conn, today, skip_if_already_archived=False):
         except Exception as exc:
             print(f"  {symbol}: archiving failed unexpectedly ({exc}), skipping.")
         archived_symbols.add(symbol)
+        time.sleep(PAUSE_BETWEEN_TICKERS_SECONDS)
 
     watchlist = database.get_watchlist(conn)
     watchlist = [w for w in watchlist if w["symbol"] not in archived_symbols]
@@ -90,5 +105,6 @@ def archive_all(conn, today, skip_if_already_archived=False):
         except Exception as exc:
             print(f"  {symbol}: archiving failed unexpectedly ({exc}), skipping.")
         archived_symbols.add(symbol)
+        time.sleep(PAUSE_BETWEEN_TICKERS_SECONDS)
 
     return archived_symbols

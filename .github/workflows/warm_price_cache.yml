@@ -42,6 +42,15 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python warm_price_cache.py
 
+      # See nightly_archive.yml's matching "Pause before the friend
+      # run" step for why this exists - warm_price_cache.py already
+      # paces its OWN per-symbol requests (PAUSE_BETWEEN_SYMBOLS_
+      # SECONDS), but that resets at the start of each script, so
+      # nothing was pacing the gap BETWEEN the self run above and the
+      # friend run below, always second, in the same job.
+      - name: Pause before the friend run
+        run: sleep 30
+
       # Same script, same repo, but pointed at a second person's own
       # database via their own repository secret (prefixed FRIEND_) -
       # same dual-deployment pattern Nightly Archive already uses.

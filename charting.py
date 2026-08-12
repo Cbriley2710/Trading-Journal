@@ -482,14 +482,35 @@ def fetch_history(symbol, fetch_start, display_start, display_end, interval, ma_
         history = _daily_history_from_cache(symbol, fetch_start)
 
     if history is None:
-        try:
-            history = yf.Ticker(symbol).history(start=fetch_start, end=display_end, interval=interval)
-        except YFRateLimitError:
-            empty = pd.DataFrame()
-            empty.attrs["error"] = "rate_limited"
-            return empty
-        except Exception:
-            return pd.DataFrame()
+        # One retry after a short pause on a rate limit, same as
+        # warm_price_cache_for_symbol()'s own retry - a real production
+        # bug this mirrors: nightly_archive.py runs its whole archive
+        # TWICE back-to-back in the same job (the user's own account,
+        # then immediately the friend's - see nightly_archive.yml),
+        # with no pause between them. If the first run leaves Yahoo
+        # Finance's rate limit still cooling down, the second run's
+        # live fetches (for any symbol the persistent cache didn't
+        # already cover) used to give up on the very first 429 with no
+        # retry at all - silently skipping every one of the friend's
+        # charts for the night (archiving.archive_ticker() treats an
+        # empty history the same as "no data," not an error worth
+        # surfacing) even though the whole script still exited
+        # successfully and still emailed a report, just with nothing in
+        # it. A single retry gives that cooldown window a chance to
+        # pass instead.
+        for attempt in range(2):
+            try:
+                history = yf.Ticker(symbol).history(start=fetch_start, end=display_end, interval=interval)
+                break
+            except YFRateLimitError:
+                if attempt == 0:
+                    time.sleep(2)
+                    continue
+                empty = pd.DataFrame()
+                empty.attrs["error"] = "rate_limited"
+                return empty
+            except Exception:
+                return pd.DataFrame()
 
         if history.empty:
             return history
