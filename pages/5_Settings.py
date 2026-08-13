@@ -27,10 +27,8 @@ instead, since it's a one-off/occasional action, not something that
 needed a permanent slot in the top nav bar.
 """
 
-import tempfile
 import time
 from datetime import timedelta
-from pathlib import Path
 
 import streamlit as st
 
@@ -40,6 +38,7 @@ import database
 import nav
 import snaptrade_sync
 import timeutil
+import ui
 
 st.set_page_config(page_title="Settings", page_icon="📈", layout="wide", initial_sidebar_state="collapsed")
 
@@ -174,34 +173,7 @@ st.caption(
     "the Excel tracker updated."
 )
 
-uploaded_file = st.file_uploader("Fidelity or Schwab CSV export", type="csv")
-
-if uploaded_file is not None:
-    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
-        tmp.write(uploaded_file.getvalue())
-        tmp_path = Path(tmp.name)
-
-    try:
-        with st.spinner("Importing transactions..."):
-            new_count = database.import_transactions(conn, tmp_path)
-            trade_count = database.rebuild_trades(conn)
-    except ValueError:
-        # detect_csv_source() raises this when the file isn't a
-        # recognizable Fidelity or Schwab export - show a plain message
-        # instead of a crash screen. Nothing was imported.
-        st.error(
-            "That file doesn't look like a Fidelity or Schwab trade "
-            "history export - its header row wasn't recognized. Make "
-            "sure you exported Transaction/Account History as a CSV "
-            "from your brokerage, then try again."
-        )
-    else:
-        st.success(
-            f"Imported {new_count} new transaction row(s). "
-            f"{trade_count} completed stock trade(s) total in the database."
-        )
-    finally:
-        tmp_path.unlink(missing_ok=True)
+ui.render_csv_import_widget(conn, key="settings")
 
 st.divider()
 

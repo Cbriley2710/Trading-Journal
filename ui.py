@@ -10,11 +10,16 @@ than the other two).
 """
 
 import json
+import tempfile
 import time
+from pathlib import Path
 
+import streamlit as st
 import streamlit.components.v1 as components
 
 import charting
+import database
+import timeutil
 
 
 def scroll_to_anchor(anchor_id):
@@ -201,3 +206,76 @@ def stat_tile(column, label, value, color=None, size="1.4rem"):
         """,
         unsafe_allow_html=True,
     )
+
+
+def render_csv_import_widget(conn, key):
+    """
+    A Fidelity/Schwab CSV export uploader that imports whatever's new
+    into the shared `transactions` table and recalculates completed
+    trades - the exact import/error-handling flow used on both the
+    Settings page's "Import from a CSV export" section and the Journal
+    Session's "Choose Lists to Journal" screen (there so you can catch
+    up on today's fills before starting to journal). Shared here, not
+    copy-pasted twice, so neither call site's behavior can drift from
+    the other - including database.record_csv_upload(), which every
+    successful import here calls, so "new trades since your last
+    upload" (see get_new_trades_since_last_upload()'s own docstring)
+    stays accurate no matter which page you actually uploaded from.
+
+    `key` keeps this widget's own state independent from any OTHER
+    file_uploader on the same page render - Streamlit requires a unique
+    key whenever more than one of the same widget type exists.
+    """
+    uploaded_file = st.file_uploader(
+        "Fidelity or Schwab CSV export", type="csv", key=f"{key}_csv_uploader")
+    if uploaded_file is None:
+        return
+
+    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
+        tmp.write(uploaded_file.getvalue())
+        tmp_path = Path(tmp.name)
+
+    try:
+        with st.spinner("Importing transactions..."):
+            new_count = database.import_transactions(conn, tmp_path)
+            trade_count = database.rebuild_trades(conn)
+    except ValueError:
+        # detect_csv_source() raises this when the file isn't a
+        # recognizable Fidelity or Schwab export - show a plain message
+        # instead of a crash screen. Nothing was imported.
+        st.error(
+            "That file doesn't look like a Fidelity or Schwab trade "
+            "history export - its header row wasn't recognized. Make "
+            "sure you exported Transaction/Account History as a CSV "
+            "from your brokerage, then try again."
+        )
+    else:
+        database.record_csv_upload(conn, timeutil.now_eastern())
+        st.success(
+            f"Imported {new_count} new transaction row(s). "
+            f"{trade_count} completed stock trade(s) total in the database."
+        )
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def render_new_trades_since_upload(conn):
+    """
+    Shows every trade taken since your last CSV upload (see
+    database.get_new_trades_since_last_upload()) as plain "SYMBOL was
+    bought/sold/sold short on DATE at PRICE" lines - deliberately no
+    share count or dollar total, so this can't reveal position size or
+    account value to anyone who sees it (the Journal Session's Today's
+    Thoughts step, and the Daily Report cover page - see both callers).
+    Renders nothing at all when the list is empty, rather than a "no
+    new trades" placeholder - this is meant to catch your eye only when
+    there's actually something to journal about.
+    """
+    trades = database.get_new_trades_since_last_upload(conn)
+    if not trades:
+        return
+
+    st.caption("New trades since your last CSV upload:")
+    for t in trades:
+        verb = database.NEW_TRADE_ACTION_VERBS.get(t["action"], t["action"].lower())
+        st.markdown(f"- **{t['symbol']}** was {verb} on {t['date']:%m/%d/%Y} at ${t['price']:,.2f}")

@@ -720,9 +720,21 @@ def build_journal_queue(conn, list_ids=None):
     """
     Builds today's Journal Session queue: every open position first
     (richer detail - fact tiles and a stop-loss line), then every
-    watchlist ticker not already covered by a position, in each list's
-    existing order. A symbol that's both an open position and sitting
-    on a watchlist is only journaled once, as the position.
+    watchlist ticker not already covered by a position, GROUPED by
+    list (all of List 1, then all of List 2, etc.), each list
+    internally in its own existing added-order. A symbol that's both
+    an open position and sitting on a watchlist is only journaled
+    once, as the position.
+
+    The grouping is a real fix, not just tidiness: database.get_watchlist()
+    returns every list's tickers interleaved by added_at across ALL
+    lists at once, not one list at a time - without re-sorting here,
+    the session jumped between unrelated lists in whatever order
+    tickers happened to be added, instead of reviewing one list's
+    charts together before moving to the next. sorted()'s stability is
+    what makes this safe: grouping by list_id doesn't disturb the
+    added-order within any single list, it only reorders the list
+    GROUPS themselves.
 
     `list_ids`, if given, restricts the queue to just these lists - 1-4
     for the user's own watchlists, 5 for Open Positions (see
@@ -749,7 +761,8 @@ def build_journal_queue(conn, list_ids=None):
             })
             seen_symbols.add(position["symbol"])
 
-    for entry in database.get_watchlist(conn):
+    watchlist_by_list = sorted(database.get_watchlist(conn), key=lambda entry: entry["list_id"])
+    for entry in watchlist_by_list:
         if list_ids is not None and entry["list_id"] not in list_ids:
             continue
         if entry["symbol"] in seen_symbols:
@@ -857,6 +870,15 @@ def _render_todays_thoughts_step(conn, today):
     the database directly (not a session_state flag) means this is
     skipped automatically on any later resume the same day, even one
     started fresh after the tab was closed.
+
+    Also where "new trades since your last CSV upload" shows up (see
+    ui.render_new_trades_since_upload()) - right above the note box, so
+    whatever came in from the upload on the previous screen is right
+    there to journal about while writing today's thoughts, not
+    something you'd have to remember to go look up separately. The
+    exact same list also shows up on the Daily Report's cover page (see
+    daily_report.py's build_report_pdf()), so the written record stays
+    in sync with what you actually saw here.
     """
     if database.get_daily_journal_note(conn, today) is not None:
         return True
@@ -865,6 +887,8 @@ def _render_todays_thoughts_step(conn, today):
     st.markdown(f'<div id="{anchor_id}"></div>', unsafe_allow_html=True)
     if st.session_state.pop(sk.SCROLL_TO_SESSION_ANCHOR, False):
         ui.scroll_to_anchor(anchor_id)
+
+    ui.render_new_trades_since_upload(conn)
 
     st.subheader("Today's Thoughts")
     st.caption(
@@ -1058,7 +1082,25 @@ def render_journal_list_selection(conn):
     All 5 checked by default - so a user who doesn't care about this
     screen can just click straight through to "Begin Journal Session"
     and get exactly today's old, unfiltered behavior.
+
+    Also where the CSV-upload check-in lives (see ui.render_csv_import_
+    widget()) - before picking which lists to review, so Open Positions
+    (and everything downstream: fact tiles, unrealized P/L, the "new
+    trades since your last upload" summary on the next screen) reflects
+    today's activity from the start, not whatever was last imported.
     """
+    st.subheader("Before you start: is today's trade activity entered?")
+    st.caption(
+        "If you traded today, upload your CSV export now so Open "
+        "Positions and today's new-trades summary are current before "
+        "you journal. Skip this if you've already synced or uploaded "
+        "today - one Fidelity/Schwab CSV updates the shared database "
+        "no matter which page you drop it on."
+    )
+    with st.expander("Upload a CSV export"):
+        ui.render_csv_import_widget(conn, key="journal_selection")
+    st.divider()
+
     st.header("Choose Lists to Journal")
     st.caption("Pick which lists to include in today's session - uncheck any you want to skip.")
 

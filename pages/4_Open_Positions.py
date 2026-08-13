@@ -351,16 +351,40 @@ else:
             "Set your account value on the Dashboard page to also see each "
             "bar's % of account and a Cash bar for what's not invested."
         )
+    # Only offered once there's actually a % to show - with no account
+    # value set, every bar is dollars-only already (see the caption
+    # above), so there's nothing for this to toggle between.
+    pct_only = False
+    if account_value:
+        pct_only = st.toggle(
+            "Show % of account only", key="equity_by_position_pct_only",
+            help="Hide dollar amounts - bars, labels, and hover all show % of account only.",
+        )
     if priced:
         equity_rows = []
         for e in priced:
             pct = (e["current_value"] / account_value * 100) if account_value else None
-            text = f"${e['current_value']:,.0f} ({pct:.1f}%)" if pct is not None else f"${e['current_value']:,.0f}"
+            if pct_only:
+                # pct is never None here - pct_only can only be True
+                # when account_value is set, which is the same
+                # condition pct's own None-check above depends on.
+                text = f"{pct:.1f}%"
+                cost_basis_pct = e["cost_basis"] / account_value * 100
+                detail = f"Cost Basis: {cost_basis_pct:.1f}% of account"
+            else:
+                text = f"${e['current_value']:,.0f} ({pct:.1f}%)" if pct is not None else f"${e['current_value']:,.0f}"
+                detail = f"Cost Basis: ${e['cost_basis']:,.2f}"
             equity_rows.append({
                 "label": position_label(e),
-                "value": e["current_value"],
+                # Plotting the PERCENT itself as the bar's value (not
+                # just swapping the label text) when pct_only is on -
+                # since % of account is just current_value scaled by a
+                # constant (1/account_value), this reshapes nothing
+                # about the chart, it only changes the axis unit, so
+                # sorting by "value" below stays correct either way.
+                "value": pct if pct_only else e["current_value"],
                 "text": text,
-                "detail": f"Cost Basis: ${e['cost_basis']:,.2f}",
+                "detail": detail,
                 "color": charting.CATEGORICAL_PALETTE[0],
             })
 
@@ -369,8 +393,8 @@ else:
             cash_pct = cash_amount / account_value * 100
             equity_rows.append({
                 "label": "Cash",
-                "value": cash_amount,
-                "text": f"${cash_amount:,.0f} ({cash_pct:.1f}%)",
+                "value": cash_pct if pct_only else cash_amount,
+                "text": f"{cash_pct:.1f}%" if pct_only else f"${cash_amount:,.0f} ({cash_pct:.1f}%)",
                 "detail": "Uninvested cash",
                 "color": charting.MUTED_COLOR,
             })
@@ -386,10 +410,14 @@ else:
             customdata=[r["detail"] for r in equity_rows],
             text=[r["text"] for r in equity_rows],
             textposition="outside",
-            hovertemplate="%{y}<br>Value: $%{x:,.2f}<br>%{customdata}<extra></extra>",
+            hovertemplate=(
+                "%{y}<br>% of Account: %{x:.1f}%<br>%{customdata}<extra></extra>" if pct_only
+                else "%{y}<br>Value: $%{x:,.2f}<br>%{customdata}<extra></extra>"
+            ),
         ))
         equity_chart.update_yaxes(autorange="reversed")
-        st.plotly_chart(charting.style_simple_chart(equity_chart, "Current Value ($)", horizontal=True), theme=None)
+        axis_title = "% of Account" if pct_only else "Current Value ($)"
+        st.plotly_chart(charting.style_simple_chart(equity_chart, axis_title, horizontal=True), theme=None)
     else:
         st.info("No priced positions to chart yet.")
 

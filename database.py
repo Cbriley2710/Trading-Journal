@@ -374,6 +374,26 @@ def init_db(conn):
             generated_at TIMESTAMP NOT NULL
         )
     """)
+    # One row, tracking the "new trades since your last CSV upload"
+    # window (see record_csv_upload()/get_new_trades_since_last_upload()
+    # below) - shown on the Journal Session's Today's Thoughts step and
+    # the Daily Report cover page, so a trade taken since you last
+    # checked in doesn't get missed before journaling. cutoff_id/
+    # previous_cutoff_id are transactions.id values (insertion order),
+    # NOT dates - a CSV-imported transaction's own date always flattens
+    # to midnight with no time-of-day (see the transactions.date
+    # comment above), which would make same-day-upload comparisons
+    # unreliable; insertion order has no such ambiguity. uploaded_at is
+    # kept purely for display ("last uploaded Aug 10, 2:15pm").
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS csv_upload_tracking (
+            id INTEGER PRIMARY KEY DEFAULT 1,
+            uploaded_at TIMESTAMP,
+            cutoff_id INTEGER NOT NULL DEFAULT 0,
+            previous_cutoff_id INTEGER NOT NULL DEFAULT 0,
+            CONSTRAINT single_row CHECK (id = 1)
+        )
+    """)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS deposits (
             id SERIAL PRIMARY KEY,
@@ -938,6 +958,73 @@ def import_transactions_snaptrade(conn, start_date, end_date):
     """
     transactions = snaptrade_sync.fetch_activities(start_date, end_date)
     return _insert_transactions(conn, transactions)
+
+
+def record_csv_upload(conn, when):
+    """
+    Shifts the "new trades since your last upload" window forward -
+    called once, right after a successful CSV import (see
+    ui.render_csv_import_widget()). The OLD cutoff becomes
+    previous_cutoff_id (what get_new_trades_since_last_upload() below
+    compares against), and the new cutoff is every transaction that
+    exists right now, including whatever this import just added - so
+    only transactions added by a LATER import ever show as "new" again
+    after this.
+    """
+    cur = conn.cursor()
+    cur.execute("SELECT COALESCE(MAX(id), 0) FROM transactions")
+    current_max_id = cur.fetchone()[0]
+    cur.execute(
+        """
+        INSERT INTO csv_upload_tracking (id, uploaded_at, cutoff_id, previous_cutoff_id)
+        VALUES (1, %s, %s, 0)
+        ON CONFLICT (id) DO UPDATE SET
+            uploaded_at = EXCLUDED.uploaded_at,
+            previous_cutoff_id = csv_upload_tracking.cutoff_id,
+            cutoff_id = EXCLUDED.cutoff_id
+        """,
+        (when, current_max_id),
+    )
+    conn.commit()
+
+
+# How each transactions.action value reads as a plain verb - shared by
+# ui.render_new_trades_since_upload() (the Journal Session's Today's
+# Thoughts step) and daily_report.py's cover page, so the two places
+# that turn a get_new_trades_since_last_upload() row into a sentence
+# can't drift on wording (each still does its own Markdown/PDF
+# rendering around this - only the verb choice is shared).
+NEW_TRADE_ACTION_VERBS = {"BUY": "bought", "SELL": "sold", "SELL_SHORT": "sold short"}
+
+
+def get_new_trades_since_last_upload(conn):
+    """
+    Every transaction (buy, sell, or short sale) added since the
+    PREVIOUS CSV upload - i.e. everything that came in as part of the
+    most recent one, still "unreviewed" until the next upload shifts
+    the window forward again (see record_csv_upload() above). Shown on
+    the Journal Session's Today's Thoughts step and the Daily Report
+    cover page, so a trade taken since you last checked in doesn't get
+    missed before journaling.
+
+    Returns a list of {"date", "symbol", "action", "price"} dicts,
+    oldest first - deliberately NOT quantity or a dollar total, so
+    neither view reveals position size or account value, just what
+    happened and when. Returns [] if nothing's ever been uploaded yet
+    (no reference point to compare against), or nothing's come in since
+    the window opened.
+    """
+    cur = conn.cursor()
+    cur.execute("SELECT previous_cutoff_id FROM csv_upload_tracking WHERE id = 1")
+    row = cur.fetchone()
+    if row is None:
+        return []
+    previous_cutoff_id = row[0]
+    cur.execute(
+        "SELECT date, symbol, action, price FROM transactions WHERE id > %s ORDER BY date, id",
+        (previous_cutoff_id,),
+    )
+    return [{"date": r[0], "symbol": r[1], "action": r[2], "price": r[3]} for r in cur.fetchall()]
 
 
 def clear_trade_cache():

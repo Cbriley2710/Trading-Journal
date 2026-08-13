@@ -181,6 +181,27 @@ def build_report_pdf(conn, report_date):
     pdf.set_font("Helvetica", style="B", size=34)
     pdf.cell(0, 22, safe_text(f"Daily Report - {report_date:%B %d, %Y}"), new_x="LMARGIN", new_y="NEXT")
 
+    # Same "new trades since your last CSV upload" list shown on the
+    # Journal Session's Today's Thoughts step (see pages/2_Shortlist.py's
+    # _render_todays_thoughts_step() and ui.render_new_trades_since_
+    # upload()) - a LIVE query at report-generation time, not a
+    # snapshot of what was shown then, so it always reflects the
+    # current "since last upload" window. No quantity or dollar total
+    # here either, for the same reason - this report can be looked at
+    # by someone else without revealing position size or account value.
+    new_trades = database.get_new_trades_since_last_upload(conn)
+    if new_trades:
+        pdf.ln(4)
+        pdf.set_font("Helvetica", style="B", size=20)
+        pdf.cell(0, 12, "New Trades Since Last Upload", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", size=17)
+        for t in new_trades:
+            verb = database.NEW_TRADE_ACTION_VERBS.get(t["action"], t["action"].lower())
+            pdf.cell(
+                0, 9, safe_text(f"{t['symbol']} was {verb} on {t['date']:%m/%d/%Y} at ${t['price']:,.2f}"),
+                new_x="LMARGIN", new_y="NEXT",
+            )
+
     # The general, not-tied-to-any-ticker note from the guided Journal
     # Session's first step (see pages/2_Shortlist.py's
     # _render_todays_thoughts_step()) - shown on the cover page only if
