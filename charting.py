@@ -374,14 +374,31 @@ def warm_price_cache_for_symbol(symbol):
     # own docstring for why using the literal calendar day here used
     # to silently break this cache for days at a time whenever this
     # scheduled job's actual run landed after midnight Eastern.
-    history_dict = {
+    #
+    # _json_safe() here is the same fix _chart_component's own payload
+    # already needed (see that function's docstring) - a real
+    # production bug this is the OTHER half of: the "today's bar must
+    # be non-NaN" check just above only looks at the single MOST RECENT
+    # bar, but a stray NaN Open/High/Low/Close can sit anywhere in the
+    # 5 years of history Yahoo Finance returns (a halted session, a
+    # delisting/relisting gap, or some other historical data hole) -
+    # confirmed for real against SCCO. json.dumps() (what psycopg2's
+    # Json() wrapper uses under the hood to write the `history` jsonb
+    # column below) happily emits a bare `NaN` token for a float NaN,
+    # which isn't valid JSON by the actual spec - Postgres's own JSON
+    # parser rejects the whole INSERT outright (InvalidTextRepresentation:
+    # "Token 'NaN' is invalid"), which used to mean adding a ticker to a
+    # watchlist could fail with a raw database error the instant its
+    # history happened to contain one bad historical bar, nothing to do
+    # with today's data at all.
+    history_dict = _json_safe({
         "dates": [d.date().isoformat() for d in history.index],
         "open": history["Open"].tolist(),
         "high": history["High"].tolist(),
         "low": history["Low"].tolist(),
         "close": history["Close"].tolist(),
         "volume": history["Volume"].tolist(),
-    }
+    })
     conn = database.get_connection()
     database.save_cached_price_history(conn, symbol, history_dict, expected_day)
     return "ok"
