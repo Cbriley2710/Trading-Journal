@@ -970,6 +970,12 @@ def record_csv_upload(conn, when):
     exists right now, including whatever this import just added - so
     only transactions added by a LATER import ever show as "new" again
     after this.
+
+    On the very first-ever call (no row exists yet), previous_cutoff_id
+    is left at 0 - transactions.id is a SERIAL starting at 1, so 0 can
+    never be a real transaction id, making it a safe permanent sentinel
+    for "no reference point yet" (see get_new_trades_since_last_upload()'s
+    own handling of it) rather than needing a nullable column.
     """
     cur = conn.cursor()
     cur.execute("SELECT COALESCE(MAX(id), 0) FROM transactions")
@@ -1013,11 +1019,22 @@ def get_new_trades_since_last_upload(conn):
     happened and when. Returns [] if nothing's ever been uploaded yet
     (no reference point to compare against), or nothing's come in since
     the window opened.
+
+    previous_cutoff_id == 0 is treated the SAME as "no row at all" -
+    both mean "no reference point yet." A real production bug this
+    fixes: record_csv_upload()'s very first-ever INSERT (no existing
+    row) hardcodes previous_cutoff_id to the literal 0, not NULL - so
+    without this check, the very FIRST CSV upload after this feature
+    ships showed every trade in the account's entire history as "new"
+    (id > 0 matches every real transactions.id, which is a SERIAL
+    starting at 1). Checking for 0 here means that first upload's
+    already-written row self-heals the moment this fix ships, with no
+    separate database cleanup needed.
     """
     cur = conn.cursor()
     cur.execute("SELECT previous_cutoff_id FROM csv_upload_tracking WHERE id = 1")
     row = cur.fetchone()
-    if row is None:
+    if row is None or row[0] == 0:
         return []
     previous_cutoff_id = row[0]
     cur.execute(

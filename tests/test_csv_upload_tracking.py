@@ -142,3 +142,33 @@ def test_get_new_trades_since_last_upload_empty_before_any_upload(conn):
         assert database.get_new_trades_since_last_upload(conn) == []
     finally:
         _restore_upload_tracking(conn, original)
+
+
+def test_first_ever_upload_does_not_show_pre_existing_history_as_new(conn):
+    """The real production bug this locks in: with real trade history
+    already in the account and csv_upload_tracking never having a row
+    yet, the very FIRST record_csv_upload() call used to leave
+    previous_cutoff_id at the literal 0 - and since transactions.id is
+    a SERIAL starting at 1, "id > 0" matched every transaction ever
+    made, showing the entire account history as "new trades" the first
+    time this feature was ever used. Must show nothing, the same as if
+    nothing had happened since - there's no real reference point yet on
+    the very first upload, by definition."""
+    original = _snapshot_upload_tracking(conn)
+    _cleanup_transactions(conn)
+    cur = conn.cursor()
+    cur.execute("DELETE FROM csv_upload_tracking WHERE id = 1")
+    conn.commit()
+    try:
+        # Pre-existing history, as if this account had real trades long
+        # before this feature ever ran a record_csv_upload() call.
+        _insert_transaction(conn, datetime(2020, 1, 1), "BUY", 42.0, 100)
+        _insert_transaction(conn, datetime(2021, 6, 15), "SELL", 55.0, 100)
+
+        database.record_csv_upload(conn, datetime(2026, 1, 1))  # the very first-ever call
+
+        new_trades = [t for t in database.get_new_trades_since_last_upload(conn) if t["symbol"] == SYMBOL]
+        assert new_trades == [], "pre-existing history must not show as new on the first-ever upload"
+    finally:
+        _cleanup_transactions(conn)
+        _restore_upload_tracking(conn, original)
