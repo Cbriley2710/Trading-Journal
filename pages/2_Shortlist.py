@@ -871,14 +871,16 @@ def _render_todays_thoughts_step(conn, today):
     skipped automatically on any later resume the same day, even one
     started fresh after the tab was closed.
 
-    Also where "new trades since your last CSV upload" shows up (see
-    ui.render_new_trades_since_upload()) - right above the note box, so
-    whatever came in from the upload on the previous screen is right
-    there to journal about while writing today's thoughts, not
-    something you'd have to remember to go look up separately. The
-    exact same list also shows up on the Daily Report's cover page (see
-    daily_report.py's build_report_pdf()), so the written record stays
-    in sync with what you actually saw here.
+    Also where "since your last journal session" shows up (see
+    ui.render_since_last_journal_summary()) - right above the note box,
+    so trade stats and a Position Sizing check for anything that's
+    happened since you last journaled are right there to journal about
+    while writing today's thoughts, not something you'd have to
+    remember to go look up separately. Anchored to your last saved
+    daily_journal_notes date (database.get_previous_journal_date()),
+    not the last CSV upload - a separate, unrelated cutoff the Daily
+    Report's own "New Trades Since Last Upload" section still uses (see
+    daily_report.py's build_report_pdf()).
     """
     if database.get_daily_journal_note(conn, today) is not None:
         return True
@@ -888,7 +890,8 @@ def _render_todays_thoughts_step(conn, today):
     if st.session_state.pop(sk.SCROLL_TO_SESSION_ANCHOR, False):
         ui.scroll_to_anchor(anchor_id)
 
-    ui.render_new_trades_since_upload(conn)
+    cutoff_date = database.get_previous_journal_date(conn, today)
+    ui.render_since_last_journal_summary(conn, cutoff_date)
 
     st.subheader("Today's Thoughts")
     st.caption(

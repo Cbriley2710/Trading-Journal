@@ -1516,6 +1516,27 @@ def get_journal_note_dates(conn, start_date, end_date):
     return {row[0] for row in cur.fetchall()}
 
 
+def get_previous_journal_date(conn, before_date):
+    """
+    The most recent date with a daily_journal_notes row, strictly
+    before `before_date` - used by the Journal Session's Today's
+    Thoughts step to know how far back to look for "what's happened
+    since I last journaled" (see ui.render_since_last_journal_summary()).
+    Returns None if you've never journaled before that date - there's
+    no reference point yet, same "nothing to compare against" idea as
+    get_new_trades_since_last_upload() before any CSV has ever been
+    uploaded.
+
+    A plain date comparison is enough here (no time-of-day needed) -
+    Today's Thoughts only ever shows once per calendar day (it
+    self-skips once today's row exists), so "since last journal
+    session" never needs finer precision than a day.
+    """
+    cur = conn.cursor()
+    cur.execute("SELECT MAX(entry_date) FROM daily_journal_notes WHERE entry_date < %s", (before_date,))
+    return cur.fetchone()[0]
+
+
 def get_logbook_entries(conn, symbol):
     """Returns every logbook row for a symbol, oldest day first."""
     cur = conn.cursor()

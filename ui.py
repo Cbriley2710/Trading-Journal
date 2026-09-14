@@ -17,8 +17,10 @@ from pathlib import Path
 import streamlit as st
 import streamlit.components.v1 as components
 
+import analyze_trades
 import charting
 import database
+import position_sizing
 import timeutil
 
 
@@ -259,23 +261,84 @@ def render_csv_import_widget(conn, key):
         tmp_path.unlink(missing_ok=True)
 
 
-def render_new_trades_since_upload(conn):
+def render_since_last_journal_summary(conn, cutoff_date):
     """
-    Shows every trade taken since your last CSV upload (see
-    database.get_new_trades_since_last_upload()) as plain "SYMBOL was
-    bought/sold/sold short on DATE at PRICE" lines - deliberately no
-    share count or dollar total, so this can't reveal position size or
-    account value to anyone who sees it (the Journal Session's Today's
-    Thoughts step, and the Daily Report cover page - see both callers).
-    Renders nothing at all when the list is empty, rather than a "no
-    new trades" placeholder - this is meant to catch your eye only when
-    there's actually something to journal about.
+    Shows what's happened since you last journaled - trade stats for
+    anything that CLOSED since then (win rate, P/L, a per-ticker
+    breakdown - see analyze_trades.review_session_summary()), plus a
+    sizing check for anything OPENED since then (see position_sizing.
+    newly_opened_positions_since()), comparing each new position's
+    actual size against today's Position Sizing recommendation.
+
+    `cutoff_date` is database.get_previous_journal_date()'s result -
+    None means you've never journaled before, so there's no reference
+    point yet (renders nothing, same idea as get_new_trades_since_last_
+    upload() before any CSV has ever been uploaded). Also renders
+    nothing if there's simply been no activity at all since then.
     """
-    trades = database.get_new_trades_since_last_upload(conn)
-    if not trades:
+    if cutoff_date is None:
         return
 
-    st.caption("New trades since your last CSV upload:")
-    for t in trades:
-        verb = database.NEW_TRADE_ACTION_VERBS.get(t["action"], t["action"].lower())
-        st.markdown(f"- **{t['symbol']}** was {verb} on {t['date']:%m/%d/%Y} at ${t['price']:,.2f}")
+    closed_since = [t for t in database.get_trades(conn) if t["date"].date() > cutoff_date]
+    new_positions = position_sizing.newly_opened_positions_since(conn, cutoff_date)
+    if not closed_since and not new_positions:
+        return
+
+    st.caption(f"Since your last journal session ({cutoff_date:%m/%d/%Y}):")
+
+    if closed_since:
+        # review_session_summary() expects plain `date` objects and an
+        # "exit_date" key - database.get_trades() rows use `date` and
+        # real datetimes (see that function's own docstring on why).
+        reviews = [
+            {**t, "entry_date": t["entry_date"].date(), "exit_date": t["date"].date()}
+            for t in closed_since
+        ]
+        summary = analyze_trades.review_session_summary(reviews)
+        best = max(reviews, key=lambda r: r["profit_loss"])
+        worst = min(reviews, key=lambda r: r["profit_loss"])
+
+        cols = st.columns(7)
+        stat_tile(cols[0], "Total Trades", f"{summary['total']}")
+        stat_tile(cols[1], "Win Rate", f"{summary['batting_avg']:.1f}%")
+        stat_tile(cols[2], "Total P/L", f"${summary['total_pl']:,.2f}", charting.win_loss_color(summary["total_pl"] >= 0))
+        stat_tile(cols[3], "Avg Win", f"${summary['avg_win_dollar']:,.2f}" if summary["avg_win_dollar"] is not None else "N/A", charting.win_loss_color(True))
+        stat_tile(cols[4], "Avg Loss", f"${summary['avg_loss_dollar']:,.2f}" if summary["avg_loss_dollar"] is not None else "N/A", charting.win_loss_color(False))
+        stat_tile(cols[5], "Best Trade", f"{best['symbol']} ${best['profit_loss']:,.2f}", charting.win_loss_color(True))
+        stat_tile(cols[6], "Worst Trade", f"{worst['symbol']} ${worst['profit_loss']:,.2f}", charting.win_loss_color(False))
+
+        if len(summary["per_ticker"]) > 1:
+            header_cols = st.columns(3)
+            header_cols[0].markdown("**Symbol**")
+            header_cols[1].markdown("**Trades (Wins)**")
+            header_cols[2].markdown("**Net P/L**")
+            for symbol, row in summary["per_ticker"].items():
+                row_cols = st.columns(3)
+                row_cols[0].write(symbol)
+                row_cols[1].write(f"{row['trades']} ({row['wins']})")
+                row_cols[2].write(f"${row['net_pl']:,.2f}")
+
+    if new_positions:
+        st.markdown("**Newly Opened Positions**" if closed_since else "**Newly Opened Positions Since Last Session**")
+        sizing = position_sizing.evaluate_position_sizing(conn)
+        account_value = sizing["account_value"]
+
+        if account_value is None:
+            st.caption("Set your account value on the Dashboard page to see each position's sizing check.")
+
+        header_cols = st.columns([2, 2, 2, 2, 1])
+        for col, label in zip(header_cols, ["Symbol", "Entry Date", "Actual Size", "Recommended", ""]):
+            col.markdown(f"**{label}**")
+        for p in new_positions:
+            row_cols = st.columns([2, 2, 2, 2, 1])
+            row_cols[0].write(f"{p['symbol']}{' (S)' if p['direction'] == 'SHORT' else ''}")
+            row_cols[1].write(p["entry_date"].strftime("%m/%d/%Y"))
+            if account_value:
+                actual_pct = p["cost_basis"] / account_value * 100
+                row_cols[2].write(f"{actual_pct:.2f}% of account")
+                row_cols[3].write(f"{sizing['recommended_pct_of_account']:.2f}% of account")
+                row_cols[4].write("⚠️" if actual_pct > sizing["recommended_pct_of_account"] else "✅")
+            else:
+                row_cols[2].write("N/A")
+                row_cols[3].write(f"{sizing['recommended_pct_of_account']:.2f}% of account")
+                row_cols[4].write("")

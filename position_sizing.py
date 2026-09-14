@@ -100,6 +100,47 @@ def build_recent_trade_window(conn, n):
     return entries[-n:] if n > 0 else []
 
 
+def newly_opened_positions_since(conn, cutoff_date):
+    """
+    Every position - closed or still open - whose entry_date is after
+    `cutoff_date`, with its cost basis AT ENTRY (not today's value).
+    Used by the Journal Session's Today's Thoughts step to check
+    whether a newly-opened position was sized within the current
+    Position Sizing recommendation - sizing is decided the moment a
+    trade is opened, so that's what gets checked, regardless of
+    whether the trade has since closed.
+
+    Returns a list of {"symbol", "direction", "entry_date", "is_open",
+    "cost_basis"} dicts, oldest first.
+    """
+    positions = []
+
+    for trade in database.get_trades(conn):
+        if trade["entry_date"].date() <= cutoff_date:
+            continue
+        is_short = trade["direction"] == "SHORT"
+        # Same entry-price pairing as analyze_trades.trade_stats(): a
+        # short's entry is the price it was SOLD at, not bought back at.
+        entry_price = trade["sell_price"] if is_short else trade["buy_price"]
+        positions.append({
+            "symbol": trade["symbol"], "direction": trade["direction"],
+            "entry_date": trade["entry_date"], "is_open": False,
+            "cost_basis": entry_price * trade["quantity"],
+        })
+
+    for position in database.get_open_positions(conn):
+        if position["entry_date"].date() <= cutoff_date:
+            continue
+        positions.append({
+            "symbol": position["symbol"], "direction": position["direction"],
+            "entry_date": position["entry_date"], "is_open": True,
+            "cost_basis": position["avg_price"] * position["quantity"],
+        })
+
+    positions.sort(key=lambda p: p["entry_date"])
+    return positions
+
+
 def decide_tier_step(state, tier_pcts, losers, winners, loss_threshold, win_threshold, window_key):
     """
     The pure decision at the heart of this feature - given where you
