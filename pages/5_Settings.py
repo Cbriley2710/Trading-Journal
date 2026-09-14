@@ -276,6 +276,68 @@ if st.button("Save Defaults"):
 
 st.divider()
 
+st.header("Position Management")
+st.caption(
+    "This app never places trades for you - it can only recommend a "
+    "position size, as a % of your account value, based on how your "
+    "recent trades have gone. A run of losers steps this recommendation "
+    "down; a run of winners steps it back up, one tier at a time. See "
+    "the stat block on the Open Positions page for today's recommendation."
+)
+
+sizing_settings = database.get_position_sizing_settings(conn)
+
+size_col1, size_col2 = st.columns(2)
+ideal_baseline_pct = size_col1.number_input(
+    "Ideal position size (% of account value, at full size)",
+    min_value=0.1, step=0.1, format="%.1f",
+    value=sizing_settings["ideal_baseline_pct"], key="settings_ideal_baseline_pct",
+)
+window_size = size_col2.number_input(
+    "Rolling window (how many recent trades to look at)",
+    min_value=1, step=1, value=sizing_settings["window_size"], key="settings_window_size",
+)
+
+threshold_col1, threshold_col2 = st.columns(2)
+loss_threshold = threshold_col1.number_input(
+    "Losers in that window to step size DOWN",
+    min_value=1, step=1, value=sizing_settings["loss_threshold"], key="settings_loss_threshold",
+)
+win_threshold = threshold_col2.number_input(
+    "Winners in that window to step size UP",
+    min_value=1, step=1, value=sizing_settings["win_threshold"], key="settings_win_threshold",
+)
+
+st.caption(
+    "Tiers - Tier 1 is always full size (100%). Each step down/up moves "
+    "exactly one tier."
+)
+tier_pcts = sizing_settings["tier_pcts"]
+tier_col1, tier_col2, tier_col3, tier_col4 = st.columns(4)
+tier_col1.number_input("Tier 1 (%)", value=100.0, disabled=True)
+tier2_pct = tier_col2.number_input(
+    "Tier 2 (%)", min_value=0.0, max_value=100.0, step=5.0,
+    value=float(tier_pcts[1]), key="settings_tier2_pct",
+)
+tier3_pct = tier_col3.number_input(
+    "Tier 3 (%)", min_value=0.0, max_value=100.0, step=5.0,
+    value=float(tier_pcts[2]), key="settings_tier3_pct",
+)
+tier4_pct = tier_col4.number_input(
+    "Tier 4 (%)", min_value=0.0, max_value=100.0, step=5.0,
+    value=float(tier_pcts[3]), key="settings_tier4_pct",
+)
+
+if st.button("Save Position Management Settings"):
+    database.save_position_sizing_settings(
+        conn, ideal_baseline_pct, window_size, loss_threshold, win_threshold,
+        [100.0, tier2_pct, tier3_pct, tier4_pct],
+    )
+    st.success("Saved.")
+    st.rerun()
+
+st.divider()
+
 st.header("Open Positions Column Widths")
 st.caption(
     "Relative widths for the Positions & Stop-Loss table - not pixels, just "

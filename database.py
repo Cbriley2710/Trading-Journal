@@ -458,6 +458,40 @@ def init_db(conn):
             CONSTRAINT single_row CHECK (id = 1)
         )
     """)
+    # Position Management settings - the "ideal" baseline position size
+    # (as a % of account value) plus the rules for automatically scaling
+    # that baseline up/down based on recent win/loss performance (see
+    # position_sizing.py). One row, edited on the Settings page.
+    # tier_pcts is a JSON list like [100, 75, 50, 25] - tier 0 (index 0)
+    # is always the "full size" tier (100% of the ideal baseline).
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS position_sizing_settings (
+            id INTEGER PRIMARY KEY DEFAULT 1,
+            ideal_baseline_pct DOUBLE PRECISION NOT NULL DEFAULT 2.0,
+            window_size INTEGER NOT NULL DEFAULT 5,
+            loss_threshold INTEGER NOT NULL DEFAULT 3,
+            win_threshold INTEGER NOT NULL DEFAULT 4,
+            tier_pcts JSONB NOT NULL DEFAULT '[100, 75, 50, 25]',
+            CONSTRAINT single_row CHECK (id = 1)
+        )
+    """)
+    # Position Management's current state - which tier you're sitting at
+    # right now, plus a memory of the last rolling window that actually
+    # caused a step in each direction. That memory is what stops the
+    # tier from being pushed further every single time the app re-checks
+    # it (see position_sizing.evaluate_position_sizing()) - a step only
+    # happens again once the window has genuinely changed since the last
+    # one in that same direction.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS position_sizing_state (
+            id INTEGER PRIMARY KEY DEFAULT 1,
+            current_tier_index INTEGER NOT NULL DEFAULT 0,
+            last_down_window_key TEXT,
+            last_up_window_key TEXT,
+            updated_at TIMESTAMP,
+            CONSTRAINT single_row CHECK (id = 1)
+        )
+    """)
     # Adjustable layout preferences - starting with how wide each
     # column of the Open Positions table is (see get_open_positions_
     # column_widths() below). One JSONB blob rather than a column per
@@ -2733,6 +2767,93 @@ def get_realized_pl_since(conn, since_date):
     cur = conn.cursor()
     cur.execute("SELECT COALESCE(SUM(profit_loss), 0) FROM trades WHERE exit_date >= %s", (since_date,))
     return cur.fetchone()[0]
+
+
+_DEFAULT_POSITION_SIZING_SETTINGS = {
+    "ideal_baseline_pct": 2.0, "window_size": 5, "loss_threshold": 3,
+    "win_threshold": 4, "tier_pcts": [100, 75, 50, 25],
+}
+
+
+def get_position_sizing_settings(conn):
+    """
+    Returns the saved Position Management settings (see
+    position_sizing.py) - one row, since this app has a single user.
+    Falls back to _DEFAULT_POSITION_SIZING_SETTINGS until you've saved
+    your own on the Settings page.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT ideal_baseline_pct, window_size, loss_threshold, win_threshold, tier_pcts "
+        "FROM position_sizing_settings WHERE id = 1"
+    )
+    row = cur.fetchone()
+    if row is None:
+        return dict(_DEFAULT_POSITION_SIZING_SETTINGS)
+    return {
+        "ideal_baseline_pct": row[0], "window_size": row[1], "loss_threshold": row[2],
+        "win_threshold": row[3], "tier_pcts": row[4],
+    }
+
+
+def save_position_sizing_settings(conn, ideal_baseline_pct, window_size, loss_threshold, win_threshold, tier_pcts):
+    """Saves the Position Management settings - see get_position_sizing_settings()."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO position_sizing_settings
+            (id, ideal_baseline_pct, window_size, loss_threshold, win_threshold, tier_pcts)
+        VALUES (1, %s, %s, %s, %s, %s)
+        ON CONFLICT (id) DO UPDATE SET
+            ideal_baseline_pct = EXCLUDED.ideal_baseline_pct,
+            window_size = EXCLUDED.window_size,
+            loss_threshold = EXCLUDED.loss_threshold,
+            win_threshold = EXCLUDED.win_threshold,
+            tier_pcts = EXCLUDED.tier_pcts
+        """,
+        (ideal_baseline_pct, window_size, loss_threshold, win_threshold, Json(tier_pcts)),
+    )
+    conn.commit()
+
+
+_DEFAULT_POSITION_SIZING_STATE = {
+    "current_tier_index": 0, "last_down_window_key": None, "last_up_window_key": None,
+}
+
+
+def get_position_sizing_state(conn):
+    """Returns the saved Position Management tier state (see
+    position_sizing.evaluate_position_sizing()), or the "full size, no
+    history" default if it's never been evaluated yet."""
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT current_tier_index, last_down_window_key, last_up_window_key "
+        "FROM position_sizing_state WHERE id = 1"
+    )
+    row = cur.fetchone()
+    if row is None:
+        return dict(_DEFAULT_POSITION_SIZING_STATE)
+    return {"current_tier_index": row[0], "last_down_window_key": row[1], "last_up_window_key": row[2]}
+
+
+def _save_position_sizing_state(conn, current_tier_index, last_down_window_key, last_up_window_key):
+    """Saves the Position Management tier state - internal, called only
+    by position_sizing.evaluate_position_sizing() after it decides
+    whether a step happened."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO position_sizing_state (id, current_tier_index, last_down_window_key, last_up_window_key, updated_at)
+        VALUES (1, %s, %s, %s, %s)
+        ON CONFLICT (id) DO UPDATE SET
+            current_tier_index = EXCLUDED.current_tier_index,
+            last_down_window_key = EXCLUDED.last_down_window_key,
+            last_up_window_key = EXCLUDED.last_up_window_key,
+            updated_at = EXCLUDED.updated_at
+        """,
+        (current_tier_index, last_down_window_key, last_up_window_key, timeutil.now_eastern()),
+    )
+    conn.commit()
 
 
 def get_daily_report_status(conn, report_date):

@@ -40,6 +40,7 @@ from PIL import Image
 import archiving
 import charting
 import database
+import position_sizing
 from report_utils import get_secret, hex_to_rgb, safe_text
 
 PAGE_MARGIN_MM = 15
@@ -216,6 +217,27 @@ def build_report_pdf(conn, report_date):
         pdf.cell(0, 12, "Today's Thoughts", new_x="LMARGIN", new_y="NEXT")
         pdf.set_font("Helvetica", size=17)
         pdf.multi_cell(0, 9, safe_text(thoughts.strip()))
+
+    # Position Management (see position_sizing.py) - only the current
+    # tier and the rolling win/loss record, deliberately no dollar
+    # amounts or per-trade % figures here, for the same "shareable
+    # without revealing account value" reason as New Trades above. The
+    # detailed, per-position breakdown lives only in-app on the Open
+    # Positions page.
+    sizing = position_sizing.evaluate_position_sizing(conn)
+    pdf.ln(4)
+    pdf.set_font("Helvetica", style="B", size=20)
+    pdf.cell(0, 12, "Position Sizing", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", size=17)
+    tier_number = sizing["tier_index"] + 1
+    pdf.cell(
+        0, 9,
+        safe_text(
+            f"Tier {tier_number} ({sizing['tier_pct']:.0f}% of ideal size) - "
+            f"{sizing['winners']}W / {sizing['losers']}L of last {sizing['window_size']} trades"
+        ),
+        new_x="LMARGIN", new_y="NEXT",
+    )
 
     for list_id in range(1, 5):
         symbols = [w["symbol"] for w in watchlist if w["list_id"] == list_id]

@@ -32,6 +32,7 @@ import charting
 import database
 import ma_strategy
 import nav
+import position_sizing
 import session_keys as sk
 import timeutil
 from ui import scroll_to_anchor, stat_tile
@@ -457,36 +458,77 @@ else:
 
 st.divider()
 
+# --- Position sizing --------------------------------------------------------
+# This app can't place trades for you, so it can't actually enforce a
+# position size - what it CAN do is recommend one (see position_sizing.py)
+# and show whether what you actually put on lines up with that
+# recommendation. Recomputed on every page load - see
+# evaluate_position_sizing()'s own docstring for why that's safe (it
+# only steps the tier when something real has changed, not every time
+# this page happens to be viewed).
+st.header("Position Sizing")
+
+sizing = position_sizing.evaluate_position_sizing(conn)
+tier_number = sizing["tier_index"] + 1
+
+size_cols = st.columns(4)
+stat_tile(size_cols[0], "Current Tier", f"Tier {tier_number} ({sizing['tier_pct']:.0f}%)")
+stat_tile(
+    size_cols[1], "Recommended Size",
+    f"{sizing['recommended_pct_of_account']:.2f}% of account",
+)
+stat_tile(
+    size_cols[2], "Recommended Size ($)",
+    f"${sizing['recommended_dollar_amount']:,.2f}" if sizing["recommended_dollar_amount"] is not None
+    else "N/A (set account value)",
+)
+stat_tile(
+    size_cols[3], "Rolling Record",
+    f"{sizing['winners']}W / {sizing['losers']}L of last {sizing['window_size']}",
+)
+
+if sizing["step_direction"] == "down":
+    st.warning(f"Position size just stepped DOWN to Tier {tier_number} based on recent results.")
+elif sizing["step_direction"] == "up":
+    st.success(f"Position size just stepped UP to Tier {tier_number} based on recent results.")
+
+# Per-position adherence: how big each open position actually is, as a
+# % of account value, next to the size that's currently recommended -
+# a quick check on whether a trade was sized on-plan. Uses TODAY's
+# account value as the comparison point for every position (this app
+# doesn't keep a historical, day-by-day account value - see project
+# notes - so this is an approximation for older positions, not exact).
+if enriched:
+    st.caption("Each open position's actual size vs. today's recommended size.")
+    adherence_cols = st.columns([2, 2, 2])
+    adherence_cols[0].markdown("**Position**")
+    adherence_cols[1].markdown("**Actual Size**")
+    adherence_cols[2].markdown("**Recommended**")
+    for e in enriched:
+        actual_pct = (e["cost_basis"] / sizing["account_value"] * 100) if sizing["account_value"] else None
+        row_cols = st.columns([2, 2, 2])
+        row_cols[0].write(position_label(e))
+        row_cols[1].write(f"{actual_pct:.2f}% of account" if actual_pct is not None else "N/A")
+        row_cols[2].write(f"{sizing['recommended_pct_of_account']:.2f}% of account")
+
+st.divider()
+
 # --- Last 10 trades trend -------------------------------------------------
 st.header("Last 10 Trades")
 st.caption("Your most recent trades by entry date, open or closed, to spot a short-term trend.")
 
-trend_rows = []
-for trade in database.get_trades(conn):
-    trend_rows.append({
-        "symbol": trade["symbol"], "entry_date": trade["entry_date"],
-        "pl": trade["profit_loss"], "is_open": False, "direction": trade["direction"],
-    })
-for e in enriched:
-    if e["unrealized_pl"] is not None:
-        trend_rows.append({
-            "symbol": e["symbol"], "entry_date": e["entry_date"],
-            "pl": e["unrealized_pl"], "is_open": True, "direction": e["direction"],
-        })
+last10 = position_sizing.build_recent_trade_window(conn, 10)
 
-if not trend_rows:
+if not last10:
     st.info("No trades yet.")
 else:
-    trend_rows.sort(key=lambda r: r["entry_date"])
-    last10 = trend_rows[-10:]
-
     trend_chart = go.Figure()
     trend_chart.add_hline(y=0, line_color=charting.MUTED_COLOR, line_width=1)
     trend_chart.add_trace(go.Bar(
         x=[f"{r['symbol']}{' (S)' if r['direction'] == 'SHORT' else ''} {r['entry_date']:%m/%d}" for r in last10],
         y=[r["pl"] for r in last10],
         marker=dict(
-            color=[charting.win_loss_color(r["pl"] >= 0) for r in last10],
+            color=[charting.win_loss_color(r["is_win"]) for r in last10],
             opacity=[0.55 if r["is_open"] else 1.0 for r in last10],
         ),
         customdata=[["Open (unrealized)" if r["is_open"] else "Closed"] for r in last10],
