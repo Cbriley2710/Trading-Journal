@@ -76,6 +76,23 @@ def test_parse_infotable_xml_returns_empty_list_for_no_rows():
     assert institutional_holdings.parse_infotable_xml(empty_xml) == []
 
 
+def test_fetch_and_save_raises_instead_of_silently_saving_zero_holdings(monkeypatch):
+    # Regression test for a real bug: _fetch_infotable used to return []
+    # whenever a filing's info table document didn't have "infotable" in
+    # its filename (e.g. Millennium's real filings are named
+    # "MLP_Filing_20260630.xml") - which then got saved as a legitimate-
+    # looking empty quarter and reported as a successful fetch, with the
+    # actual failure invisible anywhere. This confirms that outcome now
+    # raises instead of quietly returning.
+    monkeypatch.setattr(institutional_holdings, "_fetch_infotable", lambda cik, accession: [])
+    fund = {"id": 1, "sec_cik": "0000000000", "display_name": "Whatever Fund"}
+    with pytest.raises(ValueError):
+        institutional_holdings._fetch_and_save_one_quarter(
+            conn=None, fund=fund, accession="0000000000-26-000001",
+            quarter_end=date(2026, 6, 30), filed_date=date(2026, 8, 1),
+        )
+
+
 FUND_CIK_2 = "0000000002"
 
 

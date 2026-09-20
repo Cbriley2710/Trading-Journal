@@ -149,10 +149,27 @@ def _recent_13f_filings(cik, limit=8):
 def _fetch_infotable(cik, accession):
     """
     Downloads and parses the actual holdings list (the "information
-    table") for one 13F-HR filing. Every 13F filing directory has a
-    form13fInfoTable.xml alongside its primary_doc.xml cover page - this
-    finds it via the filing's index.json rather than assuming the exact
-    filename, since a couple of very old filings name it differently.
+    table") for one 13F-HR filing, found via the filing's index.json
+    rather than assuming an exact filename.
+
+    A REAL BUG lived here: this used to look for "infotable" in the
+    filename, which works for most filers (form13fInfoTable.xml) but
+    NOT all - Millennium's filings are named e.g.
+    "MLP_Filing_20260630.xml", named by whatever filing-agent software
+    that manager's law firm/admin uses, which varies by filer AND can
+    even vary by year for the SAME filer. That mismatch made this
+    silently return [] for Millennium, Renaissance, Viking, Balyasny,
+    and Baupost's filings, and for older filings of a few others
+    (Citadel, Elliott, Two Sigma) - which then got saved as a
+    quarter with zero holdings and reported as a successful fetch, with
+    no error anywhere. Caught by manually sanity-checking stored
+    quarter counts after a backfill, not by any exception.
+
+    The fix: every 13F-HR filing has exactly ONE other XML document
+    besides primary_doc.xml (the cover page, always tiny, a few KB) -
+    that's the actual holdings list, and it is always by far the
+    largest file in the filing regardless of what it's named. Picking
+    the biggest non-cover-page XML is robust to any naming convention.
     """
     accession_nodash = accession.replace("-", "")
     cik_int = int(cik)
@@ -162,13 +179,14 @@ def _fetch_infotable(cik, accession):
         timeout=15,
     )
     index.raise_for_status()
-    filenames = [item["name"] for item in index.json()["directory"]["item"]]
-    infotable_name = next(
-        (name for name in filenames if "infotable" in name.lower() and name.lower().endswith(".xml")),
-        None,
-    )
-    if infotable_name is None:
+    items = index.json()["directory"]["item"]
+    candidate_items = [
+        item for item in items
+        if item["name"].lower().endswith(".xml") and item["name"].lower() != "primary_doc.xml"
+    ]
+    if not candidate_items:
         return []
+    infotable_name = max(candidate_items, key=lambda item: int(item.get("size") or 0))["name"]
 
     xml_response = requests.get(
         f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{accession_nodash}/{infotable_name}",
@@ -291,6 +309,16 @@ def _fetch_and_save_one_quarter(conn, fund, accession, quarter_end, filed_date):
     """The actual fetch-parse-cap-resolve-save pipeline for ONE 13F
     filing, shared by refresh_fund()'s backfill loop below."""
     holdings = _fetch_infotable(fund["sec_cik"], accession)
+    if not holdings:
+        # A real, once-tracked-companies-sized fund reporting ZERO
+        # positions is not a real outcome - it means _fetch_infotable
+        # couldn't find/parse the actual holdings document (see its
+        # docstring for the exact bug this caught). Raising here turns
+        # that into a visible "error" status instead of a silently
+        # "successful" empty quarter - see database.save_fund_holdings()
+        # call site below, which would otherwise happily save nothing
+        # and report success.
+        raise ValueError(f"parsed zero holdings for accession {accession} - likely a file-detection failure")
     holdings = _combine_duplicate_cusips(holdings)
     # The TRUE total across every position this fund reported - computed
     # BEFORE trimming to the top 300, so "% of portfolio" stays accurate
@@ -339,7 +367,7 @@ def refresh_fund(conn, fund, quarters_to_keep=8):
             continue
         try:
             _fetch_and_save_one_quarter(conn, fund, accession, quarter_end, filed_date)
-        except requests.RequestException as e:
+        except (requests.RequestException, ValueError) as e:
             # Report what DID get fetched before the failure, rather than
             # losing that progress from the status message entirely.
             done = ", ".join(_quarter_label(q) for q in fetched) or "none"
