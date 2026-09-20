@@ -1,10 +1,19 @@
 """
 Institutional Holdings
 =====================
-Type in a ticker, see how many of a curated list of well-known hedge
-funds hold it - "14 of 20 funds hold this" - plus a per-fund
-checklist showing shares, dollar value, and whether each fund added,
-trimmed, or closed the position last quarter.
+Two ways to use this page:
+  Look Up a Ticker   Type in a ticker, see how many of a curated list of
+                      well-known hedge funds hold it - "14 of 20 funds
+                      hold this" - plus a per-fund checklist showing
+                      shares, dollar value, % of that fund's own
+                      portfolio, and whether it was added/trimmed/closed
+                      last quarter.
+  Recent Moves       The other direction - browse every position that
+                      actually changed last quarter across all 20
+                      funds, without needing to already have a ticker
+                      in mind. See get_recent_moves()'s own docstring
+                      for why a fund only shows up here once it has TWO
+                      quarters of data to compare.
 
 WHERE THE DATA COMES FROM AND ITS REAL LIMITS: every fund here is
 required to file a public SEC Form 13F every quarter, listing its long
@@ -14,6 +23,11 @@ late. That means:
   - There's no purchase date - "added shares" only ever means "held
     more at this quarter-end than the quarter-end before."
   - Short positions and non-US securities don't show up here at all.
+  - Only each fund's ~300 largest positions by dollar value are tracked
+    (a systematic/quant fund can report tens of thousands of tiny
+    ones) - "% of Portfolio" still comes out accurate even for a
+    position outside that top 300, since it's this fund's true total
+    that was cut, not this position's fund_total_value_usd.
 See institutional_holdings.py's own docstring for the full picture,
 including why a stock is matched by CUSIP (its SEC filing identifier),
 not ticker, and how that gets resolved.
@@ -51,7 +65,7 @@ conn = database.get_connection()
 database.seed_hedge_funds(conn)  # only actually inserts anything the very first time this page ever runs
 
 
-# --- Change badge styling -------------------------------------------------
+# --- Shared formatting helpers ---------------------------------------------
 
 _CHANGE_COLORS = {
     "New": charting.GOOD_COLOR,
@@ -62,60 +76,133 @@ _CHANGE_COLORS = {
 }
 
 
-def _render_snapshot_table(snapshot):
-    """Held funds first (largest position first), then funds that don't
-    hold it - each as one plain row rather than a dataframe, so the
-    Change column can be colored the same way GOOD_COLOR/CRITICAL_COLOR
-    color wins and losses everywhere else in this app."""
-    held = sorted([r for r in snapshot if r["held"]], key=lambda r: r["value_usd"], reverse=True)
-    not_held = sorted([r for r in snapshot if not r["held"]], key=lambda r: r["fund"])
-
-    header = st.columns([3, 1, 2, 2, 2, 2])
-    for col, label in zip(header, ["Fund", "Holds It?", "Shares", "Value", "Change", "As Of"]):
-        col.markdown(f"**{label}**")
-
-    for row in held + not_held:
-        cols = st.columns([3, 1, 2, 2, 2, 2])
-        cols[0].write(row["fund"])
-        cols[1].write("✅" if row["held"] else "—")
-        cols[2].write(f"{row['shares']:,}" if row["shares"] is not None else "—")
-        cols[3].write(f"${row['value_usd']:,}" if row["value_usd"] is not None else "—")
-        if row["change"]:
-            color = _CHANGE_COLORS.get(row["change"], charting.MUTED_COLOR)
-            cols[4].markdown(f"<span style='color:{color};font-weight:600;'>{row['change']}</span>", unsafe_allow_html=True)
-        else:
-            cols[4].write("—")
-        cols[5].write(row["quarter_end"].strftime("%b %Y") if row["quarter_end"] else "No data yet")
+def _format_change(change, change_pct):
+    """"Increased +42%", "New" (no % - can't quantify a rise from zero),
+    "Closed -100%", colored the same way GOOD_COLOR/CRITICAL_COLOR color
+    wins and losses everywhere else in this app."""
+    if not change:
+        return "—"
+    text = change if change_pct is None else f"{change} {change_pct:+.0f}%"
+    color = _CHANGE_COLORS.get(change, charting.MUTED_COLOR)
+    return f"<span style='color:{color};font-weight:600;'>{text}</span>"
 
 
-# --- Ticker lookup ---------------------------------------------------------
+def _format_as_of(quarter_end, stale):
+    if not quarter_end:
+        return "No data yet"
+    text = quarter_end.strftime("%b %Y")
+    if stale:
+        # This fund hasn't filed its most recent quarter yet (or filed
+        # late) - flagged so its row isn't mistaken for being as current
+        # as every other fund's, which could otherwise read as "doesn't
+        # hold it this quarter" when really it's just "hasn't told us
+        # about this quarter at all yet."
+        return f"<span style='color:{charting.MUTED_COLOR};'>{text} ⚠️</span>"
+    return text
 
-ticker = st.text_input("Ticker", placeholder="e.g. AAPL").strip().upper()
 
-if ticker:
+# --- Look Up a Ticker -------------------------------------------------------
+
+def _render_lookup_tab():
+    ticker = st.text_input("Ticker", placeholder="e.g. AAPL").strip().upper()
+
+    if not ticker:
+        st.info("Type a ticker above to see which tracked funds hold it.")
+        return
+
     snapshot = institutional_holdings.get_snapshot_for_ticker(conn, ticker)
     held_count = sum(1 for r in snapshot if r["held"])
     total_count = len(snapshot)
 
+    if total_count == 0:
+        st.info("No funds are being tracked yet - add some below under Manage Tracked Funds.")
+        return
+
     stat_col, _ = st.columns([1, 3])
-    charting_color = charting.GOOD_COLOR if held_count > 0 else charting.MUTED_COLOR
+    stat_color = charting.GOOD_COLOR if held_count > 0 else charting.MUTED_COLOR
     with stat_col:
         st.markdown(
             f"""
             <div style="text-align:center;">
                 <div style="font-size:0.85rem;color:{charting.MUTED_COLOR};">Funds holding {ticker}</div>
-                <div style="font-size:2rem;font-weight:700;color:{charting_color};">{held_count} of {total_count}</div>
+                <div style="font-size:2rem;font-weight:700;color:{stat_color};">{held_count} of {total_count}</div>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-    if total_count == 0:
-        st.info("No funds are being tracked yet - add some below under Manage Tracked Funds.")
-    else:
-        _render_snapshot_table(snapshot)
-else:
-    st.info("Type a ticker above to see which tracked funds hold it.")
+    # Held funds first (biggest position first), then funds that don't hold it.
+    held = sorted([r for r in snapshot if r["held"]], key=lambda r: r["value_usd"], reverse=True)
+    not_held = sorted([r for r in snapshot if not r["held"]], key=lambda r: r["fund"])
+
+    widths = [3, 1, 2, 2, 2, 2, 2]
+    header = st.columns(widths)
+    for col, label in zip(header, ["Fund", "Holds It?", "Shares", "Value", "% of Portfolio", "Change", "As Of"]):
+        col.markdown(f"**{label}**")
+
+    for row in held + not_held:
+        cols = st.columns(widths)
+        cols[0].write(row["fund"])
+        cols[1].write("✅" if row["held"] else "—")
+        cols[2].write(f"{row['shares']:,}" if row["shares"] is not None else "—")
+        cols[3].write(f"${row['value_usd']:,}" if row["value_usd"] is not None else "—")
+        cols[4].write(f"{row['portfolio_pct']:.1f}%" if row["portfolio_pct"] is not None else "—")
+        cols[5].markdown(_format_change(row["change"], row["change_pct"]), unsafe_allow_html=True)
+        cols[6].markdown(_format_as_of(row["quarter_end"], row["stale"]), unsafe_allow_html=True)
+
+
+# --- Recent Moves ------------------------------------------------------------
+
+_MOVE_TYPES = ["New", "Increased", "Decreased", "Closed"]
+
+
+def _render_recent_moves_tab():
+    st.caption(
+        "Every position that changed between a fund's two most recently "
+        "fetched quarters - browse for something worth looking into, "
+        "instead of already knowing a ticker to check. A fund only shows "
+        "up here once TWO quarters of its data have been fetched, so "
+        "right after adding a new fund (or right after this app's very "
+        "first-ever refresh) this list will be empty until next quarter."
+    )
+
+    selected_types = st.multiselect("Show", _MOVE_TYPES, default=["New", "Increased"])
+    moves = institutional_holdings.get_recent_moves(conn)
+    filtered = [m for m in moves if m["change"] in selected_types]
+
+    if not moves:
+        st.info("No quarter-over-quarter data yet - check back after the next refresh.")
+        return
+    if not filtered:
+        st.info("No moves of the selected type(s) in the latest data.")
+        return
+
+    # Biggest conviction moves first - % of that fund's OWN portfolio is a
+    # fairer ranking than raw dollar value, since it isn't skewed by fund size.
+    filtered.sort(key=lambda m: m["portfolio_pct"] or 0, reverse=True)
+
+    widths = [2, 1, 3, 2, 2, 2, 2, 2]
+    header = st.columns(widths)
+    for col, label in zip(header, ["Fund", "Ticker", "Company", "Shares", "Value", "% of Portfolio", "Change", "As Of"]):
+        col.markdown(f"**{label}**")
+
+    for m in filtered:
+        cols = st.columns(widths)
+        cols[0].write(m["fund"])
+        cols[1].write(m["ticker"] or "—")
+        cols[2].write(m["issuer_name"])
+        cols[3].write(f"{m['shares']:,}" if m["shares"] else "—")
+        cols[4].write(f"${m['value_usd']:,}" if m["value_usd"] else "—")
+        cols[5].write(f"{m['portfolio_pct']:.1f}%" if m["portfolio_pct"] is not None else "—")
+        cols[6].markdown(_format_change(m["change"], m["change_pct"]), unsafe_allow_html=True)
+        cols[7].markdown(_format_as_of(m["quarter_end"], m["stale"]), unsafe_allow_html=True)
+
+
+lookup_tab, moves_tab = st.tabs(["Look Up a Ticker", "Recent Moves"])
+with lookup_tab:
+    _render_lookup_tab()
+with moves_tab:
+    _render_recent_moves_tab()
 
 
 # --- Refresh ----------------------------------------------------------------

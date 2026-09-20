@@ -179,14 +179,22 @@ def parse_infotable_xml(xml_bytes):
         cusip = row.findtext("n:cusip", namespaces=ns)
         issuer_name = row.findtext("n:nameOfIssuer", namespaces=ns)
         shares = row.findtext("n:shrsOrPrnAmt/n:sshPrnamt", namespaces=ns)
-        value_thousands = row.findtext("n:value", namespaces=ns)
-        if not cusip or shares is None or value_thousands is None:
+        value_dollars = row.findtext("n:value", namespaces=ns)
+        if not cusip or shares is None or value_dollars is None:
             continue
         holdings.append({
             "cusip": cusip,
             "issuer_name": issuer_name or cusip,
             "shares": int(shares),
-            "value_usd": int(value_thousands) * 1000,  # 13F values are reported in thousands of dollars
+            # SEC's pre-2023 13F schema reported this in THOUSANDS of
+            # dollars - a real bug here originally assumed that and
+            # multiplied by 1000, which was only caught by sanity-
+            # checking an implied fund total against real-world scale
+            # (it came out to hundreds of TRILLIONS of dollars, more
+            # than the entire global stock market). Every filing this
+            # app fetches is current (this XML schema), which reports
+            # whole dollars directly - no conversion needed.
+            "value_usd": int(value_dollars),
         })
     return holdings
 
@@ -286,6 +294,11 @@ def refresh_fund(conn, fund):
         return f"error: {e}"
 
     holdings = _combine_duplicate_cusips(holdings)
+    # The TRUE total across every position this fund reported - computed
+    # BEFORE trimming to the top 300, so "% of portfolio" stays accurate
+    # even for a position that (rightly) got cut for being too small to
+    # individually track.
+    fund_total_value_usd = sum(h["value_usd"] for h in holdings)
     # Keep only the biggest positions - see _MAX_POSITIONS_PER_FUND's
     # docstring note above for why this is necessary, not just a shortcut.
     holdings.sort(key=lambda h: h["value_usd"], reverse=True)
@@ -296,7 +309,7 @@ def refresh_fund(conn, fund):
     for h in holdings:
         h["ticker"] = ticker_map.get(h["cusip"])
 
-    database.save_fund_holdings(conn, fund["id"], quarter_end, filed_date, holdings)
+    database.save_fund_holdings(conn, fund["id"], quarter_end, filed_date, holdings, fund_total_value_usd)
     return f"updated to Q{(quarter_end.month - 1) // 3 + 1} {quarter_end.year}"
 
 
@@ -316,26 +329,69 @@ def refresh_all_funds(conn):
     return results
 
 
+def _classify_change(current, previous):
+    """
+    Compares one position's current-quarter row to its previous-quarter
+    row (either may be None) and returns (change, change_pct):
+      - current only            -> ("New", None) - can't quantify a % increase from zero
+      - current and previous    -> ("Increased"/"Decreased"/"Unchanged", the real %change in shares)
+      - previous only           -> ("Closed", -100.0) - the whole position is gone
+      - neither                 -> (None, None)
+    """
+    if current is not None and previous is None:
+        return "New", None
+    if current is not None and previous is not None:
+        if current["shares"] > previous["shares"]:
+            change = "Increased"
+        elif current["shares"] < previous["shares"]:
+            change = "Decreased"
+        else:
+            change = "Unchanged"
+        change_pct = (
+            (current["shares"] - previous["shares"]) / previous["shares"] * 100
+            if previous["shares"] else None
+        )
+        return change, change_pct
+    if current is None and previous is not None:
+        return "Closed", -100.0
+    return None, None
+
+
+def _portfolio_pct(holding):
+    """What % of the fund's TOTAL 13F value this one position is - None
+    if the fund's total isn't known (only true for data fetched before
+    this was tracked)."""
+    if holding is None or not holding.get("fund_total_value_usd"):
+        return None
+    return holding["value_usd"] / holding["fund_total_value_usd"] * 100
+
+
 def get_snapshot_for_ticker(conn, ticker):
     """
     For every active tracked fund, works out whether it holds `ticker`
     as of its most recently fetched quarter, and how that compares to
     the quarter before. Returns a list of dicts, one per fund:
 
-        {fund, held, shares, value_usd, quarter_end, change}
+        {fund, held, shares, value_usd, portfolio_pct, quarter_end,
+         change, change_pct, stale}
 
-    `change` is one of "New", "Increased", "Decreased", "Unchanged"
-    (only meaningful when held is True), or "Closed" (held last quarter,
-    not anymore) - None when the fund has no data at all yet for this
-    stock in either of its two most recent quarters.
+    `change`/`change_pct` come from _classify_change() above. `stale`
+    is True when this fund's latest fetched quarter is older than the
+    newest quarter ANY tracked fund has reported - i.e. this fund
+    hasn't filed its most recent 13F yet (or filed late), so its row
+    here may be a quarter behind everyone else's.
     """
     ticker = ticker.strip().upper()
+    newest_quarter = database.get_newest_quarter_across_funds(conn)
     snapshot = []
     for fund in database.get_hedge_funds(conn, active_only=True):
         quarters = database.get_fund_quarters(conn, fund["id"], limit=2)
         row = {
             "fund": fund["display_name"], "held": False, "shares": None,
-            "value_usd": None, "quarter_end": quarters[0] if quarters else None, "change": None,
+            "value_usd": None, "portfolio_pct": None,
+            "quarter_end": quarters[0] if quarters else None,
+            "change": None, "change_pct": None,
+            "stale": bool(quarters and newest_quarter and quarters[0] < newest_quarter),
         }
         if not quarters:
             snapshot.append(row)
@@ -353,17 +409,59 @@ def get_snapshot_for_ticker(conn, ticker):
                 previous_match = next((h for h in previous_holdings.values() if h["ticker"] == ticker), None)
 
         if current is not None:
-            row.update(held=True, shares=current["shares"], value_usd=current["value_usd"])
-            if previous_match is None:
-                row["change"] = "New"
-            elif current["shares"] > previous_match["shares"]:
-                row["change"] = "Increased"
-            elif current["shares"] < previous_match["shares"]:
-                row["change"] = "Decreased"
-            else:
-                row["change"] = "Unchanged"
-        elif previous_match is not None:
-            row["change"] = "Closed"
+            row.update(held=True, shares=current["shares"], value_usd=current["value_usd"],
+                       portfolio_pct=_portfolio_pct(current))
+        row["change"], row["change_pct"] = _classify_change(current, previous_match)
 
         snapshot.append(row)
     return snapshot
+
+
+def get_recent_moves(conn):
+    """
+    Across every active tracked fund, every position whose share count
+    changed between that fund's two most recently fetched quarters -
+    the data behind the "Recent Moves" discovery tab (as opposed to
+    looking up one ticker you already have in mind). A fund with only
+    ONE fetched quarter so far contributes nothing here - "New" would
+    be trivially true for every single position on a first-ever fetch,
+    which isn't a real signal, just an empty baseline.
+
+    Returns a list of dicts: {fund, ticker, issuer_name, shares,
+    value_usd, portfolio_pct, change, change_pct, quarter_end, stale},
+    one row per position that changed - "Unchanged" positions are left
+    out entirely (there'd be thousands of them, and "still holds it" is
+    not a move). Unsorted - the page sorts/filters for display.
+    """
+    newest_quarter = database.get_newest_quarter_across_funds(conn)
+    moves = []
+    for fund in database.get_hedge_funds(conn, active_only=True):
+        quarters = database.get_fund_quarters(conn, fund["id"], limit=2)
+        if len(quarters) < 2:
+            continue
+
+        latest_holdings = {h["cusip"]: h for h in database.get_fund_holdings(conn, fund["id"], quarters[0])}
+        previous_holdings = {h["cusip"]: h for h in database.get_fund_holdings(conn, fund["id"], quarters[1])}
+        stale = bool(newest_quarter and quarters[0] < newest_quarter)
+
+        for cusip in set(latest_holdings) | set(previous_holdings):
+            current = latest_holdings.get(cusip)
+            previous = previous_holdings.get(cusip)
+            change, change_pct = _classify_change(current, previous)
+            if change in (None, "Unchanged"):
+                continue
+
+            reference = current or previous  # Closed positions have no `current` row to read issuer/ticker from
+            moves.append({
+                "fund": fund["display_name"],
+                "ticker": reference["ticker"],
+                "issuer_name": reference["issuer_name"],
+                "shares": current["shares"] if current else 0,
+                "value_usd": current["value_usd"] if current else 0,
+                "portfolio_pct": _portfolio_pct(current) if current else _portfolio_pct(previous),
+                "change": change,
+                "change_pct": change_pct,
+                "quarter_end": quarters[0],
+                "stale": stale,
+            })
+    return moves

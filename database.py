@@ -791,6 +791,16 @@ def init_db(conn):
             UNIQUE (fund_id, cusip, quarter_end)
         )
     """)
+    # The fund's TOTAL reported 13F value for this quarter (every
+    # position it holds, not just the top-300 kept in this table) -
+    # repeated on every row for that fund+quarter rather than a
+    # separate table, so "what % of this fund's portfolio is this
+    # position" is a plain division on the row itself, no join needed.
+    # Nullable because it's only known going forward (see
+    # institutional_holdings.refresh_fund()) - added after this table
+    # already existed.
+    if not _column_exists(cur, "hedge_fund_holdings", "fund_total_value_usd"):
+        cur.execute("ALTER TABLE hedge_fund_holdings ADD COLUMN fund_total_value_usd BIGINT")
     # A 13F only ever identifies a security by CUSIP, never by ticker -
     # this is a small cache of CUSIP -> ticker lookups (via OpenFIGI, see
     # institutional_holdings.resolve_tickers()) so the same CUSIP is
@@ -3274,7 +3284,7 @@ def get_fund_holdings(conn, fund_id, quarter_end):
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT cusip, issuer_name, ticker, shares, value_usd, filed_date
+        SELECT cusip, issuer_name, ticker, shares, value_usd, filed_date, fund_total_value_usd
         FROM hedge_fund_holdings WHERE fund_id = %s AND quarter_end = %s
         """,
         (fund_id, quarter_end),
@@ -3283,34 +3293,52 @@ def get_fund_holdings(conn, fund_id, quarter_end):
         {
             "cusip": row[0], "issuer_name": row[1], "ticker": row[2],
             "shares": row[3], "value_usd": row[4], "filed_date": row[5],
+            "fund_total_value_usd": row[6],
         }
         for row in cur.fetchall()
     ]
 
 
-def save_fund_holdings(conn, fund_id, quarter_end, filed_date, holdings):
+def get_newest_quarter_across_funds(conn):
+    """The most recent quarter_end ANY tracked fund has reported -
+    used to flag a fund whose own latest data is older than that (it
+    hasn't filed its most recent 13F yet, or filed late) so that's
+    visible instead of silently understating its current position."""
+    cur = conn.cursor()
+    cur.execute("SELECT MAX(quarter_end) FROM hedge_fund_holdings")
+    return cur.fetchone()[0]
+
+
+def save_fund_holdings(conn, fund_id, quarter_end, filed_date, holdings, fund_total_value_usd):
     """
     Stores one fund's full 13F for one quarter - `holdings` is a list
-    of {cusip, issuer_name, ticker, shares, value_usd} dicts. ON
-    CONFLICT overwrites rather than skips, so re-running a refresh
-    after a fund files a 13F-HR/A amendment picks up the corrected
-    numbers instead of keeping the original filing's stale ones.
+    of {cusip, issuer_name, ticker, shares, value_usd} dicts (already
+    trimmed to the fund's biggest positions - see institutional_
+    holdings._MAX_POSITIONS_PER_FUND). `fund_total_value_usd` is the
+    fund's TRUE total across every position it reported, computed
+    before that trim, so % of portfolio stays accurate even for
+    positions outside the top 300. ON CONFLICT overwrites rather than
+    skips, so re-running a refresh after a fund files a 13F-HR/A
+    amendment picks up the corrected numbers instead of keeping the
+    original filing's stale ones.
     """
     cur = conn.cursor()
     for h in holdings:
         cur.execute(
             """
             INSERT INTO hedge_fund_holdings
-                (fund_id, cusip, issuer_name, ticker, shares, value_usd, quarter_end, filed_date)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                (fund_id, cusip, issuer_name, ticker, shares, value_usd, quarter_end, filed_date, fund_total_value_usd)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (fund_id, cusip, quarter_end) DO UPDATE SET
                 issuer_name = EXCLUDED.issuer_name,
                 ticker = EXCLUDED.ticker,
                 shares = EXCLUDED.shares,
                 value_usd = EXCLUDED.value_usd,
-                filed_date = EXCLUDED.filed_date
+                filed_date = EXCLUDED.filed_date,
+                fund_total_value_usd = EXCLUDED.fund_total_value_usd
             """,
-            (fund_id, h["cusip"], h["issuer_name"], h.get("ticker"), h["shares"], h["value_usd"], quarter_end, filed_date),
+            (fund_id, h["cusip"], h["issuer_name"], h.get("ticker"), h["shares"], h["value_usd"],
+             quarter_end, filed_date, fund_total_value_usd),
         )
     conn.commit()
 
