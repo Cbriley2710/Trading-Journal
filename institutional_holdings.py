@@ -100,15 +100,27 @@ def find_cik_candidates(name):
     return candidates
 
 
-def _latest_13f_filing(cik):
+def _recent_13f_filings(cik, limit=8):
     """
-    Returns (accession_number, quarter_end, filed_date) for a fund's
-    most recent 13F-HR ("holdings report"), or None if it has never
-    filed one. Deliberately skips 13F-NT ("notice") filings - those are
-    filed by a related entity that reports its holdings through a
-    DIFFERENT filer instead (see D. E. Shaw's setup: two of its three
-    SEC entities file 13F-NT pointing back to the one that actually
-    lists holdings) - an NT filing has no positions in it at all.
+    Returns up to `limit` (accession_number, quarter_end, filed_date)
+    tuples for a fund's most recent 13F-HR ("holdings report") filings,
+    newest quarter first - the last two years' worth by default (13F is
+    quarterly, so 8 filings = ~2 years of history to actually compare
+    trends against, not just one quarter's snapshot).
+
+    Deliberately skips 13F-NT ("notice") filings - those are filed by a
+    related entity that reports its holdings through a DIFFERENT filer
+    instead (see D. E. Shaw's setup: two of its three SEC entities file
+    13F-NT pointing back to the one that actually lists holdings) - an
+    NT filing has no positions in it at all. Also skips 13F-HR/A
+    (amendments) for simplicity - the rare correction isn't worth the
+    added complexity of reconciling it against the original.
+
+    SEC's submissions.json only holds a filer's most recent ~1000
+    filings of ANY type in `filings.recent` - for a fund that also
+    files many non-13F disclosures, its 13F-HR filings could in theory
+    fall outside that window sooner than 2 years back, in which case
+    this simply returns fewer than `limit`.
     """
     response = requests.get(
         f"https://data.sec.gov/submissions/CIK{cik}.json",
@@ -118,16 +130,20 @@ def _latest_13f_filing(cik):
     response.raise_for_status()
     recent = response.json()["filings"]["recent"]
 
+    filings = []
     for form, accession, period, filed in zip(
         recent["form"], recent["accessionNumber"], recent["reportDate"], recent["filingDate"]
     ):
-        if form == "13F-HR":
-            return (
-                accession,
-                datetime.strptime(period, "%Y-%m-%d").date(),
-                datetime.strptime(filed, "%Y-%m-%d").date(),
-            )
-    return None
+        if form != "13F-HR":
+            continue
+        filings.append((
+            accession,
+            datetime.strptime(period, "%Y-%m-%d").date(),
+            datetime.strptime(filed, "%Y-%m-%d").date(),
+        ))
+        if len(filings) == limit:
+            break
+    return filings
 
 
 def _fetch_infotable(cik, accession):
@@ -267,32 +283,14 @@ def resolve_tickers(conn, cusips):
         time.sleep(0.3)
 
 
-def refresh_fund(conn, fund):
-    """
-    Fetches one fund's latest 13F-HR, if it's newer than what's already
-    stored, resolves any newly-seen CUSIPs to tickers, and saves the
-    holdings. Returns a short status string for the refresh summary
-    shown on the page: "up to date", "updated to Q<n> <year>", or
-    "no 13F-HR filing found" / "error: <message>".
-    """
-    try:
-        latest = _latest_13f_filing(fund["sec_cik"])
-    except requests.RequestException as e:
-        return f"error: {e}"
+def _quarter_label(quarter_end):
+    return f"Q{(quarter_end.month - 1) // 3 + 1} {quarter_end.year}"
 
-    if latest is None:
-        return "no 13F-HR filing found"
 
-    accession, quarter_end, filed_date = latest
-    already_have = database.get_fund_quarters(conn, fund["id"], limit=1)
-    if already_have and already_have[0] == quarter_end:
-        return "up to date"
-
-    try:
-        holdings = _fetch_infotable(fund["sec_cik"], accession)
-    except requests.RequestException as e:
-        return f"error: {e}"
-
+def _fetch_and_save_one_quarter(conn, fund, accession, quarter_end, filed_date):
+    """The actual fetch-parse-cap-resolve-save pipeline for ONE 13F
+    filing, shared by refresh_fund()'s backfill loop below."""
+    holdings = _fetch_infotable(fund["sec_cik"], accession)
     holdings = _combine_duplicate_cusips(holdings)
     # The TRUE total across every position this fund reported - computed
     # BEFORE trimming to the top 300, so "% of portfolio" stays accurate
@@ -310,7 +308,47 @@ def refresh_fund(conn, fund):
         h["ticker"] = ticker_map.get(h["cusip"])
 
     database.save_fund_holdings(conn, fund["id"], quarter_end, filed_date, holdings, fund_total_value_usd)
-    return f"updated to Q{(quarter_end.month - 1) // 3 + 1} {quarter_end.year}"
+
+
+def refresh_fund(conn, fund, quarters_to_keep=8):
+    """
+    Brings one fund's stored history up to its `quarters_to_keep` most
+    recent 13F-HR filings (2 years' worth by default) - fetching
+    whichever of those quarters aren't already stored, and resolving
+    any newly-seen CUSIPs to tickers along the way. Already-stored
+    quarters are never re-fetched, so a routine refresh (everything
+    already backfilled, just checking for a newly-filed quarter) only
+    ever does the one new quarter's worth of work, not all 8 again.
+
+    Returns a short status string for the refresh summary shown on the
+    page: "up to date", "fetched N quarter(s): Q<n> <year>, ...", or
+    "no 13F-HR filing found" / "error: <message>".
+    """
+    try:
+        filings = _recent_13f_filings(fund["sec_cik"], limit=quarters_to_keep)
+    except requests.RequestException as e:
+        return f"error: {e}"
+
+    if not filings:
+        return "no 13F-HR filing found"
+
+    already_have = set(database.get_fund_quarters(conn, fund["id"], limit=quarters_to_keep))
+    fetched = []
+    for accession, quarter_end, filed_date in filings:
+        if quarter_end in already_have:
+            continue
+        try:
+            _fetch_and_save_one_quarter(conn, fund, accession, quarter_end, filed_date)
+        except requests.RequestException as e:
+            # Report what DID get fetched before the failure, rather than
+            # losing that progress from the status message entirely.
+            done = ", ".join(_quarter_label(q) for q in fetched) or "none"
+            return f"error fetching {_quarter_label(quarter_end)} (fetched so far: {done}): {e}"
+        fetched.append(quarter_end)
+
+    if not fetched:
+        return "up to date"
+    return f"fetched {len(fetched)} quarter(s): " + ", ".join(_quarter_label(q) for q in sorted(fetched))
 
 
 def refresh_all_funds(conn):

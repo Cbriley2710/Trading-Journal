@@ -103,8 +103,31 @@ def _format_as_of(quarter_end, stale):
 
 # --- Look Up a Ticker -------------------------------------------------------
 
+_TICKER_INPUT_KEY = "institutional_holdings_ticker"
+
+
+def _render_watchlist_picker():
+    """A row of one-click buttons for every ticker on your watchlist
+    (across all 5 lists - same source as the Screener page's own known-
+    tickers helper), so looking up a stock you're already tracking
+    doesn't require re-typing its symbol. Clicking one sets the ticker
+    text input's value via session_state and reruns - the standard
+    Streamlit way to make a button "fill in" another widget."""
+    watchlist_symbols = sorted({w["symbol"] for w in database.get_watchlist(conn)})
+    if not watchlist_symbols:
+        return
+
+    st.caption("From your watchlist:")
+    cols = st.columns(8)
+    for i, symbol in enumerate(watchlist_symbols):
+        if cols[i % 8].button(symbol, key=f"institutional_watchlist_pick_{symbol}"):
+            st.session_state[_TICKER_INPUT_KEY] = symbol
+            st.rerun()
+
+
 def _render_lookup_tab():
-    ticker = st.text_input("Ticker", placeholder="e.g. AAPL").strip().upper()
+    _render_watchlist_picker()
+    ticker = st.text_input("Ticker", placeholder="e.g. AAPL", key=_TICKER_INPUT_KEY).strip().upper()
 
     if not ticker:
         st.info("Type a ticker above to see which tracked funds hold it.")
@@ -208,10 +231,10 @@ with moves_tab:
 # --- Refresh ----------------------------------------------------------------
 
 st.divider()
-if st.button("Refresh Holdings Data", help="Checks SEC EDGAR for each tracked fund's latest 13F filing"):
-    with st.spinner("Checking SEC EDGAR for each fund's latest 13F filing..."):
+if st.button("Refresh Holdings Data", help="Checks SEC EDGAR and backfills up to the last 8 quarters per fund"):
+    with st.spinner("Checking SEC EDGAR for each fund's latest filings..."):
         results = institutional_holdings.refresh_all_funds(conn)
-    updated = {name: status for name, status in results.items() if status.startswith("updated")}
+    updated = {name: status for name, status in results.items() if status.startswith("fetched")}
     errors = {name: status for name, status in results.items() if status.startswith("error") or "no 13F" in status}
     if updated:
         st.success("Updated: " + ", ".join(f"{name} ({status})" for name, status in updated.items()))
