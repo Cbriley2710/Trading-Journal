@@ -249,3 +249,30 @@ def test_recent_moves_includes_a_real_change_but_not_an_unchanged_position(conn)
     assert fund_moves[0]["ticker"] == TICKER
     assert fund_moves[0]["change"] == "Increased"
     assert fund_moves[0]["change_pct"] == 50.0
+
+
+def test_ticker_history_returns_values_only_for_quarters_actually_held(conn):
+    fund = _make_test_fund(conn)
+    _save(conn, fund["id"], date(2026, 3, 31), date(2026, 5, 1), [
+        {"cusip": "TESTCUSIP1", "issuer_name": "Test Co", "ticker": TICKER, "shares": 1000, "value_usd": 100000},
+    ], total=1000000)
+    _save(conn, fund["id"], date(2026, 6, 30), date(2026, 8, 1), [
+        {"cusip": "TESTCUSIP2", "issuer_name": "Other Co", "ticker": "__OTHERTICK__", "shares": 300, "value_usd": 9000},
+    ])
+
+    quarters, rows = institutional_holdings.get_ticker_history(conn, TICKER)
+    row = next(r for r in rows if r["fund"] == FUND_NAME)
+
+    # Held only in Q1 2026, at 10% of that quarter's $1,000,000 portfolio -
+    # Q2 2026 (where it didn't hold TICKER at all) has no key, not a 0.
+    assert row["values"] == {date(2026, 3, 31): 10.0}
+    assert date(2026, 6, 30) not in row["values"]
+    assert date(2026, 3, 31) in quarters  # real quarter, shows up as a column
+
+
+def test_ticker_history_excludes_a_fund_that_never_held_the_ticker(conn):
+    _make_test_fund(conn)  # no holdings saved at all
+
+    _, rows = institutional_holdings.get_ticker_history(conn, TICKER)
+
+    assert not any(r["fund"] == FUND_NAME for r in rows)

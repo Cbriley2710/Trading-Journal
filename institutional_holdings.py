@@ -4,7 +4,7 @@ Institutional Holdings
 Fetches SEC Form 13F filings for the curated list of hedge funds in the
 `hedge_funds` table (see database.py) and figures out, for any ticker
 you type in on pages/8_Institutional_Holdings.py, which of those funds
-hold it - the data behind the "14 of 20 funds hold this" checklist.
+hold it - the data behind the "9 of 15 funds hold this" checklist.
 
 WHAT A 13F ACTUALLY IS: every institutional manager with over $100M in
 US equities must file one every quarter, listing their long stock
@@ -463,16 +463,12 @@ def get_snapshot_for_ticker(conn, ticker):
             snapshot.append(row)
             continue
 
-        latest_holdings = {h["cusip"]: h for h in database.get_fund_holdings(conn, fund["id"], quarters[0])}
-        current = next((h for h in latest_holdings.values() if h["ticker"] == ticker), None)
-
-        previous_match = None
-        if len(quarters) > 1:
-            previous_holdings = {h["cusip"]: h for h in database.get_fund_holdings(conn, fund["id"], quarters[1])}
-            if current is not None:
-                previous_match = previous_holdings.get(current["cusip"])
-            else:
-                previous_match = next((h for h in previous_holdings.values() if h["ticker"] == ticker), None)
+        # Targeted query - only ever fetches the (at most 2) rows where
+        # THIS fund held THIS ticker, instead of its whole ~300-position
+        # list per quarter (get_fund_holdings()) filtered down in Python.
+        matches = database.get_fund_holding_for_ticker_in_quarters(conn, fund["id"], ticker, quarters)
+        current = matches.get(quarters[0])
+        previous_match = matches.get(quarters[1]) if len(quarters) > 1 else None
 
         if current is not None:
             row.update(held=True, shares=current["shares"], value_usd=current["value_usd"],
@@ -531,3 +527,30 @@ def get_recent_moves(conn):
                 "stale": stale,
             })
     return moves
+
+
+def get_ticker_history(conn, ticker):
+    """
+    The full multi-quarter trend behind the History tab: for `ticker`,
+    every active fund that held it in at least one of its stored
+    quarters (up to 8), with its % of portfolio for each such quarter -
+    the deeper complement to get_snapshot_for_ticker()'s latest-vs-
+    previous-quarter-only view.
+
+    Returns (quarters, rows):
+      - quarters: every distinct quarter_end across all tracked funds,
+        oldest first - the grid's column headers. A fund with a
+        shorter real filing history (e.g. Balyasny) just won't have an
+        entry for an earlier quarter.
+      - rows: [{fund, values: {quarter_end: portfolio_pct}}] - a fund
+        that never held this ticker in any stored quarter is left out
+        entirely, not shown with a row of dashes.
+    """
+    ticker = ticker.strip().upper()
+    quarters = sorted(database.get_all_recent_quarters(conn))
+    rows = []
+    for fund in database.get_hedge_funds(conn, active_only=True):
+        values = database.get_fund_ticker_history(conn, fund["id"], ticker)
+        if values:
+            rows.append({"fund": fund["display_name"], "values": values})
+    return quarters, rows

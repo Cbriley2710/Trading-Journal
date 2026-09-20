@@ -3299,6 +3299,36 @@ def get_fund_holdings(conn, fund_id, quarter_end):
     ]
 
 
+def get_fund_holding_for_ticker_in_quarters(conn, fund_id, ticker, quarters):
+    """
+    Returns {quarter_end: holding_dict} for whichever of the given
+    quarters this fund held `ticker` in - a targeted alternative to
+    get_fund_holdings() for get_snapshot_for_ticker(), which only ever
+    needs ONE ticker's row (if any) from a fund's latest one or two
+    quarters. Fetching the fund's full ~300-position list per quarter
+    just to filter for a single row in Python (the original approach)
+    meant transferring up to ~600 rows per fund for a single ticker
+    lookup - this transfers at most 2.
+    """
+    if not quarters:
+        return {}
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT quarter_end, cusip, issuer_name, ticker, shares, value_usd, fund_total_value_usd
+        FROM hedge_fund_holdings WHERE fund_id = %s AND ticker = %s AND quarter_end = ANY(%s)
+        """,
+        (fund_id, ticker, list(quarters)),
+    )
+    return {
+        row[0]: {
+            "cusip": row[1], "issuer_name": row[2], "ticker": row[3],
+            "shares": row[4], "value_usd": row[5], "fund_total_value_usd": row[6],
+        }
+        for row in cur.fetchall()
+    }
+
+
 def get_newest_quarter_across_funds(conn):
     """The most recent quarter_end ANY tracked fund has reported -
     used to flag a fund whose own latest data is older than that (it
@@ -3307,6 +3337,40 @@ def get_newest_quarter_across_funds(conn):
     cur = conn.cursor()
     cur.execute("SELECT MAX(quarter_end) FROM hedge_fund_holdings")
     return cur.fetchone()[0]
+
+
+def get_all_recent_quarters(conn, limit=8):
+    """Every distinct quarter_end across ALL tracked funds, newest
+    first - the column headers for the History tab's fund x quarter
+    grid. A union across funds, not one fund's own list, since not
+    every fund has data for the exact same set of quarters (e.g.
+    Balyasny's shorter real filing history)."""
+    cur = conn.cursor()
+    cur.execute("SELECT DISTINCT quarter_end FROM hedge_fund_holdings ORDER BY quarter_end DESC LIMIT %s", (limit,))
+    return [row[0] for row in cur.fetchall()]
+
+
+def get_fund_ticker_history(conn, fund_id, ticker):
+    """Every quarter this fund held `ticker` (not just the latest one
+    or two) as {quarter_end: portfolio_pct}, oldest first - the full
+    multi-quarter trend behind the History tab, as opposed to get_
+    fund_holdings()'s single-quarter snapshot. A quarter this fund
+    didn't hold the ticker simply has no key here - the caller (see
+    institutional_holdings.get_ticker_history()) treats a missing key
+    as "not held that quarter", not zero."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT quarter_end, value_usd, fund_total_value_usd
+        FROM hedge_fund_holdings WHERE fund_id = %s AND ticker = %s
+        ORDER BY quarter_end
+        """,
+        (fund_id, ticker),
+    )
+    return {
+        row[0]: (row[1] / row[2] * 100 if row[2] else None)
+        for row in cur.fetchall()
+    }
 
 
 def save_fund_holdings(conn, fund_id, quarter_end, filed_date, holdings, fund_total_value_usd):

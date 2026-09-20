@@ -1,19 +1,24 @@
 """
 Institutional Holdings
 =====================
-Two ways to use this page:
+Three ways to use this page:
   Look Up a Ticker   Type in a ticker, see how many of a curated list of
-                      well-known hedge funds hold it - "14 of 20 funds
+                      well-known hedge funds hold it - "9 of 15 funds
                       hold this" - plus a per-fund checklist showing
                       shares, dollar value, % of that fund's own
                       portfolio, and whether it was added/trimmed/closed
                       last quarter.
   Recent Moves       The other direction - browse every position that
-                      actually changed last quarter across all 20
+                      actually changed last quarter across all tracked
                       funds, without needing to already have a ticker
                       in mind. See get_recent_moves()'s own docstring
                       for why a fund only shows up here once it has TWO
                       quarters of data to compare.
+  History            The deep-dive view - for one ticker, every fund
+                      that's held it, and its % of portfolio across
+                      the full 8 quarters of stored history (not just
+                      latest-vs-previous). See get_ticker_history()'s
+                      own docstring.
 
 WHERE THE DATA COMES FROM AND ITS REAL LIMITS: every fund here is
 required to file a public SEC Form 13F every quarter, listing its long
@@ -32,9 +37,10 @@ See institutional_holdings.py's own docstring for the full picture,
 including why a stock is matched by CUSIP (its SEC filing identifier),
 not ticker, and how that gets resolved.
 
-The list of 20 funds itself lives in the hedge_funds database table
-(seeded once by database.seed_hedge_funds() below) and can be edited
-any time from the "Manage Tracked Funds" section at the bottom of this
+The list of tracked funds itself lives in the hedge_funds database
+table (seeded once by database.seed_hedge_funds() below) and can be
+edited any time from the "Manage Tracked Funds" section at the bottom
+of this
 page - no code changes needed to add or remove a fund.
 """
 import streamlit as st
@@ -63,6 +69,46 @@ st.caption(
 
 conn = database.get_connection()
 database.seed_hedge_funds(conn)  # only actually inserts anything the very first time this page ever runs
+
+
+# --- Caching -----------------------------------------------------------------
+# Streamlit reruns the ENTIRE script on every interaction - and since
+# st.tabs() renders every tab's body on every rerun (not just the visible
+# one), typing a ticker in ANY one tab was silently re-running the other
+# two tabs' full data fetches as well. Measured before this fix:
+# get_snapshot_for_ticker ~1s, get_recent_moves ~1.5s, get_ticker_history
+# ~0.5s - roughly 3s of backend work on nearly every click, regardless of
+# which tab it happened on. These wrappers cache each one (same pattern
+# as nav._load_background_image()/_load_nav_labels()) - a plain
+# st.cache_data function can't take a live psycopg2 connection as an
+# argument (it's not hashable), so each wrapper opens its own connection
+# rather than accepting `conn`, same reason nav.py's cached functions do.
+# The 1-hour TTL is a safety net; the real invalidation is the explicit
+# .clear() calls after anything that actually changes this data (a
+# refresh, or adding/removing a tracked fund) below.
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _cached_snapshot(ticker):
+    return institutional_holdings.get_snapshot_for_ticker(database.get_connection(), ticker)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _cached_recent_moves():
+    return institutional_holdings.get_recent_moves(database.get_connection())
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _cached_ticker_history(ticker):
+    return institutional_holdings.get_ticker_history(database.get_connection(), ticker)
+
+
+def _clear_holdings_caches():
+    """Call this after anything that changes the underlying data (a
+    refresh, or adding/removing a tracked fund) so the page reflects it
+    immediately instead of waiting out the cache's TTL."""
+    _cached_snapshot.clear()
+    _cached_recent_moves.clear()
+    _cached_ticker_history.clear()
 
 
 # --- Shared formatting helpers ---------------------------------------------
@@ -104,15 +150,19 @@ def _format_as_of(quarter_end, stale):
 # --- Look Up a Ticker -------------------------------------------------------
 
 _TICKER_INPUT_KEY = "institutional_holdings_ticker"
+_HISTORY_TICKER_INPUT_KEY = "institutional_holdings_history_ticker"
 
 
-def _render_watchlist_picker():
+def _render_watchlist_picker(input_key, key_prefix):
     """A row of one-click buttons for every ticker on your watchlist
     (across all 5 lists - same source as the Screener page's own known-
     tickers helper), so looking up a stock you're already tracking
-    doesn't require re-typing its symbol. Clicking one sets the ticker
-    text input's value via session_state and reruns - the standard
-    Streamlit way to make a button "fill in" another widget."""
+    doesn't require re-typing its symbol. Clicking one sets `input_key`
+    (the ticker text input this picker belongs to) via session_state
+    and reruns - the standard Streamlit way to make a button "fill in"
+    another widget. Parameterized (rather than hardcoding one key/
+    prefix) so the Look Up and History tabs can each have their own
+    independent picker without their button keys colliding."""
     watchlist_symbols = sorted({w["symbol"] for w in database.get_watchlist(conn)})
     if not watchlist_symbols:
         return
@@ -120,20 +170,20 @@ def _render_watchlist_picker():
     st.caption("From your watchlist:")
     cols = st.columns(8)
     for i, symbol in enumerate(watchlist_symbols):
-        if cols[i % 8].button(symbol, key=f"institutional_watchlist_pick_{symbol}"):
-            st.session_state[_TICKER_INPUT_KEY] = symbol
+        if cols[i % 8].button(symbol, key=f"{key_prefix}_{symbol}"):
+            st.session_state[input_key] = symbol
             st.rerun()
 
 
 def _render_lookup_tab():
-    _render_watchlist_picker()
+    _render_watchlist_picker(_TICKER_INPUT_KEY, "institutional_watchlist_pick")
     ticker = st.text_input("Ticker", placeholder="e.g. AAPL", key=_TICKER_INPUT_KEY).strip().upper()
 
     if not ticker:
         st.info("Type a ticker above to see which tracked funds hold it.")
         return
 
-    snapshot = institutional_holdings.get_snapshot_for_ticker(conn, ticker)
+    snapshot = _cached_snapshot(ticker)
     held_count = sum(1 for r in snapshot if r["held"])
     total_count = len(snapshot)
 
@@ -190,7 +240,7 @@ def _render_recent_moves_tab():
     )
 
     selected_types = st.multiselect("Show", _MOVE_TYPES, default=["New", "Increased"])
-    moves = institutional_holdings.get_recent_moves(conn)
+    moves = _cached_recent_moves()
     filtered = [m for m in moves if m["change"] in selected_types]
 
     if not moves:
@@ -221,11 +271,76 @@ def _render_recent_moves_tab():
         cols[7].markdown(_format_as_of(m["quarter_end"], m["stale"]), unsafe_allow_html=True)
 
 
-lookup_tab, moves_tab = st.tabs(["Look Up a Ticker", "Recent Moves"])
+# --- History (deep dive) -----------------------------------------------------
+
+def _render_history_tab():
+    st.caption(
+        "Every tracked fund that's held this ticker at some point in the "
+        "last 8 quarters, and its % of portfolio each quarter it held it - "
+        "a fuller trend than the Look Up tab's latest-vs-previous-quarter "
+        "comparison. A dash means it didn't hold the position that quarter."
+    )
+    _render_watchlist_picker(_HISTORY_TICKER_INPUT_KEY, "institutional_history_watchlist_pick")
+    ticker = st.text_input("Ticker", placeholder="e.g. AAPL", key=_HISTORY_TICKER_INPUT_KEY).strip().upper()
+
+    if not ticker:
+        st.info("Type a ticker above to see how tracked funds' holdings changed over time.")
+        return
+
+    quarters, rows = _cached_ticker_history(ticker)
+    if not quarters:
+        st.info("No historical data yet - try Refresh Holdings Data below.")
+        return
+    if not rows:
+        st.info(f"None of the tracked funds have held {ticker} in the last 8 quarters.")
+        return
+
+    st.caption(
+        f"{len(rows)} fund(s) held {ticker} at some point between "
+        f"{quarters[0].strftime('%b %Y')} and {quarters[-1].strftime('%b %Y')}."
+    )
+
+    # Biggest CURRENT position leads - funds that closed the position
+    # earlier and never came back sort to the bottom.
+    latest_quarter = quarters[-1]
+    rows.sort(key=lambda r: r["values"].get(latest_quarter) or 0, reverse=True)
+
+    widths = [3] + [1.3] * len(quarters)
+    header = st.columns(widths)
+    header[0].markdown("**Fund**")
+    for col, q in zip(header[1:], quarters):
+        col.markdown(f"**{q.strftime('%b %Y')}**")
+
+    for row in rows:
+        cols = st.columns(widths)
+        cols[0].write(row["fund"])
+        for i, (col, q) in enumerate(zip(cols[1:], quarters)):
+            value = row["values"].get(q)
+            if value is None:
+                col.write("—")
+                continue
+            # Colored only against the IMMEDIATELY PRECEDING quarter, never
+            # a further-back one - a gap (didn't hold it last quarter)
+            # should never make this look like a continuation of an older trend.
+            previous_value = row["values"].get(quarters[i - 1]) if i > 0 else None
+            if previous_value is None:
+                color = charting.MUTED_COLOR
+            elif value > previous_value:
+                color = charting.GOOD_COLOR
+            elif value < previous_value:
+                color = charting.CRITICAL_COLOR
+            else:
+                color = charting.MUTED_COLOR
+            col.markdown(f"<span style='color:{color};'>{value:.1f}%</span>", unsafe_allow_html=True)
+
+
+lookup_tab, moves_tab, history_tab = st.tabs(["Look Up a Ticker", "Recent Moves", "History"])
 with lookup_tab:
     _render_lookup_tab()
 with moves_tab:
     _render_recent_moves_tab()
+with history_tab:
+    _render_history_tab()
 
 
 # --- Refresh ----------------------------------------------------------------
@@ -234,6 +349,7 @@ st.divider()
 if st.button("Refresh Holdings Data", help="Checks SEC EDGAR and backfills up to the last 8 quarters per fund"):
     with st.spinner("Checking SEC EDGAR for each fund's latest filings..."):
         results = institutional_holdings.refresh_all_funds(conn)
+    _clear_holdings_caches()
     updated = {name: status for name, status in results.items() if status.startswith("fetched")}
     errors = {name: status for name, status in results.items() if status.startswith("error") or "no 13F" in status}
     if updated:
@@ -248,7 +364,7 @@ if st.button("Refresh Holdings Data", help="Checks SEC EDGAR and backfills up to
 
 with st.expander("Manage Tracked Funds"):
     st.caption(
-        "This is the list of 20 well-known funds tracked above. There's no "
+        "This is the list of well-known funds tracked above. There's no "
         "free, audited ranking of hedge funds by actual return - this list "
         "is the standard set of large, widely-recognized managers, and you "
         "can freely swap any of them out below."
@@ -260,6 +376,7 @@ with st.expander("Manage Tracked Funds"):
         fund_col.write(f"{fund['display_name']}  (CIK {fund['sec_cik']})")
         if remove_col.button("Remove", key=f"remove_fund_{fund['id']}"):
             database.deactivate_hedge_fund(conn, fund["id"])
+            _clear_holdings_caches()
             st.rerun()
 
     st.markdown("**Add a fund**")
@@ -279,6 +396,7 @@ with st.expander("Manage Tracked Funds"):
         if st.button("Add This Fund", key="add_fund_button"):
             chosen = options[chosen_label]
             database.add_hedge_fund(conn, chosen["display_name"], chosen["cik"])
+            _clear_holdings_caches()
             del st.session_state["fund_candidates"]
             st.success(f"Added {chosen['display_name']} - click Refresh Holdings Data above to fetch its filings.")
             st.rerun()
