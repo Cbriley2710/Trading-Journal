@@ -36,6 +36,7 @@ PAGES = [
     ("logbook", "Logbook", "pages/3_Logbook.py"),
     ("goals", "Goals", "pages/6_Goals.py"),
     ("screener", "Screener", "pages/7_Screener.py"),
+    ("institutional_holdings", "Institutional Holdings", "pages/8_Institutional_Holdings.py"),
     ("settings", "Settings", "pages/5_Settings.py"),
 ]
 

@@ -755,6 +755,56 @@ def init_db(conn):
             UNIQUE (signal_date, ticker)
         )
     """)
+
+    # The curated list of hedge funds tracked on the Institutional
+    # Holdings page - see institutional_holdings.py. `sec_cik` is the
+    # fund's SEC EDGAR filer id (not always the same as its brand name -
+    # e.g. Balyasny Asset Management files under "Longaeva Partners
+    # L.P."). `active` lets a fund be removed from tracking without
+    # losing its already-fetched holdings history (see
+    # deactivate_hedge_fund() below).
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS hedge_funds (
+            id SERIAL PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            sec_cik TEXT NOT NULL UNIQUE,
+            active BOOLEAN NOT NULL DEFAULT TRUE,
+            added_at TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+    """)
+    # One row per fund per stock per quarter, straight from that fund's
+    # 13F filing - kept for every quarter (not just the latest) so
+    # "increased/decreased/new/closed" can be worked out by comparing
+    # two quarters for the same fund+cusip, same idea as trade_reviews
+    # keeping full history instead of overwriting it.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS hedge_fund_holdings (
+            id SERIAL PRIMARY KEY,
+            fund_id INTEGER NOT NULL REFERENCES hedge_funds(id) ON DELETE CASCADE,
+            cusip TEXT NOT NULL,
+            issuer_name TEXT NOT NULL,
+            ticker TEXT,
+            shares BIGINT NOT NULL,
+            value_usd BIGINT NOT NULL,
+            quarter_end DATE NOT NULL,
+            filed_date DATE NOT NULL,
+            UNIQUE (fund_id, cusip, quarter_end)
+        )
+    """)
+    # A 13F only ever identifies a security by CUSIP, never by ticker -
+    # this is a small cache of CUSIP -> ticker lookups (via OpenFIGI, see
+    # institutional_holdings.resolve_tickers()) so the same CUSIP is
+    # never looked up twice. A NULL ticker means "looked up, no match
+    # found" - still worth caching, so a refresh doesn't keep retrying a
+    # CUSIP that will never resolve (e.g. a foreign security with no US
+    # ticker).
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS cusip_ticker_map (
+            cusip TEXT PRIMARY KEY,
+            ticker TEXT,
+            resolved_at TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+    """)
     conn.commit()
 
 
@@ -3116,3 +3166,179 @@ def get_signals_for_history(conn, start_date, end_date, tier=None):
             ORDER BY signal_date DESC, ticker
         """, (start_date, end_date))
     return [_signal_row_to_dict(row) for row in cur.fetchall()]
+
+
+# --- Institutional Holdings (13F tracker) -------------------------------
+# See institutional_holdings.py for the SEC EDGAR / OpenFIGI fetching
+# logic that calls these - this section is just the plain CRUD layer,
+# same split as screener/data.py (fetching) vs database.py (storage).
+
+def seed_hedge_funds(conn):
+    """
+    Inserts the starting list of 20 tracked hedge funds, but only if
+    the table is completely empty - so this is safe to call every time
+    the app starts (same "seed once" idea as other one-time setup in
+    this file) without ever overwriting funds you've since added or
+    removed from the Institutional Holdings page.
+    """
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM hedge_funds")
+    if cur.fetchone()[0] > 0:
+        return
+
+    starting_funds = [
+        ("Citadel Advisors", "0001423053"),
+        ("Millennium Management", "0001273087"),
+        ("D. E. Shaw & Co.", "0001009207"),
+        ("Bridgewater Associates", "0001350694"),
+        ("TCI Fund Management", "0001647251"),
+        ("Renaissance Technologies", "0001037389"),
+        ("Point72 Asset Management", "0001603466"),
+        ("Two Sigma Investments", "0001179392"),
+        ("Elliott Investment Management", "0001791786"),
+        ("Viking Global Investors", "0001103804"),
+        ("Tiger Global Management", "0001167483"),
+        ("Lone Pine Capital", "0001061165"),
+        ("Coatue Management", "0001135730"),
+        ("Third Point", "0001040273"),
+        ("Pershing Square Capital Management", "0001336528"),
+        ("ExodusPoint Capital Management", "0001736225"),
+        ("Balyasny Asset Management", "0002054122"),
+        ("Soros Fund Management", "0001029160"),
+        ("AQR Capital Management", "0001167557"),
+        ("The Baupost Group", "0001061768"),
+    ]
+    cur.executemany(
+        "INSERT INTO hedge_funds (display_name, sec_cik) VALUES (%s, %s)",
+        starting_funds,
+    )
+    conn.commit()
+
+
+def get_hedge_funds(conn, active_only=True):
+    """Every tracked fund, alphabetical by display name."""
+    cur = conn.cursor()
+    if active_only:
+        cur.execute("SELECT id, display_name, sec_cik, active FROM hedge_funds WHERE active ORDER BY display_name")
+    else:
+        cur.execute("SELECT id, display_name, sec_cik, active FROM hedge_funds ORDER BY display_name")
+    return [
+        {"id": row[0], "display_name": row[1], "sec_cik": row[2], "active": row[3]}
+        for row in cur.fetchall()
+    ]
+
+
+def add_hedge_fund(conn, display_name, sec_cik):
+    """
+    Adds a fund to track, from the "Manage Tracked Funds" form on the
+    Institutional Holdings page. If this CIK was tracked before and
+    then removed, this re-activates it (and keeps its old holdings
+    history) instead of erroring on the UNIQUE constraint - same
+    "re-adding un-removes it" idea as add_to_watchlist() above.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO hedge_funds (display_name, sec_cik) VALUES (%s, %s)
+        ON CONFLICT (sec_cik) DO UPDATE SET display_name = EXCLUDED.display_name, active = TRUE
+        """,
+        (display_name, sec_cik),
+    )
+    conn.commit()
+
+
+def deactivate_hedge_fund(conn, fund_id):
+    """Removes a fund from the tracked list without deleting its
+    already-fetched holdings history - the "remove" button just stops
+    it from showing up or being refreshed going forward."""
+    cur = conn.cursor()
+    cur.execute("UPDATE hedge_funds SET active = FALSE WHERE id = %s", (fund_id,))
+    conn.commit()
+
+
+def get_fund_quarters(conn, fund_id, limit=2):
+    """The most recent `limit` quarter_end dates this fund's holdings
+    have been fetched for, newest first - used to know both "what's the
+    latest quarter" (for the as-of caption) and "what's the one before
+    that" (to work out New/Increased/Decreased/Closed)."""
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT DISTINCT quarter_end FROM hedge_fund_holdings WHERE fund_id = %s ORDER BY quarter_end DESC LIMIT %s",
+        (fund_id, limit),
+    )
+    return [row[0] for row in cur.fetchall()]
+
+
+def get_fund_holdings(conn, fund_id, quarter_end):
+    """Every position this fund reported for one specific quarter."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT cusip, issuer_name, ticker, shares, value_usd, filed_date
+        FROM hedge_fund_holdings WHERE fund_id = %s AND quarter_end = %s
+        """,
+        (fund_id, quarter_end),
+    )
+    return [
+        {
+            "cusip": row[0], "issuer_name": row[1], "ticker": row[2],
+            "shares": row[3], "value_usd": row[4], "filed_date": row[5],
+        }
+        for row in cur.fetchall()
+    ]
+
+
+def save_fund_holdings(conn, fund_id, quarter_end, filed_date, holdings):
+    """
+    Stores one fund's full 13F for one quarter - `holdings` is a list
+    of {cusip, issuer_name, ticker, shares, value_usd} dicts. ON
+    CONFLICT overwrites rather than skips, so re-running a refresh
+    after a fund files a 13F-HR/A amendment picks up the corrected
+    numbers instead of keeping the original filing's stale ones.
+    """
+    cur = conn.cursor()
+    for h in holdings:
+        cur.execute(
+            """
+            INSERT INTO hedge_fund_holdings
+                (fund_id, cusip, issuer_name, ticker, shares, value_usd, quarter_end, filed_date)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (fund_id, cusip, quarter_end) DO UPDATE SET
+                issuer_name = EXCLUDED.issuer_name,
+                ticker = EXCLUDED.ticker,
+                shares = EXCLUDED.shares,
+                value_usd = EXCLUDED.value_usd,
+                filed_date = EXCLUDED.filed_date
+            """,
+            (fund_id, h["cusip"], h["issuer_name"], h.get("ticker"), h["shares"], h["value_usd"], quarter_end, filed_date),
+        )
+    conn.commit()
+
+
+def get_cusip_tickers(conn, cusips):
+    """Returns {cusip: ticker} for whichever of these CUSIPs have
+    already been looked up (via cusip_ticker_map) - a missing key means
+    "never looked up yet", a key mapped to None means "looked up,
+    genuinely no ticker found". Callers use this to figure out which
+    CUSIPs still need an OpenFIGI lookup."""
+    if not cusips:
+        return {}
+    cur = conn.cursor()
+    cur.execute("SELECT cusip, ticker FROM cusip_ticker_map WHERE cusip = ANY(%s)", (list(cusips),))
+    return {row[0]: row[1] for row in cur.fetchall()}
+
+
+def save_cusip_tickers(conn, cusip_to_ticker):
+    """Caches a batch of CUSIP -> ticker lookups (ticker may be None,
+    meaning OpenFIGI genuinely had no match) so the same CUSIP is never
+    re-queried on a later refresh."""
+    cur = conn.cursor()
+    for cusip, ticker in cusip_to_ticker.items():
+        cur.execute(
+            """
+            INSERT INTO cusip_ticker_map (cusip, ticker, resolved_at) VALUES (%s, %s, NOW())
+            ON CONFLICT (cusip) DO UPDATE SET ticker = EXCLUDED.ticker, resolved_at = NOW()
+            """,
+            (cusip, ticker),
+        )
+    conn.commit()
