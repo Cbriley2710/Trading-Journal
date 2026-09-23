@@ -764,7 +764,24 @@ def fetch_latest_price(symbol):
             return None
         except Exception:
             return None
-        return None if recent.empty else recent["Close"].iloc[-1]
+        if recent.empty:
+            return None
+        # A REAL BUG lived here: Yahoo sometimes reports today's row with
+        # Volume filled in but Close still NaN (today's session not fully
+        # finalized in their feed yet) - the exact same gotcha warm_price_
+        # cache_for_symbol() already guards against for the persistent
+        # cache, but this raw "right now" lookup never checked for it.
+        # `recent.empty` is False in that case (the row exists), so this
+        # returned a bare NaN float instead of None - which every caller's
+        # `if current_price is None` check does NOT catch (NaN is not
+        # None), silently poisoning any sum it fed into (get_calculated_
+        # account_value()'s unrealized P/L, and every dashboard tile built
+        # from it, all showing "$nan"). Falling back to the most recent
+        # row that DOES have a real close (usually just yesterday's) keeps
+        # this useful instead of blanking out every open position's price
+        # during Yahoo's every-so-often data lag.
+        valid_closes = recent["Close"].dropna()
+        return None if valid_closes.empty else valid_closes.iloc[-1]
 
 
 @st.cache_data(ttl=86400, show_spinner=False)

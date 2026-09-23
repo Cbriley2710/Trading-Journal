@@ -23,6 +23,15 @@ production bugs, each in its own section below:
   2. warm_price_cache_for_symbol()'s NaN sanitization before writing to
      the price_cache jsonb column - see that section's own docstring.
 
+  3. fetch_latest_price()'s NaN-vs-empty confusion - a real production
+     bug (confirmed live against every one of the account's actual open
+     positions on 2026-09-22, all showing "$nan" on the Dashboard).
+     Yahoo can report today's row with Volume filled in but Close still
+     NaN before today's session is finalized - `recent.empty` is False
+     in that case, so the old code returned a bare NaN float instead of
+     None, which callers' `if current_price is None` checks don't catch.
+     See that section's own docstring.
+
 Database/network/rendering are all faked out (get_connection/
 get_chart_preferences/get_drawings/fetch_history/render_png/yf.Ticker)
 so these run as plain unit tests.
@@ -172,3 +181,31 @@ def test_warm_price_cache_not_ready_when_the_last_bar_itself_is_incomplete(monke
 
     assert result == "not_ready"
     assert saved_calls == []
+
+
+def test_fetch_latest_price_falls_back_when_todays_close_is_nan(monkeypatch):
+    """The real bug: today's Close is NaN (Volume already reported, but
+    the session isn't finalized in Yahoo's feed yet) - must fall back to
+    the most recent row that DOES have a real close (yesterday's),
+    instead of returning that NaN as if it were a valid price."""
+    history = pd.DataFrame({
+        "Close": [171.20, math.nan],
+    }, index=pd.to_datetime(["2026-09-21", "2026-09-22"]))
+    monkeypatch.setattr(charting.yf, "Ticker", lambda symbol: _FakeTicker(history))
+
+    price = charting.fetch_latest_price("MRNA")
+
+    assert price == 171.20
+
+
+def test_fetch_latest_price_returns_none_when_every_row_is_nan(monkeypatch):
+    history = pd.DataFrame({"Close": [math.nan, math.nan]}, index=pd.to_datetime(["2026-09-21", "2026-09-22"]))
+    monkeypatch.setattr(charting.yf, "Ticker", lambda symbol: _FakeTicker(history))
+
+    assert charting.fetch_latest_price("MRNA") is None
+
+
+def test_fetch_latest_price_returns_none_for_an_empty_history(monkeypatch):
+    monkeypatch.setattr(charting.yf, "Ticker", lambda symbol: _FakeTicker(pd.DataFrame({"Close": []})))
+
+    assert charting.fetch_latest_price("MRNA") is None
