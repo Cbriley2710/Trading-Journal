@@ -465,12 +465,30 @@ def position_label(position):
     return f"{position['symbol']} (Short)" if position["direction"] == "SHORT" else position["symbol"]
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_account_value():
+    """
+    A short-lived cache around charting.get_calculated_account_value(),
+    which loops EVERY open position and fetches each one's current price
+    - expensive, and not cached itself (Dashboard wants it always fresh
+    on a manual reload). render_position_stats() below calls this once
+    per Journal Session STEP (a fresh Streamlit rerun per ticker in the
+    queue) - without this, stepping through a 5-position queue would
+    re-fetch all 5 positions' prices 5 times over, once per step,
+    instead of once. 60s is long enough to cover stepping through a
+    whole session, short enough that "% of Account" is never meaningfully
+    stale.
+    """
+    return charting.get_calculated_account_value(database.get_connection())
+
+
 def render_position_stats(position, conn):
     """
-    Fact tiles (entry, current price, unrealized P/L, stop-loss) for an
-    open position - shared by the plain single-ticker detail view and
-    the Journal Session queue view below. Returns the saved stop-loss
-    price to draw on the chart, or None if there isn't one.
+    Fact tiles (entry, current price, unrealized P/L, % of account, %
+    change, stop-loss) for an open position - shared by the plain
+    single-ticker detail view and the Journal Session queue view below.
+    Returns the saved stop-loss price to draw on the chart, or None if
+    there isn't one.
 
     Stop-loss itself is read-only here - it's set and edited on the
     Open Positions page now (a table of every position with an editable
@@ -484,6 +502,7 @@ def render_position_stats(position, conn):
         current_price = charting.fetch_latest_price(symbol)
 
     unrealized_pl = None
+    pct_change = None
     unrealized_color = None
     if current_price is not None:
         # A short profits when price FALLS below your average entry -
@@ -493,17 +512,27 @@ def render_position_stats(position, conn):
         else:
             unrealized_pl = (current_price - position["avg_price"]) * position["quantity"]
         unrealized_color = charting.win_loss_color(unrealized_pl >= 0)
+        # Same convention analyze_trades.trade_stats() uses for a CLOSED
+        # trade's pct_change, applied to the live unrealized figure.
+        pct_change = unrealized_pl / (position["avg_price"] * position["quantity"]) * 100
+
+    account_value = _cached_account_value()
+    pct_of_account = None
+    if current_price is not None and account_value:
+        pct_of_account = (current_price * position["quantity"]) / account_value * 100
 
     stop_loss = database.get_stop_loss(conn, symbol)
 
-    cols = st.columns(6)
+    cols = st.columns(8)
     fact_tile(cols[0], "Short Entry (avg)" if is_short else "Entry (avg)", f"${position['avg_price']:,.2f}")
     fact_tile(cols[1], "Entry Date", f"{position['entry_date']:%m/%d/%Y}")
     fact_tile(cols[2], "Shares", f"{position['quantity']:,.0f}")
-    fact_tile(cols[3], "Current Price", f"${current_price:,.2f}" if current_price is not None else "N/A")
-    fact_tile(cols[4], "Unrealized P/L",
+    fact_tile(cols[3], "% of Account", f"{pct_of_account:.1f}%" if pct_of_account is not None else "N/A")
+    fact_tile(cols[4], "Current Price", f"${current_price:,.2f}" if current_price is not None else "N/A")
+    fact_tile(cols[5], "Unrealized P/L",
               f"${unrealized_pl:,.2f}" if unrealized_pl is not None else "N/A", unrealized_color)
-    fact_tile(cols[5], "Stop Loss", f"${stop_loss:,.2f}" if stop_loss is not None else "Not set")
+    fact_tile(cols[6], "% Change", f"{pct_change:+.1f}%" if pct_change is not None else "N/A", unrealized_color)
+    fact_tile(cols[7], "Stop Loss", f"${stop_loss:,.2f}" if stop_loss is not None else "Not set")
     st.page_link(
         "pages/4_Open_Positions.py",
         label="Set or move the stop-loss for this position on the Open Positions page.",

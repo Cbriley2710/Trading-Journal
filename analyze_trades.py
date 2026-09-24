@@ -638,6 +638,42 @@ def trade_stats(direction, buy_price, sell_price, quantity, profit_loss, entry_d
     }
 
 
+def partial_sell_notes(closed_trades, open_positions):
+    """
+    For every symbol in `closed_trades` that ALSO has a currently open
+    position, returns {symbol: (pct_sold, open_qty)} - so a closed trade
+    that was really only a PARTIAL sell doesn't read the same as a full
+    exit on the Journal Session's "since your last session" summary (see
+    ui.render_since_last_journal_summary()).
+
+    `pct_sold` is relative to what you held immediately before this
+    batch of sells - sold_qty / (sold_qty + still-open qty) - not a full
+    historical reconstruction across every buy/sell this symbol has ever
+    had (LIFO lot history can span months and doesn't cleanly define one
+    "original position size"). This only reads correctly if the position
+    wasn't fully closed and then independently reopened within the same
+    window `closed_trades` covers - fine for the daily/every-few-days
+    journaling cadence this is built for.
+
+    `closed_trades`/`open_positions` are plain dict records (database.
+    get_trades()/get_open_positions() shape) - just need "symbol" and
+    "quantity" keys.
+    """
+    open_qty_by_symbol = {p["symbol"]: p["quantity"] for p in open_positions}
+
+    sold_qty_by_symbol = {}
+    for t in closed_trades:
+        sold_qty_by_symbol[t["symbol"]] = sold_qty_by_symbol.get(t["symbol"], 0) + t["quantity"]
+
+    notes = {}
+    for symbol, sold_qty in sold_qty_by_symbol.items():
+        if symbol not in open_qty_by_symbol:
+            continue
+        open_qty = open_qty_by_symbol[symbol]
+        notes[symbol] = (sold_qty / (sold_qty + open_qty) * 100, open_qty)
+    return notes
+
+
 def review_session_summary(reviews):
     """
     Aggregate stats across a Trade Review Session's reviewed trades -

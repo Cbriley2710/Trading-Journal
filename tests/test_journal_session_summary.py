@@ -1,17 +1,20 @@
 """
-Tests for database.get_previous_journal_date() and position_sizing.
-newly_opened_positions_since() - the two new pieces behind the Journal
-Session's "since your last journal session" summary (see
-ui.render_since_last_journal_summary()). Run against the REAL dev
-database, same convention as tests/test_csv_upload_tracking.py:
-throwaway symbols for transactions/trades, and far-future throwaway
-dates for daily_journal_notes so a real journal entry is never touched.
-Everything inserted here is deleted again in a `finally` block.
+Tests for database.get_previous_journal_date(), position_sizing.
+newly_opened_positions_since(), and analyze_trades.partial_sell_notes()
+- three pieces behind the Journal Session's "since your last journal
+session" summary (see ui.render_since_last_journal_summary()). The first
+two hit the REAL dev database, same convention as tests/test_csv_upload_
+tracking.py: throwaway symbols for transactions/trades, and far-future
+throwaway dates for daily_journal_notes so a real journal entry is never
+touched, everything deleted again in a `finally` block. partial_sell_
+notes() is a pure function (plain dict records in, no DB) - its tests
+need none of that.
 """
 from datetime import date, datetime
 
 import pytest
 
+import analyze_trades
 import database
 import position_sizing
 
@@ -124,3 +127,50 @@ def test_newly_opened_positions_since_includes_open_position_after_cutoff(conn):
         assert open_positions[0]["cost_basis"] == pytest.approx(30.0 * 20)
     finally:
         _cleanup_trades_and_transactions(conn)
+
+
+def test_partial_sell_notes_flags_a_symbol_still_open():
+    # Sold 30 of what was a 100-share position (70 still open) - 30% sold.
+    closed_trades = [{"symbol": "AAPL", "quantity": 30}]
+    open_positions = [{"symbol": "AAPL", "quantity": 70}]
+
+    notes = analyze_trades.partial_sell_notes(closed_trades, open_positions)
+
+    pct_sold, open_qty = notes["AAPL"]
+    assert pct_sold == pytest.approx(30.0)
+    assert open_qty == 70
+
+
+def test_partial_sell_notes_sums_multiple_closed_trades_for_the_same_symbol():
+    # Two separate closed trades (e.g. two different LIFO-matched lots)
+    # both sold this session - their quantities should combine before
+    # computing the percentage, not just use the last one seen.
+    closed_trades = [{"symbol": "AAPL", "quantity": 20}, {"symbol": "AAPL", "quantity": 10}]
+    open_positions = [{"symbol": "AAPL", "quantity": 70}]
+
+    notes = analyze_trades.partial_sell_notes(closed_trades, open_positions)
+
+    pct_sold, open_qty = notes["AAPL"]
+    assert pct_sold == pytest.approx(30.0)  # (20+10) sold of 100 total
+
+
+def test_partial_sell_notes_excludes_a_fully_closed_symbol():
+    # No open position left for this symbol - a full exit, not a partial
+    # sell, so it shouldn't show up at all.
+    closed_trades = [{"symbol": "AAPL", "quantity": 100}]
+    open_positions = []
+
+    notes = analyze_trades.partial_sell_notes(closed_trades, open_positions)
+
+    assert "AAPL" not in notes
+
+
+def test_partial_sell_notes_ignores_open_positions_never_sold_from():
+    # An open position that has nothing to do with this session's closed
+    # trades shouldn't produce a note either.
+    closed_trades = [{"symbol": "AAPL", "quantity": 30}]
+    open_positions = [{"symbol": "AAPL", "quantity": 70}, {"symbol": "MSFT", "quantity": 50}]
+
+    notes = analyze_trades.partial_sell_notes(closed_trades, open_positions)
+
+    assert list(notes.keys()) == ["AAPL"]

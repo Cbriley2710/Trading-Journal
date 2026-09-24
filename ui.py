@@ -318,6 +318,16 @@ def render_since_last_journal_summary(conn, cutoff_date):
                 row_cols[1].write(f"{row['trades']} ({row['wins']})")
                 row_cols[2].write(f"${row['net_pl']:,.2f}")
 
+        # A "closed trade" here can be a PARTIAL sell that still leaves
+        # shares open - without this, that reads identically to a full
+        # exit. Shown regardless of how many distinct tickers closed
+        # (unlike the per-ticker table above), since the most common
+        # case is exactly one symbol, and that's exactly when this
+        # matters most.
+        partial_sells = analyze_trades.partial_sell_notes(closed_since, database.get_open_positions(conn))
+        for symbol, (pct_sold, open_qty) in partial_sells.items():
+            st.caption(f"📌 {symbol}: sold {pct_sold:.0f}% of your position this session - {open_qty:,.0f} shares still open.")
+
     if new_positions:
         st.markdown("**Newly Opened Positions**" if closed_since else "**Newly Opened Positions Since Last Session**")
         sizing = position_sizing.evaluate_position_sizing(conn)
