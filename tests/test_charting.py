@@ -32,6 +32,15 @@ production bugs, each in its own section below:
      None, which callers' `if current_price is None` checks don't catch.
      See that section's own docstring.
 
+  4. fetch_history()'s live-fetch fallback never trimmed a trailing NaN
+     bar the way warm_price_cache_for_symbol() already does for the
+     persistent cache - confirmed live against CRWD (added to a
+     watchlist on 2026-09-23, so nothing cached for it yet): its most
+     recent bar was NaN, which Plotly's fig.to_json() safely turns into
+     `null` (no crash) but simply doesn't draw a candle - reading as
+     "the chart is missing its most recent day" instead of cleanly
+     ending at the last complete one. See that section's own docstring.
+
 Database/network/rendering are all faked out (get_connection/
 get_chart_preferences/get_drawings/fetch_history/render_png/yf.Ticker)
 so these run as plain unit tests.
@@ -135,7 +144,10 @@ class _FakeTicker:
     def __init__(self, history_df):
         self._history_df = history_df
 
-    def history(self, period=None, interval=None):
+    def history(self, **kwargs):
+        # Accepts any combination real callers use - period=/interval=
+        # (warm_price_cache_for_symbol(), fetch_latest_price()) or
+        # start=/end=/interval= (fetch_history()'s live-fetch fallback).
         return self._history_df
 
 
@@ -209,3 +221,39 @@ def test_fetch_latest_price_returns_none_for_an_empty_history(monkeypatch):
     monkeypatch.setattr(charting.yf, "Ticker", lambda symbol: _FakeTicker(pd.DataFrame({"Close": []})))
 
     assert charting.fetch_latest_price("MRNA") is None
+
+
+def test_fetch_history_trims_a_trailing_nan_bar_from_a_live_fetch(monkeypatch):
+    """The real bug, confirmed live against CRWD: a live (not yet
+    persistently cached) fetch's most recent bar has NaN OHLC (today's
+    session not finalized) - must trim it instead of handing the chart a
+    dangling incomplete candle. interval="1h" (anything but "1d") routes
+    straight to the live-fetch branch without needing to fake out the
+    persistent cache too."""
+    history = pd.DataFrame({
+        "Open": [10.0, math.nan], "High": [10.5, math.nan], "Low": [9.5, math.nan],
+        "Close": [10.2, math.nan], "Volume": [1000, 500],
+    }, index=pd.to_datetime(["2026-09-21", "2026-09-23"]))
+    monkeypatch.setattr(charting.yf, "Ticker", lambda symbol: _FakeTicker(history))
+
+    result = charting.fetch_history.__wrapped__(
+        "CRWD", pd.Timestamp("2026-09-01"), pd.Timestamp("2026-09-01"), pd.Timestamp("2026-09-23"), "1h", [],
+    )
+
+    assert list(result.index) == [pd.Timestamp("2026-09-21")]
+
+
+def test_fetch_history_keeps_a_complete_trailing_bar(monkeypatch):
+    """Unchanged existing behavior: a real, complete most-recent bar is
+    kept, not trimmed."""
+    history = pd.DataFrame({
+        "Open": [10.0, 11.0], "High": [10.5, 11.5], "Low": [9.5, 10.5],
+        "Close": [10.2, 11.2], "Volume": [1000, 1200],
+    }, index=pd.to_datetime(["2026-09-21", "2026-09-23"]))
+    monkeypatch.setattr(charting.yf, "Ticker", lambda symbol: _FakeTicker(history))
+
+    result = charting.fetch_history.__wrapped__(
+        "CRWD", pd.Timestamp("2026-09-01"), pd.Timestamp("2026-09-01"), pd.Timestamp("2026-09-23"), "1h", [],
+    )
+
+    assert list(result.index) == [pd.Timestamp("2026-09-21"), pd.Timestamp("2026-09-23")]

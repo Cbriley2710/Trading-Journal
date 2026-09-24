@@ -535,6 +535,25 @@ def fetch_history(symbol, fetch_start, display_start, display_end, interval, ma_
         # yfinance returns timezone-aware dates; the rest of this project's
         # dates are plain (timezone-less), so this lines them up.
         history.index = history.index.tz_localize(None)
+
+        # A REAL BUG lived here: Yahoo can report a trailing day with
+        # Volume filled in but Open/High/Low/Close still NaN (that day's
+        # session not finalized yet) - warm_price_cache_for_symbol()
+        # already refuses to cache a bar like that, but THIS live-fetch
+        # path (used for any symbol not yet in the persistent cache - a
+        # ticker just added to a watchlist, most commonly) never applied
+        # the same guard. The NaN survives Plotly's own JSON encoding
+        # (fig.to_json() turns it into a valid `null`, so nothing
+        # crashes), but a null OHLC point just doesn't draw a candle -
+        # which reads as "the chart is missing its most recent day(s)"
+        # instead of cleanly ending at the last complete one. Confirmed
+        # live against CRWD (added to a watchlist today): its most
+        # recent row was NaN, and the day before that was missing from
+        # Yahoo's data entirely - a real upstream gap this can't fix,
+        # but the chart should still end cleanly at the last good day
+        # instead of showing a dangling incomplete one.
+        while not history.empty and history.iloc[-1][["Open", "High", "Low", "Close"]].isna().any():
+            history = history.iloc[:-1]
     else:
         # From the persistent cache, which always runs through today -
         # trim the top end down to what THIS call actually asked for
