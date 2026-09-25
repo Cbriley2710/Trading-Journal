@@ -76,13 +76,44 @@ def _position_label(position):
     return f"{position['symbol']} (Short)" if position["direction"] == "SHORT" else position["symbol"]
 
 
-def _write_ticker_page(pdf, section_label, symbol, entry):
+def _open_position_stats_line(position, conn, account_value):
+    """
+    "% Change: +6.2%  ·  % of Account: 14.8%" for one open position's
+    Daily Report page - the same math charting.open_position_returns()
+    provides for the Journal Session's live fact tiles (pages/
+    2_Shortlist.py's render_position_stats()), reused here so the two
+    can never drift apart. Returns None if the current price can't be
+    fetched right now (same "just don't show it" handling as everywhere
+    else in this app a price lookup can fail).
+
+    Safe to include in a report built to be shareable without revealing
+    account value: this page shows no quantity or dollar figure
+    anywhere else, so a relative % alone doesn't let a reader back out
+    the account's actual dollar value - unlike a raw dollar P/L or
+    position size, which this report still deliberately never shows.
+    """
+    current_price = charting.fetch_latest_price(position["symbol"])
+    if current_price is None:
+        return None
+
+    returns = charting.open_position_returns(position, current_price, account_value)
+    parts = [f"% Change: {returns['pct_change']:+.1f}%"]
+    if returns["pct_of_account"] is not None:
+        parts.append(f"% of Account: {returns['pct_of_account']:.1f}%")
+    return "  ·  ".join(parts)
+
+
+def _write_ticker_page(pdf, section_label, symbol, entry, stats_line=None):
     """
     One ticker's own page: a small "which list" breadcrumb, the symbol
     as a heading, its archived chart image (or a note that it isn't
     archived yet), and its notes (or a note that none were recorded) -
     the same pieces the Logbook page shows for one day, just given a
     full page each instead of flowing several onto a shared one.
+
+    `stats_line` (an open position's % Change / % of Account, see
+    _open_position_stats_line() above) is optional - None for every
+    watchlist ticker, which has no such stats to show.
     """
     pdf.add_page()
 
@@ -148,6 +179,11 @@ def _write_ticker_page(pdf, section_label, symbol, entry):
                 f"Equity loss at {equity_text} of account"
             ),
         )
+        pdf.ln(1)
+
+    if stats_line:
+        pdf.set_font("Helvetica", style="B", size=16)
+        pdf.multi_cell(0, 9, safe_text(stats_line))
         pdf.ln(1)
 
     notes_text = entry["notes"].strip() if entry["notes"] else ""
@@ -247,9 +283,16 @@ def build_report_pdf(conn, report_date):
         for symbol in symbols:
             _write_ticker_page(pdf, names[list_id], symbol, logbook_entries.get(symbol))
 
+    # Computed once, not once per position (same N+1 avoidance as
+    # logbook_entries above) - get_calculated_account_value() already
+    # loops every open position and fetches each one's current price on
+    # its own, so re-deriving it per position here would fetch every
+    # position's price len(positions) times over.
+    account_value = charting.get_calculated_account_value(conn)
     for position in positions:
         entry = logbook_entries.get(position["symbol"])
-        _write_ticker_page(pdf, "Open Positions", _position_label(position), entry)
+        stats_line = _open_position_stats_line(position, conn, account_value)
+        _write_ticker_page(pdf, "Open Positions", _position_label(position), entry, stats_line=stats_line)
 
     return bytes(pdf.output())
 

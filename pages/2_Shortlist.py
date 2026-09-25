@@ -503,23 +503,14 @@ def render_position_stats(position, conn):
 
     unrealized_pl = None
     pct_change = None
+    pct_of_account = None
     unrealized_color = None
     if current_price is not None:
-        # A short profits when price FALLS below your average entry -
-        # the opposite direction from a long position.
-        if is_short:
-            unrealized_pl = (position["avg_price"] - current_price) * position["quantity"]
-        else:
-            unrealized_pl = (current_price - position["avg_price"]) * position["quantity"]
+        returns = charting.open_position_returns(position, current_price, _cached_account_value())
+        unrealized_pl = returns["unrealized_pl"]
+        pct_change = returns["pct_change"]
+        pct_of_account = returns["pct_of_account"]
         unrealized_color = charting.win_loss_color(unrealized_pl >= 0)
-        # Same convention analyze_trades.trade_stats() uses for a CLOSED
-        # trade's pct_change, applied to the live unrealized figure.
-        pct_change = unrealized_pl / (position["avg_price"] * position["quantity"]) * 100
-
-    account_value = _cached_account_value()
-    pct_of_account = None
-    if current_price is not None and account_value:
-        pct_of_account = (current_price * position["quantity"]) / account_value * 100
 
     stop_loss = database.get_stop_loss(conn, symbol)
 

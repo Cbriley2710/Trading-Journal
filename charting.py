@@ -896,12 +896,34 @@ def get_calculated_account_value(conn):
         current_price = fetch_latest_price(position["symbol"])
         if current_price is None:
             continue
-        cost_basis = position["avg_price"] * position["quantity"]
-        current_value = current_price * position["quantity"]
-        is_short = position["direction"] == "SHORT"
-        total_unrealized_pl_now += (cost_basis - current_value) if is_short else (current_value - cost_basis)
+        total_unrealized_pl_now += open_position_returns(position, current_price)["unrealized_pl"]
 
     return jan1_balance + deposits_this_year + realized_pl_this_year + total_unrealized_pl_now
+
+
+def open_position_returns(position, current_price, account_value=None):
+    """
+    unrealized_pl, pct_change (of cost basis), and pct_of_account (of
+    total account value) for one open position - the shared math behind
+    the Journal Session's live fact tiles (pages/2_Shortlist.py's
+    render_position_stats()), the Daily Report's per-position line
+    (daily_report.py), and get_calculated_account_value() above, so all
+    three can never drift apart.
+
+    `current_price` is passed in rather than fetched here - callers
+    already have their own reasons for how/when they fetch it (a
+    spinner, a specific retry policy). `account_value` is optional -
+    pct_of_account comes back None without it, same as "no Jan 1
+    baseline set yet" elsewhere in this app.
+    """
+    is_short = position["direction"] == "SHORT"
+    if is_short:
+        unrealized_pl = (position["avg_price"] - current_price) * position["quantity"]
+    else:
+        unrealized_pl = (current_price - position["avg_price"]) * position["quantity"]
+    pct_change = unrealized_pl / (position["avg_price"] * position["quantity"]) * 100
+    pct_of_account = (current_price * position["quantity"]) / account_value * 100 if account_value else None
+    return {"unrealized_pl": unrealized_pl, "pct_change": pct_change, "pct_of_account": pct_of_account}
 
 
 def build_mark_to_market_curve(trades_records, open_positions, daily_index):
