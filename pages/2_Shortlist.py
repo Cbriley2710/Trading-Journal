@@ -851,27 +851,44 @@ def _archive_pending_snapshots(conn, session):
 
     `session["pending_archives"]` is plain in-memory state, not
     persisted to the database like the queue/index are - if the tab
-    gets closed mid-session with some notes saved but not yet archived
-    this way, tonight's nightly job just archives those tickers as its
-    normal fallback instead. Nothing is lost, only the "instant, same-
-    session" part of it.
+    gets closed (or "Exit Session" is clicked) mid-session with some
+    notes already saved but not yet archived this way, that list is
+    gone the moment the session is resumed (a fresh page load means a
+    fresh, empty st.session_state) with nothing left to say those
+    tickers still need archiving.
+
+    A REAL INCIDENT this caused: a session interrupted mid-way, then
+    resumed and finished later - the resumed segment's own tickers
+    archived fine (they're in THIS run's pending_archives), but every
+    ticker from the interrupted EARLIER segment kept its real saved
+    notes with no chart, and stayed that way in that morning's emailed
+    Daily Report (auto-sent the moment this session completed, via
+    _send_report_after_session() below) since the pending fix - tonight's
+    nightly job - hadn't run yet. The archive_all() call below closes
+    that gap: it independently re-derives every tracked symbol's archive
+    from the database (no session state needed at all - the same
+    self-contained call the nightly job trusts), and skip_if_already_
+    archived=True makes it cheap to call unconditionally every time a
+    session completes - it only does real work for whatever's actually
+    still missing today's chart, whether that's left over from THIS
+    session or an entirely different, earlier interrupted one.
     """
     pending = session.get("pending_archives", [])
-    if not pending:
-        return
+    if pending:
+        today = timeutil.today_eastern()
+        as_of = datetime.combine(today, datetime.min.time())
+        progress = st.progress(0.0, text=f"Archiving chart 1 of {len(pending)}...")
+        for i, entry in enumerate(pending):
+            progress.progress(i / len(pending), text=f"Archiving chart {i + 1} of {len(pending)}: {entry['symbol']}...")
+            archiving.archive_ticker(
+                conn, entry["symbol"], entry["entry_point"]["entry_date"], entry["entry_point"].get("buy_price"),
+                entry["entry_label"], today, as_of,
+                direction=entry["entry_point"].get("direction", "LONG"), stop_loss=entry["stop_loss"],
+            )
+        progress.empty()
+        session["pending_archives"] = []
 
-    today = timeutil.today_eastern()
-    as_of = datetime.combine(today, datetime.min.time())
-    progress = st.progress(0.0, text=f"Archiving chart 1 of {len(pending)}...")
-    for i, entry in enumerate(pending):
-        progress.progress(i / len(pending), text=f"Archiving chart {i + 1} of {len(pending)}: {entry['symbol']}...")
-        archiving.archive_ticker(
-            conn, entry["symbol"], entry["entry_point"]["entry_date"], entry["entry_point"].get("buy_price"),
-            entry["entry_label"], today, as_of,
-            direction=entry["entry_point"].get("direction", "LONG"), stop_loss=entry["stop_loss"],
-        )
-    progress.empty()
-    session["pending_archives"] = []
+    archiving.archive_all(conn, timeutil.today_eastern(), skip_if_already_archived=True)
 
 
 def _render_todays_thoughts_step(conn, today):
