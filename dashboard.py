@@ -114,6 +114,39 @@ if trades_df.empty:
     )
     st.stop()
 
+# --- Whole-account mark-to-market curve -----------------------------------
+# Built ONCE here, from the WHOLE account (every trade ever, every open
+# position) regardless of the sidebar's Symbols/Exit date filters below -
+# shared by both Account Performance and Equity Curve further down, so
+# the two can never show different numbers for the same window. They
+# used to: Account Performance was already whole-account, but Equity
+# Curve respected the sidebar filters, AND - the deeper issue a shared
+# curve alone doesn't fix - Account Performance computed a period's $
+# gain differently (crediting a closed trade's ENTIRE profit_loss if it
+# exited within the window, and an open position's ENTIRE unrealized
+# P/L since its original entry, regardless of how long ago that was)
+# than the Equity Curve's own day-by-day mark-to-market approach (which
+# correctly counts only the portion of gain/loss that happened DURING
+# the window). See charting.period_pl_from_curve() - used by both
+# sections below - for the shared fix to that second part.
+full_curve_pl = None
+if jan1_balance:
+    all_open_positions = database.get_open_positions(conn)
+    full_start = trades_df["entry_date"].min().normalize()
+    today_ts = pd.Timestamp(timeutil.today_eastern())
+    full_daily_index = pd.date_range(start=full_start, end=today_ts, freq="D")
+    with st.spinner("Fetching price history for account performance..."):
+        full_curve_pl = charting.build_mark_to_market_curve(
+            trades_df.to_dict("records"), all_open_positions, full_daily_index)
+    # The curve's own "today" value comes from fetch_daily_closes()'s
+    # DAILY-BAR prices, which can still be yesterday's close if today's
+    # bar isn't finalized yet (the same Yahoo Finance gap fetch_latest_
+    # price() already works around elsewhere). total_unrealized_pl_now
+    # above is exact and live - overwriting the curve's last point with
+    # it means "today" is never a stale approximation, for every period
+    # computed from this curve below.
+    full_curve_pl.iloc[-1] = trades_df["profit_loss"].sum() + total_unrealized_pl_now
+
 # --- Sidebar filters ---------------------------------------------------
 st.sidebar.header("Filters")
 
@@ -187,39 +220,34 @@ stat_tile(cols[6], "Worst Trade", f"{worst['symbol']} ${worst['profit_loss']:,.2
 st.divider()
 
 # --- Account performance by time period ----------------------------------
-# Uses trades_df (every closed trade), not `filtered` - this is meant to
-# answer "how has my whole account actually done," not whatever narrower
-# slice the sidebar filters happen to be set to. 7/30/90 Days are realized
-# P/L only - open positions' unrealized P/L is today's live mark-to-market
-# swing, not something that happened specifically IN that short window, so
-# folding it in would make a short window jump around on price noise from
-# a position that's been open for months. YTD and All-Time DO add today's
-# unrealized P/L on top (see total_unrealized_pl_now above) - those are
-# meant to read as "how's the account doing overall right now," matching
-# the Equity Curve chart's own YTD line further down this page, which
-# already mark-to-markets open positions the same way. Every period's % is
-# against the Jan 1 baseline specifically, NOT today's calculated
-# account_value - that value already has this year's P/L (and today's
-# unrealized P/L) baked into it, so using it as the denominator would
-# inflate as the year goes on and systematically understate every period's
-# return.
+# Reads every period's $ gain straight off full_curve_pl (see above) via
+# charting.period_pl_from_curve() - the exact same curve AND the exact
+# same "gain since window start" math the Equity Curve chart below uses,
+# so the two can never disagree for the same window. This also means
+# 7/30/90 Days now include open positions' mark-to-market movement
+# WITHIN that specific window (previously realized P/L only) - not the
+# "noise from a position open for months" an older version of this
+# comment worried about, since period_pl_from_curve() already isolates
+# just that window's movement, not the position's whole-lifetime swing.
+# Every period's % is against the Jan 1 baseline specifically, NOT
+# today's calculated account_value - that value already has this year's
+# P/L (and today's unrealized P/L) baked into it, so using it as the
+# denominator would inflate as the year goes on and systematically
+# understate every period's return.
 if "Account Performance" in visible_sections:
     st.header("Account Performance")
     if jan1_balance:
         today = pd.Timestamp(timeutil.today_eastern())
         periods = [
-            ("7 Days", today - pd.Timedelta(days=7), False),
-            ("30 Days", today - pd.Timedelta(days=30), False),
-            ("90 Days", today - pd.Timedelta(days=90), False),
-            ("YTD", pd.Timestamp(year=today.year, month=1, day=1), True),
-            ("All-Time", None, True),
+            ("7 Days", today - pd.Timedelta(days=7)),
+            ("30 Days", today - pd.Timedelta(days=30)),
+            ("90 Days", today - pd.Timedelta(days=90)),
+            ("YTD", pd.Timestamp(year=today.year, month=1, day=1)),
+            ("All-Time", None),
         ]
         period_cols = st.columns(len(periods))
-        for col, (label, cutoff, include_unrealized) in zip(period_cols, periods):
-            period_trades = trades_df if cutoff is None else trades_df[trades_df["date"] >= cutoff]
-            period_pl = period_trades["profit_loss"].sum()
-            if include_unrealized:
-                period_pl += total_unrealized_pl_now
+        for col, (label, cutoff) in zip(period_cols, periods):
+            period_pl = charting.period_pl_from_curve(full_curve_pl, cutoff)
             period_pct = period_pl / jan1_balance * 100
             stat_tile(col, label, f"${period_pl:,.2f} ({period_pct:+.1f}%)",
                       charting.win_loss_color(period_pl >= 0))
@@ -239,6 +267,14 @@ if "Account Performance" in visible_sections:
 # cumulative total at 0% at the start of that window, so "1 Year" shows
 # the gain made DURING the last year, not the whole account's history
 # compressed into one window.
+#
+# Reuses full_curve_pl (built once, above, from the WHOLE account) -
+# this chart used to build its OWN curve from `filtered`/selected_
+# symbols (the sidebar's filters), which could show a different number
+# than Account Performance's tiles even for the same window. Always the
+# whole account now, matching Account Performance, and windowed with
+# the exact same math (see charting.period_pl_from_curve()) so the two
+# can never disagree.
 if "Equity Curve" in visible_sections:
     st.header("Equity Curve")
 
@@ -247,8 +283,6 @@ if "Equity Curve" in visible_sections:
             "Set your account value as of Jan 1 (Account Settings below) "
             "to see the equity curve as a % gain."
         )
-    elif filtered.empty:
-        st.warning("No trades match the current filters.")
     else:
         window_labels = ["1M", "3M", "6M", "YTD", "1Y", "3Y", "All Time"]
         window_col, overlay_col = st.columns([3, 1])
@@ -269,26 +303,13 @@ if "Equity Curve" in visible_sections:
         }
         cutoff = window_cutoffs[equity_window]
 
-        # The FULL mark-to-market curve (every day since this account's very
-        # first trade) is built once, regardless of which window is
-        # selected, then just sliced/re-based per window below - the
-        # expensive part (fetching each symbol's price history) is cached in
-        # charting.fetch_daily_closes(), so switching windows doesn't
-        # re-fetch anything, it just re-slices numbers already in hand.
-        # .normalize() so a real (non-midnight) entry_date doesn't shift
-        # every day in full_daily_index by that same offset - see
-        # charting.build_mark_to_market_curve()'s own note on this same pattern.
-        full_start = filtered["entry_date"].min().normalize()
-        full_daily_index = pd.date_range(start=full_start, end=today, freq="D")
-        open_positions_for_curve = [
-            p for p in database.get_open_positions(conn) if p["symbol"] in selected_symbols
-        ]
-
-        with st.spinner("Fetching price history for the equity curve..."):
-            full_curve_pl = charting.build_mark_to_market_curve(
-                filtered.to_dict("records"), open_positions_for_curve, full_daily_index)
-
-        window_start = max(cutoff, full_daily_index.min()) if cutoff is not None else full_daily_index.min()
+        # Same "effective start" rule charting.period_pl_from_curve() uses
+        # (a cutoff earlier than the curve itself just clamps to the
+        # curve's own start) - kept inline here, rather than calling that
+        # helper directly, since the CHART needs the whole windowed
+        # series, not just the single end-of-window number the Account
+        # Performance tiles read from it.
+        window_start = max(cutoff, full_curve_pl.index.min()) if cutoff is not None else full_curve_pl.index.min()
         baseline = full_curve_pl.asof(window_start)
         window_curve = full_curve_pl.loc[window_start:] - baseline
         window_pct = window_curve / jan1_balance * 100

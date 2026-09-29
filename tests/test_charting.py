@@ -41,6 +41,14 @@ production bugs, each in its own section below:
      "the chart is missing its most recent day" instead of cleanly
      ending at the last complete one. See that section's own docstring.
 
+  5. period_pl_from_curve()'s extraction - Dashboard's Account
+     Performance tiles used to compute a period's $ gain with a
+     DIFFERENT formula than the Equity Curve chart's own windowing (see
+     that function's own docstring for the exact discrepancy), so the
+     two could show different numbers for the same window (e.g. "YTD")
+     any time a trade or open position spanned the window's start date.
+     Both now share this one function.
+
 Database/network/rendering are all faked out (get_connection/
 get_chart_preferences/get_drawings/fetch_history/render_png/yf.Ticker)
 so these run as plain unit tests.
@@ -257,3 +265,40 @@ def test_fetch_history_keeps_a_complete_trailing_bar(monkeypatch):
     )
 
     assert list(result.index) == [pd.Timestamp("2026-09-21"), pd.Timestamp("2026-09-23")]
+
+
+def _curve(values, dates):
+    return pd.Series(values, index=pd.to_datetime(dates))
+
+
+def test_period_pl_from_curve_excludes_gain_from_before_the_window():
+    # $1,000 had already accrued by Jan 1 - only the +$500 earned AFTER
+    # Jan 1 should count for a window starting then, not the full $1,500.
+    curve = _curve([1000.0, 1500.0], ["2026-01-01", "2026-06-30"])
+
+    assert charting.period_pl_from_curve(curve, pd.Timestamp("2026-01-01")) == 500.0
+
+
+def test_period_pl_from_curve_none_window_start_means_since_the_beginning():
+    curve = _curve([0.0, 500.0, 1500.0], ["2026-01-01", "2026-03-01", "2026-06-30"])
+
+    assert charting.period_pl_from_curve(curve, None) == 1500.0
+
+
+def test_period_pl_from_curve_clamps_a_window_start_earlier_than_the_curve():
+    # A "90 Days" cutoff from before the account's very first trade -
+    # should clamp to the curve's own start, not look up a date the
+    # curve has no data for.
+    curve = _curve([0.0, 200.0], ["2026-06-01", "2026-06-30"])
+
+    result = charting.period_pl_from_curve(curve, pd.Timestamp("2020-01-01"))
+
+    assert result == 200.0
+
+
+def test_period_pl_from_curve_uses_asof_for_a_non_trading_day():
+    # Jan 1 itself has no row (a holiday) - .asof() should carry forward
+    # the last value at or before it (here, the curve's own start at 0).
+    curve = _curve([0.0, 300.0], ["2025-12-31", "2026-01-02"])
+
+    assert charting.period_pl_from_curve(curve, pd.Timestamp("2026-01-01")) == 300.0

@@ -1047,6 +1047,38 @@ def build_mark_to_market_curve(trades_records, open_positions, daily_index):
     return total
 
 
+def period_pl_from_curve(curve, window_start):
+    """
+    Real $ P/L from `window_start` through `curve`'s last point -
+    curve.iloc[-1] minus its value as of window_start, correctly
+    excluding whatever had already accrued before the window started
+    (as opposed to a closed trade's full profit_loss, or an open
+    position's full since-entry unrealized P/L, which don't distinguish
+    "gained before this window" from "gained during it").
+
+    `window_start=None` (or a date earlier than the curve itself starts)
+    means "from the very beginning" - the curve's own first value.
+
+    Shared by the Dashboard's Account Performance tiles, its Equity
+    Curve chart, and goals.py's Equity Growth tracking (see
+    goals._make_mark_to_market_pl_since()), so all three read a given
+    window's gain exactly the same way and can never disagree about it
+    - a real bug this fixes: Account Performance used to compute YTD
+    with a different formula than the Equity Curve chart's own YTD line
+    (crediting a trade's entire profit_loss/a position's entire
+    unrealized P/L rather than just the portion earned since the
+    window started), so the two could show different numbers for
+    "YTD" any time a trade or open position spanned the window
+    boundary - not fixable by making them share the same underlying
+    curve alone, only by making them share this same math too.
+    """
+    effective_start = curve.index.min() if window_start is None else max(window_start, curve.index.min())
+    baseline = curve.asof(effective_start)
+    if baseline is None or pd.isna(baseline):
+        baseline = 0.0
+    return curve.iloc[-1] - baseline
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_daily_closes(symbol, start, end):
     """
