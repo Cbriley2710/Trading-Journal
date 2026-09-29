@@ -643,6 +643,12 @@ def render_lists_section(conn):
                     with st.spinner(f"Warming price cache for {', '.join(newly_added)}..."):
                         for sym in newly_added:
                             charting.warm_price_cache_for_symbol(sym)
+                    # So _catch_up_missing_archives() (see below) tries
+                    # archiving THIS ticker on the very next rerun -
+                    # which happens automatically right after this form
+                    # submits - instead of returning its still-cached
+                    # "nothing to do" result from up to an hour ago.
+                    _catch_up_missing_archives.clear()
                 parts = []
                 if newly_added:
                     parts.append(f"Added {len(newly_added)} ticker(s) to {new_name}.")
@@ -1174,7 +1180,52 @@ def render_journal_list_selection(conn):
         st.rerun()
 
 
+@st.cache_data(ttl=3600, show_spinner="Checking for any tickers still needing today's chart...")
+def _catch_up_missing_archives():
+    """
+    Best-effort retry for any tracked symbol still missing today's
+    Logbook chart - called every time this page loads (see the
+    unconditional call right below). A REAL, CONFIRMED root cause this
+    exists for: Yahoo Finance's daily price bar for "today" can stay
+    unavailable (Open/High/Low/Close all NaN) for many hours after
+    close - confirmed live against 6 different tracked symbols, all
+    still "not_ready" at 9:18pm ET, 5+ hours after close. charting.
+    build_archive_snapshot() correctly refuses to archive in that case
+    (a good guard, not the bug) - but the only things that ever retried
+    a "not ready yet" symbol were two scheduled GitHub Actions jobs
+    with their own real scheduling drift (warm_price_cache.yml:
+    ~5:30pm ET scheduled, ~7-9pm ET actual; nightly_archive.yml:
+    ~midnight scheduled, ~5-7am ET actual - see those workflows' own
+    comments). If a Journal Session's auto-sent Daily Report went out
+    before Yahoo's data was ready, it stayed missing until the next
+    day's jobs ran. This gives it another chance whenever the app is
+    actually being used instead.
+
+    Reuses archiving.archive_all(skip_if_already_archived=True) - the
+    same call _archive_pending_snapshots() already makes at Journal
+    Session completion (for a DIFFERENT reason - recovering a PREVIOUS
+    interrupted session's lost pending_archives) - cheap (a plain DB
+    check) for anything already archived, real work only for whatever's
+    still genuinely missing. Rejected: unconditionally refreshing every
+    tracked symbol's full history on every page load - archive_all()'s
+    own skip flag already makes this efficient without that.
+
+    Cached for an hour so this can't turn into a live Yahoo Finance
+    call on every single click while using this page - cleared
+    explicitly right after a new ticker's added (see the watchlist
+    "Add" handling above) so that addition is tried on the very next
+    rerun instead of waiting out the hour.
+
+    Does NOT guarantee same-evening completeness - if Yahoo genuinely
+    hasn't published a symbol's close yet, no retry here changes that;
+    it only narrows the window and raises the odds of catching it.
+    """
+    conn = database.get_connection()
+    return archiving.archive_all(conn, timeutil.today_eastern(), skip_if_already_archived=True)
+
+
 conn = database.get_connection()
+_catch_up_missing_archives()
 
 pending_tweet = st.session_state.get(sk.PENDING_TWEET)
 if pending_tweet is not None and pending_tweet.get("session_key") == sk.JOURNAL_SESSION:
