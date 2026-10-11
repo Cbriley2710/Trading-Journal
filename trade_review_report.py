@@ -136,7 +136,7 @@ def _write_trade_review_page(pdf, review, jan1_balance):
     pdf.set_text_color(*MUTED_TEXT_RGB)
     stats_line = (
         f"{entry_label}: ${stats['entry_price']:,.2f}   {exit_label}: ${stats['exit_price']:,.2f}   "
-        f"Shares: {review['quantity']:,.0f}   Days Held: {stats['days_held']}"
+        f"Days Held: {stats['days_held']}"
     )
     if stats["pct_of_account"] is not None:
         stats_line += f"   Entry % of Account: {stats['pct_of_account']:,.2f}%"

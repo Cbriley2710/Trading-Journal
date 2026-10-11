@@ -282,18 +282,17 @@ with tab_reviews:
             )
             outcome_color = charting.win_loss_color(review["profit_loss"] >= 0)
             show_account_stats = stats["equity_contribution"] is not None
-            stat_cols = st.columns(8 if show_account_stats else 6)
+            stat_cols = st.columns(7 if show_account_stats else 5)
             ui.stat_tile(
                 stat_cols[0], "Short Entry" if stats["is_short"] else "Entry", f"${stats['entry_price']:,.2f}")
             ui.stat_tile(stat_cols[1], "Cover" if stats["is_short"] else "Exit", f"${stats['exit_price']:,.2f}")
-            ui.stat_tile(stat_cols[2], "Shares", f"{review['quantity']:,.0f}")
-            ui.stat_tile(stat_cols[3], "P/L", f"${review['profit_loss']:,.2f}", outcome_color)
-            ui.stat_tile(stat_cols[4], "% Change", f"{stats['pct_change']:,.2f}%", outcome_color)
-            ui.stat_tile(stat_cols[5], "Days Held", f"{stats['days_held']:,.0f}")
+            ui.stat_tile(stat_cols[2], "P/L", f"${review['profit_loss']:,.2f}", outcome_color)
+            ui.stat_tile(stat_cols[3], "% Change", f"{stats['pct_change']:,.2f}%", outcome_color)
+            ui.stat_tile(stat_cols[4], "Days Held", f"{stats['days_held']:,.0f}")
             if show_account_stats:
-                ui.stat_tile(stat_cols[6], "Entry % of Account", f"{stats['pct_of_account']:,.2f}%")
+                ui.stat_tile(stat_cols[5], "Entry % of Account", f"{stats['pct_of_account']:,.2f}%")
                 ui.stat_tile(
-                    stat_cols[7], "Equity Contribution", f"{stats['equity_contribution']:,.2f}%", outcome_color)
+                    stat_cols[6], "Equity Contribution", f"{stats['equity_contribution']:,.2f}%", outcome_color)
 
             if review["snapshots"]:
                 snapshot_cols = st.columns(len(review["snapshots"]))
