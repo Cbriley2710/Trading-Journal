@@ -253,32 +253,123 @@ def _trade_key(trade):
     )
 
 
+def _lot_key(trade):
+    """The buy-lot key - symbol/direction/entry date/entry price - used
+    to group trades for review (see _group_trades_into_lots() below).
+    Deliberately narrower than _trade_key(): one buy can be exited
+    across several SELL transactions on different days (a partial sell,
+    then another partial sell later), and match_trades_lifo() produces
+    one separate `trades` row per sell - same entry date/price every
+    time, different exit date/price/quantity each. Rounding buy_price
+    guards against float noise, though in practice every row sharing a
+    lot carries the exact same stored value (it traces back to the same
+    literal BUY transaction)."""
+    return (trade["symbol"], trade["direction"], trade["entry_date"].date().isoformat(), round(trade["buy_price"], 6))
+
+
+def _group_trades_into_lots(trades):
+    """
+    Groups closed trades that share the same buy lot together - see
+    _lot_key() above for what "same lot" means. A trade whose lot has
+    no other member in `trades` comes back as its own one-item group,
+    so every caller can treat the result uniformly (a list of groups,
+    never a mix of bare trades and groups).
+
+    Group order follows each group's FIRST member's position in
+    `trades` - callers pass an already-sorted list (see
+    render_review_selection()'s oldest-first sort), and grouping here
+    must not silently re-sort it.
+
+    This is a REVIEW-SESSION-ONLY grouping: it only changes how many
+    steps the guided walkthrough has and what's shown together on each
+    one. It does NOT change database.get_trades() or anything that
+    reads it - win rate, total P/L, the Excel tracker, and Dashboard
+    stats all keep counting each sell as its own separately-realized
+    trade, which is the financially accurate shape. See
+    _combine_trade_group() for how a group's members get blended into
+    one thing to DISPLAY, and render_review_session()'s save step for
+    how one review ends up saved against every member individually.
+    """
+    groups_by_key = {}
+    order = []
+    for t in trades:
+        key = _lot_key(t)
+        if key not in groups_by_key:
+            groups_by_key[key] = []
+            order.append(key)
+        groups_by_key[key].append(t)
+    return [groups_by_key[key] for key in order]
+
+
+def _combine_trade_group(members):
+    """
+    Builds a single DISPLAY-ONLY trade dict representing a whole group
+    from _group_trades_into_lots() - entry date/price are shared by
+    every member already, exit date is the LATEST one (when the lot was
+    actually fully closed), exit price is the quantity-weighted average
+    across every sell, and quantity/profit_loss are totals. Fed into
+    trade_label()/trade_stats()/render_trade_facts()/render_trade_chart()
+    exactly like a real trade dict, which never need to know a group was
+    involved at all.
+
+    For a one-member group (the ordinary, non-split case) this just
+    returns that member as-is - no blending math, no risk of float
+    drift from a pointless single-item "average".
+    """
+    if len(members) == 1:
+        return members[0]
+    total_quantity = sum(m["quantity"] for m in members)
+    last_exit = max(members, key=lambda m: m["date"])
+    return {
+        "symbol": members[0]["symbol"], "direction": members[0]["direction"],
+        "entry_date": members[0]["entry_date"], "buy_price": members[0]["buy_price"],
+        "quantity": total_quantity, "date": last_exit["date"],
+        "sell_price": sum(m["sell_price"] * m["quantity"] for m in members) / total_quantity,
+        "profit_loss": sum(m["profit_loss"] for m in members),
+    }
+
+
 def _queue_natural_keys(queue):
-    """The plain natural-key list that gets persisted for resuming -
-    see trade_review_session_progress's own schema comment in
-    database.py for why the full trade dicts (datetimes, floats)
-    aren't stored as-is."""
-    return [
-        {"symbol": s, "entry_date": e, "exit_date": x, "direction": d, "quantity": q, "buy_price": b, "sell_price": sp}
-        for s, e, x, d, q, b, sp in (_trade_key(t) for t in queue)
-    ]
+    """The plain natural-key list that gets persisted for resuming - one
+    entry per queue STEP, each itself a list of that step's member(s)'
+    natural-key dicts (almost always just one; more than one for a
+    grouped buy lot - see _group_trades_into_lots()). See
+    trade_review_session_progress's own schema comment in database.py
+    for why the full trade dicts (datetimes, floats) aren't stored
+    as-is."""
+    return [[_natural_key_dict(member) for member in group] for group in queue]
+
+
+def _natural_key_dict(trade):
+    """One trade's natural key as a JSON-safe dict - see _trade_key()."""
+    s, e, x, d, q, b, sp = _trade_key(trade)
+    return {"symbol": s, "entry_date": e, "exit_date": x, "direction": d, "quantity": q, "buy_price": b, "sell_price": sp}
 
 
 def _saved_key_tuple(s):
     """The comparable tuple form of one saved natural-key dict (from
-    _queue_natural_keys()) - shared by _reorder_for_resume() below."""
+    _natural_key_dict()) - shared by _reorder_for_resume() below."""
     return (s["symbol"], s["entry_date"], s["exit_date"], s["direction"], s["quantity"], s["buy_price"], s["sell_price"])
 
 
 def _reorder_for_resume(trades, saved_order):
     """Filters/reorders TODAY's real closed trades to match
-    `saved_order` (the natural-key list saved when a paused Review
-    Session was started) - a saved trade no longer matching anything
-    today (its underlying transactions were edited/re-imported since)
-    is silently dropped, same as Journal Session's own
-    _reorder_for_resume() in pages/2_Shortlist.py."""
+    `saved_order` (the queue-of-groups saved when a paused Review
+    Session was started - see _queue_natural_keys()), rebuilding each
+    step as a list of trade dicts. A step with ANY member no longer
+    matching today's real trades (its underlying transactions were
+    edited/re-imported since) is dropped ENTIRELY, not just that one
+    member - resuming a partial, different-shaped version of a lot that
+    was reviewed together would be more confusing than just dropping it,
+    same spirit as Journal Session's own _reorder_for_resume() in
+    pages/2_Shortlist.py."""
     by_key = {_trade_key(t): t for t in trades}
-    return [by_key[_saved_key_tuple(s)] for s in saved_order if _saved_key_tuple(s) in by_key]
+    result = []
+    for group in saved_order:
+        members = [by_key[_saved_key_tuple(s)] for s in group if _saved_key_tuple(s) in by_key]
+        if len(members) == len(group):
+            result.append(members)
+    return result
 
 
 def _jump_review_session(conn, session, new_index):
@@ -410,6 +501,15 @@ def render_review_session(conn):
     render_journal_session() closely. Bookended by a one-time journal
     entry before the first trade and after the last (see
     _render_review_intro()/_render_review_outro() above).
+
+    `session["queue"]` is a list of STEPS, not a list of bare trades -
+    almost always one trade per step, but a single buy exited across
+    several sell transactions on different days becomes one step with
+    several members (see _group_trades_into_lots()), reviewed together
+    with one combined chart/notes/tags instead of once per sell. See
+    _combine_trade_group() for the blended display dict and the Save &
+    Next handling below for how one review ends up saved against every
+    member individually.
     """
     session = st.session_state[sk.REVIEW_SESSION]
     queue, index = session["queue"], session["index"]
@@ -443,28 +543,44 @@ def render_review_session(conn):
             st.rerun()
         return
 
-    trade = queue[index]
+    # Almost always a single-item list - more than one when this step
+    # is a buy lot exited across several sells on different days (see
+    # _group_trades_into_lots()). `trade` is the blended stand-in used
+    # for every display/chart/stats call below, exactly like a real
+    # trade dict; `members` is what actually gets saved against.
+    members = queue[index]
+    trade = _combine_trade_group(members)
     key_prefix = f"review_{index}"
     anchor_id = f"{key_prefix}_review_anchor"
     should_scroll = st.session_state.pop(sk.SCROLL_TO_REVIEW_ANCHOR, False)
 
-    # Whatever's already saved for THIS trade in THIS report, if
-    # anything - non-None whenever the trade-jump dropdown or Previous
-    # brought us back to one already reviewed earlier this session (or
-    # a resumed one from a prior sitting). Drives the notes prefill and
-    # the "already captured" snapshot caption below, and tells Save &
-    # Next whether to update this row instead of inserting a duplicate.
-    existing_review = database.get_review_for_trade(conn, session["report_id"], trade)
+    # Whatever's already saved for this step's trade(s) in THIS report,
+    # if anything - non-None whenever the trade-jump dropdown or
+    # Previous brought us back to one already reviewed earlier this
+    # session (or a resumed one from a prior sitting). Checking just the
+    # first member is enough: Save & Next below always writes the same
+    # notes/tags/snapshots to EVERY member together, so either all of a
+    # group's members have a saved review or none of them do. Drives
+    # the notes prefill and the "already captured" snapshot caption
+    # below, and tells Save & Next whether to update each member's row
+    # instead of inserting a duplicate.
+    existing_review = database.get_review_for_trade(conn, session["report_id"], members[0])
 
     # Which trades in the queue already have a saved review - used for
     # both the "N of M (K reviewed)" counter and the jump dropdown's
-    # 🟢/⚪ markers just below.
+    # 🟢/⚪ markers just below. A GROUPED step counts as reviewed only
+    # once every one of its members does (see the save loop further
+    # down - they're always written together in one click).
     reviewed_keys = {
         (r["symbol"], r["entry_date"].isoformat(), r["exit_date"].isoformat(),
          r["direction"], r["quantity"], r["buy_price"], r["sell_price"])
         for r in report["reviews"]
     }
-    reviewed_count = sum(1 for t in queue if _trade_key(t) in reviewed_keys)
+
+    def _group_reviewed(group):
+        return all(_trade_key(m) in reviewed_keys for m in group)
+
+    reviewed_count = sum(1 for group in queue if _group_reviewed(group))
 
     header_cols = st.columns([5, 1])
     header_cols[0].subheader(
@@ -486,8 +602,8 @@ def render_review_session(conn):
     # manually keep a stable widget's remembered value in sync with
     # session["index"] from several different directions.
     jump_labels = [
-        f"{'🟢' if _trade_key(t) in reviewed_keys else '⚪'} {i + 1}. {trade_label(t)}"
-        for i, t in enumerate(queue)
+        f"{'🟢' if _group_reviewed(group) else '⚪'} {i + 1}. {trade_label(_combine_trade_group(group))}"
+        for i, group in enumerate(queue)
     ]
     jump_choice = st.selectbox(
         "Jump to a trade", options=jump_labels, index=index,
@@ -623,10 +739,22 @@ def render_review_session(conn):
                     trade["direction"], "Daily", settings)
             if daily_snapshot is not None:
                 pending["Daily"] = daily_snapshot
-        if existing_review:
-            database.update_trade_review(conn, existing_review["id"], notes, pending, tags)
-        else:
-            database.save_trade_review(conn, session["report_id"], trade, notes, pending, tags)
+        # Writes the SAME notes/snapshots/tags to EVERY member of this
+        # step, not just `trade` (the blended stand-in used for display
+        # above) - a grouped buy lot (see _group_trades_into_lots())
+        # should read as one review no matter which of its member exit
+        # dates you later look it up by (Logbook, the Monthly Review
+        # Credit % goal, the PDF). Each member is looked up individually
+        # rather than trusting `existing_review` for all of them, so a
+        # lot that was only PARTLY saved before (e.g. an interrupted
+        # earlier session) still gets its missing member(s) inserted
+        # instead of skipped.
+        for member in members:
+            member_existing = database.get_review_for_trade(conn, session["report_id"], member)
+            if member_existing:
+                database.update_trade_review(conn, member_existing["id"], notes, pending, tags)
+            else:
+                database.save_trade_review(conn, session["report_id"], member, notes, pending, tags)
 
         if post_to_x:
             # The Daily snapshot just guaranteed above always wins as
@@ -775,11 +903,17 @@ def render_review_selection(conn, trades):
 
     action_cols = st.columns([1, 1, 3])
     if action_cols[0].button("Begin Review", type="primary", disabled=not checked):
+        # A buy lot exited across several sells on different days (see
+        # _group_trades_into_lots()) becomes ONE step here, even though
+        # the checklist above still listed each sell as its own line -
+        # grouping happens now, not earlier, so you can still pick which
+        # of a lot's exits to include just like any other trade.
+        queue = _group_trades_into_lots(checked)
         report_id = database.create_review_report(conn, range_start, range_end)
         st.session_state[sk.REVIEW_SESSION] = {
-            "report_id": report_id, "queue": checked, "index": 0, "pending_snapshots": {},
+            "report_id": report_id, "queue": queue, "index": 0, "pending_snapshots": {},
         }
-        database.save_review_session_progress(conn, report_id, _queue_natural_keys(checked), 0)
+        database.save_review_session_progress(conn, report_id, _queue_natural_keys(queue), 0)
         st.session_state[sk.SCROLL_TO_REVIEW_ANCHOR] = True
         del st.session_state[sk.REVIEW_SELECTING]
         st.rerun()
