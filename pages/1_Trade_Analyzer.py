@@ -68,6 +68,7 @@ TRADE_REVIEW_TAGS = [
     "Emotional buy/sell", "Failed but would take again", "Poor volume",
     "Good volume", "Model book", "Follow up buy", "No setup",
     "Well defined setup", "Panic sell", "DUMB AF", "FUCKN IDIOT",
+    "Forcing trades",
 ]
 
 
