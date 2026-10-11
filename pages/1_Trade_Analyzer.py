@@ -724,7 +724,7 @@ def render_review_selection(conn, trades):
         range_start, range_end = date_range
         filtered = [t for t in trades if range_start <= t["date"].date() <= range_end]
 
-    filtered = sorted(filtered, key=lambda t: t["date"], reverse=True)
+    filtered = sorted(filtered, key=lambda t: t["date"])
 
     if not filtered:
         st.info("No trades match this date range.")
