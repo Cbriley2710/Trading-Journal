@@ -56,6 +56,20 @@ nav.render_top_nav("trade_analyzer")
 
 st.title("Trade Analyzer")
 
+# The buckets a reviewed trade can be tagged with (see render_review_session()
+# below) - a fixed list rather than free-text so the Logbook/PDF can filter
+# and count by bucket later without having to parse free-form tag text. A
+# trade can have more than one (e.g. "Emotional Buy/Sell" AND "Panic Sell"),
+# so this backs a multiselect, not a single choice - stored as a plain list
+# of strings in trade_reviews.tags (see database.save_trade_review()).
+TRADE_REVIEW_TAGS = [
+    "Should have never taken", "Good trade", "Great trade", "Too extended",
+    "Market not in the right space", "Got shook and should have never sold",
+    "Emotional buy/sell", "Failed but would take again", "Poor volume",
+    "Good volume", "Model book", "Follow up buy", "No setup",
+    "Well defined setup", "Panic sell", "DUMB AF", "FUCKN IDIOT",
+]
+
 
 def load_trades():
     conn = database.get_connection()
@@ -575,6 +589,16 @@ def render_review_session(conn):
         "Trade Review Notes", value=(existing_review["notes"] if existing_review else "") or "",
         height=68, key=notes_key)
 
+    # Same "new key when a saved review exists" reasoning as notes_key
+    # above - a trade revisited after being tagged needs a fresh key to
+    # actually show the saved tags instead of Streamlit silently keeping
+    # whatever blank default this widget had the first time it rendered.
+    tags_key = f"{key_prefix}_tags_{'reviewed' if existing_review else 'new'}"
+    tags = notes_col.multiselect(
+        "Tags", options=TRADE_REVIEW_TAGS,
+        default=(existing_review["tags"] if existing_review else []),
+        key=tags_key)
+
     clicked = None
     if buttons_col.button("← Previous", width="stretch", disabled=index == 0, key=f"{key_prefix}_previous"):
         _jump_review_session(conn, session, index - 1)
@@ -598,9 +622,9 @@ def render_review_session(conn):
             if daily_snapshot is not None:
                 pending["Daily"] = daily_snapshot
         if existing_review:
-            database.update_trade_review(conn, existing_review["id"], notes, pending)
+            database.update_trade_review(conn, existing_review["id"], notes, pending, tags)
         else:
-            database.save_trade_review(conn, session["report_id"], trade, notes, pending)
+            database.save_trade_review(conn, session["report_id"], trade, notes, pending, tags)
 
         if post_to_x:
             # The Daily snapshot just guaranteed above always wins as

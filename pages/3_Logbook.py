@@ -301,6 +301,8 @@ with tab_reviews:
                     col.image(chart_image, width="stretch")
             else:
                 st.caption("No chart snapshots were saved for this trade.")
+            if review["tags"]:
+                st.markdown("**Tags:** " + ", ".join(review["tags"]))
             st.write(review["notes"] if review["notes"] else "_No notes recorded for this trade._")
             st.divider()
 

@@ -149,6 +149,12 @@ def _write_trade_review_page(pdf, review, jan1_balance):
     if stats["equity_contribution"] is not None:
         pl_line += f"   Equity Contribution: {stats['equity_contribution']:,.2f}%"
     pdf.cell(0, 10, safe_text(pl_line), new_x="LMARGIN", new_y="NEXT")
+
+    if review["tags"]:
+        pdf.set_text_color(*MUTED_TEXT_RGB)
+        pdf.set_font("Helvetica", style="B", size=14)
+        pdf.cell(0, 9, safe_text("Tags: " + ", ".join(review["tags"])), new_x="LMARGIN", new_y="NEXT")
+
     pdf.ln(4)
 
     # The PRIMARY snapshot goes right here, on this same page - "Daily"

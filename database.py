@@ -673,6 +673,12 @@ def init_db(conn):
         cur.execute("ALTER TABLE trade_reviews ADD COLUMN quantity DOUBLE PRECISION")
     if not _column_exists(cur, "trade_reviews", "profit_loss"):
         cur.execute("ALTER TABLE trade_reviews ADD COLUMN profit_loss DOUBLE PRECISION")
+    # Which bucket(s) this trade falls into (see pages/1_Trade_Analyzer.py's
+    # TRADE_REVIEW_TAGS) - a trade can have more than one ("Emotional
+    # Buy/Sell" AND "Panic Sell" are both true of the same trade), so
+    # this is a JSONB list of strings, not a single column.
+    if not _column_exists(cur, "trade_reviews", "tags"):
+        cur.execute("ALTER TABLE trade_reviews ADD COLUMN tags JSONB NOT NULL DEFAULT '[]'")
     # A chart snapshot captured during a trade's review, at whichever
     # timeframe was on screen when "Save this timeframe" was clicked -
     # one trade can have several (Hourly, Daily, Weekly, ...), which is
@@ -1914,7 +1920,7 @@ def delete_review_report(conn, report_id):
     conn.commit()
 
 
-def save_trade_review(conn, report_id, trade, notes, snapshots):
+def save_trade_review(conn, report_id, trade, notes, snapshots, tags=None):
     """
     Saves one reviewed trade into a report: `trade` is a dict from
     get_trades() (its symbol/entry_date/date/direction identify WHICH
@@ -1923,7 +1929,9 @@ def save_trade_review(conn, report_id, trade, notes, snapshots):
     `notes` is the free-text review, and `snapshots` is
     {timeframe_label: png_bytes} for whichever timeframes were captured
     with "Save this timeframe" during the review (can be empty - a note
-    with no snapshots is still a valid review).
+    with no snapshots is still a valid review). `tags` is a list of
+    strings from TRADE_REVIEW_TAGS (see pages/1_Trade_Analyzer.py) -
+    defaults to an empty list, same as the column's own DEFAULT.
 
     buy_price/sell_price/quantity/profit_loss are saved too (not just
     the identifying fields) so the PDF/Logbook display (see
@@ -1936,13 +1944,14 @@ def save_trade_review(conn, report_id, trade, notes, snapshots):
         """
         INSERT INTO trade_reviews
             (report_id, symbol, entry_date, exit_date, direction, notes, reviewed_at,
-             buy_price, sell_price, quantity, profit_loss)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             buy_price, sell_price, quantity, profit_loss, tags)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
         (report_id, trade["symbol"], trade["entry_date"].date(), trade["date"].date(),
          trade["direction"], notes, timeutil.now_eastern(),
-         trade["buy_price"], trade["sell_price"], trade["quantity"], trade["profit_loss"]),
+         trade["buy_price"], trade["sell_price"], trade["quantity"], trade["profit_loss"],
+         Json(tags or [])),
     )
     review_id = cur.fetchone()[0]
     for timeframe, chart_image in snapshots.items():
@@ -1956,22 +1965,22 @@ def save_trade_review(conn, report_id, trade, notes, snapshots):
 def get_review_for_trade(conn, report_id, trade):
     """
     Returns the already-saved review for this exact trade within this
-    report - {"id", "notes", "snapshots": {timeframe: bytes}} - or None
-    if this trade hasn't been reviewed yet in this report. Matched by
-    the same natural-key fields as trade_reviews' own schema (symbol/
-    entry_date/exit_date/direction/quantity/buy_price/sell_price - see
-    pages/1_Trade_Analyzer.py's _trade_key(), which this mirrors).
+    report - {"id", "notes", "tags", "snapshots": {timeframe: bytes}} -
+    or None if this trade hasn't been reviewed yet in this report.
+    Matched by the same natural-key fields as trade_reviews' own schema
+    (symbol/entry_date/exit_date/direction/quantity/buy_price/sell_price -
+    see pages/1_Trade_Analyzer.py's _trade_key(), which this mirrors).
 
     Used by the Review Session when revisiting a trade via the Previous
     button or the trade-jump dropdown - lets that render prefill the
-    existing notes instead of a blank box, and tells the caller whether
-    "Save & Next" should update this row (see update_trade_review()
-    below) instead of inserting a duplicate.
+    existing notes/tags instead of a blank box, and tells the caller
+    whether "Save & Next" should update this row (see
+    update_trade_review() below) instead of inserting a duplicate.
     """
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT id, notes FROM trade_reviews
+        SELECT id, notes, tags FROM trade_reviews
         WHERE report_id = %s AND symbol = %s AND entry_date = %s AND exit_date = %s
               AND direction = %s AND quantity = %s AND buy_price = %s AND sell_price = %s
         """,
@@ -1981,29 +1990,30 @@ def get_review_for_trade(conn, report_id, trade):
     row = cur.fetchone()
     if row is None:
         return None
-    review_id, notes = row
+    review_id, notes, tags = row
     cur.execute(
         "SELECT timeframe, chart_image FROM trade_review_snapshots WHERE review_id = %s", (review_id,))
     snapshots = {timeframe: bytes(chart_image) for timeframe, chart_image in cur.fetchall()}
-    return {"id": review_id, "notes": notes, "snapshots": snapshots}
+    return {"id": review_id, "notes": notes, "tags": tags or [], "snapshots": snapshots}
 
 
-def update_trade_review(conn, review_id, notes, new_snapshots):
+def update_trade_review(conn, review_id, notes, new_snapshots, tags=None):
     """
     Updates an already-saved review in place, for the Review Session's
     Save & Next when revisiting a trade via Previous or the trade-jump
-    dropdown (see get_review_for_trade()) - notes are overwritten with
-    whatever's currently in the box (even blank; clearing a note on a
-    re-review is a legitimate way to remove it, not something to
-    silently keep the old value for). Any newly captured snapshot in
-    `new_snapshots` replaces an existing one for that SAME timeframe
-    (capturing "Daily" again means "update this snapshot", not "keep
-    both") and adds a new row for any timeframe not already saved.
+    dropdown (see get_review_for_trade()) - notes and tags are both
+    overwritten with whatever's currently selected (even blank/empty;
+    clearing a note or unchecking every tag on a re-review is a
+    legitimate way to remove it, not something to silently keep the old
+    value for). Any newly captured snapshot in `new_snapshots` replaces
+    an existing one for that SAME timeframe (capturing "Daily" again
+    means "update this snapshot", not "keep both") and adds a new row
+    for any timeframe not already saved.
     """
     cur = conn.cursor()
     cur.execute(
-        "UPDATE trade_reviews SET notes = %s, reviewed_at = %s WHERE id = %s",
-        (notes, timeutil.now_eastern(), review_id),
+        "UPDATE trade_reviews SET notes = %s, tags = %s, reviewed_at = %s WHERE id = %s",
+        (notes, Json(tags or []), timeutil.now_eastern(), review_id),
     )
     for timeframe, chart_image in new_snapshots.items():
         cur.execute(
@@ -2077,7 +2087,7 @@ def get_review_report(conn, report_id):
     {"id", "created_at", "range_start", "range_end", "sent_at",
     "predictions_notes", "reflections_notes",
     "reviews": [{"symbol", "entry_date", "exit_date", "direction",
-    "notes", "reviewed_at", "buy_price", "sell_price", "quantity",
+    "notes", "tags", "reviewed_at", "buy_price", "sell_price", "quantity",
     "profit_loss", "snapshots": {timeframe: chart_image}}, ...]}
     or None if this report doesn't exist. Two queries (reviews, then
     every snapshot for those reviews in one batch), not one join per
@@ -2099,7 +2109,7 @@ def get_review_report(conn, report_id):
     cur.execute(
         """
         SELECT id, symbol, entry_date, exit_date, direction, notes, reviewed_at,
-               buy_price, sell_price, quantity, profit_loss
+               buy_price, sell_price, quantity, profit_loss, tags
         FROM trade_reviews WHERE report_id = %s ORDER BY reviewed_at
         """,
         (report_id,),
@@ -2125,6 +2135,7 @@ def get_review_report(conn, report_id):
                 "symbol": row[1], "entry_date": row[2], "exit_date": row[3], "direction": row[4],
                 "notes": row[5], "reviewed_at": row[6],
                 "buy_price": row[7], "sell_price": row[8], "quantity": row[9], "profit_loss": row[10],
+                "tags": row[11] or [],
                 "snapshots": snapshots_by_review[row[0]],
             }
             for row in review_rows
