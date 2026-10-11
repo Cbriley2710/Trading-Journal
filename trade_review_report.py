@@ -144,7 +144,7 @@ def _write_trade_review_page(pdf, review, jan1_balance):
     outcome_rgb = hex_to_rgb(charting.win_loss_color(review["profit_loss"] >= 0))
     pdf.set_text_color(*outcome_rgb)
     pdf.set_font("Helvetica", style="B", size=17)
-    pl_line = f"P/L: ${review['profit_loss']:,.2f}  ({stats['pct_change']:,.2f}%)"
+    pl_line = f"% Change: {stats['pct_change']:,.2f}%"
     if stats["equity_contribution"] is not None:
         pl_line += f"   Equity Contribution: {stats['equity_contribution']:,.2f}%"
     pdf.cell(0, 10, safe_text(pl_line), new_x="LMARGIN", new_y="NEXT")
@@ -222,40 +222,33 @@ def _write_review_summary_section(pdf, summary):
         new_x="LMARGIN", new_y="NEXT",
     )
 
-    pdf.set_font("Helvetica", style="B", size=17)
-    pdf.set_text_color(*(win_rgb if summary["total_pl"] >= 0 else loss_rgb))
-    pdf.cell(0, 10, safe_text(f"Total P/L: ${summary['total_pl']:,.2f}"), new_x="LMARGIN", new_y="NEXT")
-
     pdf.set_font("Helvetica", size=16)
     pdf.set_text_color(*win_rgb)
     win_line = (
-        f"Avg Win: ${summary['avg_win_dollar']:,.2f} ({summary['avg_win_pct']:,.2f}%)"
+        f"Avg Win: {summary['avg_win_pct']:,.2f}%"
         if summary["avg_win_dollar"] is not None else "Avg Win: -"
     )
     pdf.cell(0, 9, safe_text(win_line), new_x="LMARGIN", new_y="NEXT")
     pdf.set_text_color(*loss_rgb)
     loss_line = (
-        f"Avg Loss: ${summary['avg_loss_dollar']:,.2f} ({summary['avg_loss_pct']:,.2f}%)"
+        f"Avg Loss: {summary['avg_loss_pct']:,.2f}%"
         if summary["avg_loss_dollar"] is not None else "Avg Loss: -"
     )
     pdf.cell(0, 9, safe_text(loss_line), new_x="LMARGIN", new_y="NEXT")
     pdf.ln(3)
 
+    # Sorted by net dollar P/L (best to worst) even though that dollar
+    # figure itself isn't shown in the table below - still the most
+    # useful ordering, just not a number this report displays.
     per_ticker_rows = sorted(summary["per_ticker"].items(), key=lambda kv: kv[1]["net_pl"], reverse=True)
     pdf.set_text_color(*TEXT_COLOR_RGB)
     pdf.set_font("Helvetica", size=16)
     with pdf.table(
-        # Widened alongside the table's own font size each time it's
-        # grown (originally 0.6, then 0.72 at +2pt, now 0.94 at the
-        # current 30%-larger size) so a value like "$12,345.67" keeps
-        # the same relative breathing room in its column instead of
-        # being more likely to wrap onto a second line now that it's
-        # bigger.
-        col_widths=(2, 1, 1, 1, 1.3, 1.3), text_align="LEFT",
-        borders_layout="NONE", width=CONTENT_WIDTH_MM * 0.94,
+        col_widths=(2, 1, 1, 1, 1.3), text_align="LEFT",
+        borders_layout="NONE", width=CONTENT_WIDTH_MM * 0.7,
     ) as table:
         header_row = table.row()
-        for label in ("Symbol", "Trades", "Wins", "Losses", "Win Rate", "Net P/L"):
+        for label in ("Symbol", "Trades", "Wins", "Losses", "Win Rate"):
             header_row.cell(safe_text(label))
         for symbol, row in per_ticker_rows:
             losses = row["trades"] - row["wins"]
@@ -266,7 +259,6 @@ def _write_review_summary_section(pdf, summary):
             table_row.cell(str(row["wins"]))
             table_row.cell(str(losses))
             table_row.cell(win_rate)
-            table_row.cell(safe_text(f"${row['net_pl']:,.2f}"))
     pdf.ln(4)
 
 
