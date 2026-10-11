@@ -1,22 +1,27 @@
 """
 Nightly Archive
 =====================
-A fallback safety net: snapshots every currently-open position's chart
-AND every manually-added Watchlist ticker's chart, archiving each -
-together with whatever journal notes were written for today via the
-Shortlist page - into that ticker's permanent Logbook (see
-archiving.py). Afterward, also sends the Daily Report PDF (see
-daily_report.py) if it hasn't already been generated and emailed for
+Snapshots every currently-open position's chart AND every
+manually-added Watchlist ticker's chart, archiving each - together
+with whatever journal notes were written for today via the Shortlist
+page - into that ticker's permanent Logbook (see archiving.py).
+Afterward, also sends the Daily Report PDF (see daily_report.py) if it
+hasn't already been generated and emailed for today.
+
+Chart archiving is a fallback safety net for whatever the Shortlist
+page's own Save button (and its _catch_up_missing_archives() retry,
+see pages/2_Shortlist.py) didn't already manage to archive by hand
 today.
 
-Both the chart archiving and the report-sending follow the same
-pattern: the Shortlist page's Save button (for charts) and the
-Logbook page's "Generate & Email Report" button (for the report -
-which itself re-archives everything for today too, see
-daily_report.generate_and_send_report()) already do this immediately
-when used - this script's job is really just to catch whatever didn't
-get done by hand on a given day, not the primary way either one
-happens.
+The Daily Report, though, is no longer sent any other way - a Journal
+Session used to auto-email it the same evening it was finished, but
+that was removed: Yahoo Finance's daily close usually isn't finalized
+that early in the evening, so a same-evening report almost always went
+out with every chart missing (confirmed for real, 3 days running - see
+pages/2_Shortlist.py's _archive_pending_snapshots() docstring). This
+script now runs well after close, once chart archiving above has had
+all night for Yahoo's data to actually be ready, and is the ONE place
+the Daily Report gets built and sent each day.
 
 Also runs symbol_archive_report.py's storage-management pass - PDFing,
 emailing, and deleting the Logbook of any watchlist-only ticker that's
@@ -41,16 +46,17 @@ import timeutil
 def send_daily_report_fallback(conn, today):
     """
     Generates and emails the Daily Report for `today` if nothing is
-    already recorded for it in database.daily_reports (i.e. the
-    Logbook page's "Generate & Email Report" button wasn't used today) -
-    wrapped so a problem here (bad email secrets, an SMTP hiccup) never
-    affects the chart-archiving work main() already did above it.
+    already recorded for it in database.daily_reports - guards against
+    sending a duplicate if this script somehow runs twice for the same
+    trading day. Wrapped so a problem here (bad email secrets, an SMTP
+    hiccup) never affects the chart-archiving work main() already did
+    above it.
     """
     if database.get_daily_report_status(conn, today):
         print("Daily report already generated and emailed for today - skipping.")
         return
 
-    print("Daily report not yet sent today - generating and emailing it now.")
+    print("Generating and emailing today's report now that charts have had all night to archive.")
     try:
         success, message = daily_report.generate_and_send_report(conn, today)
         print(f"  {message}")

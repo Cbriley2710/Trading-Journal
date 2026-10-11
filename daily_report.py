@@ -15,12 +15,12 @@ dark-background image, so a landscape page fits it without shrinking
 it down, and a dark page background means there's no bright white
 border around a dark chart.
 
-Two things call generate_and_send_report() below: the "Generate &
-Email Report" button on the Logbook page (always runs when clicked),
-and nightly_archive.py (only runs if nothing is recorded yet for today
-in the database.daily_reports table) - the same "manual action is
-primary, the nightly script is the fallback" pattern this project
-already uses for per-ticker chart archiving.
+nightly_archive.py is the only caller of generate_and_send_report()
+below - it used to also be auto-sent the same evening a Journal
+Session finished, but that was removed (see nightly_archive.py's
+module docstring): this day's chart images usually aren't actually
+archived yet that early, so a same-evening send went out with every
+chart missing far more often than not.
 
 SENDING EMAIL: through Gmail's SMTP server, which needs a Google
 Account "App Password" (NOT your regular Gmail password - Gmail

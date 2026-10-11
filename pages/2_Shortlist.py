@@ -40,7 +40,6 @@ import streamlit as st
 import archiving
 import auth
 import charting
-import daily_report
 import database
 import nav
 import session_keys as sk
@@ -867,17 +866,24 @@ def _archive_pending_snapshots(conn, session):
     resumed and finished later - the resumed segment's own tickers
     archived fine (they're in THIS run's pending_archives), but every
     ticker from the interrupted EARLIER segment kept its real saved
-    notes with no chart, and stayed that way in that morning's emailed
-    Daily Report (auto-sent the moment this session completed, via
-    _send_report_after_session() below) since the pending fix - tonight's
-    nightly job - hadn't run yet. The archive_all() call below closes
-    that gap: it independently re-derives every tracked symbol's archive
-    from the database (no session state needed at all - the same
-    self-contained call the nightly job trusts), and skip_if_already_
-    archived=True makes it cheap to call unconditionally every time a
-    session completes - it only does real work for whatever's actually
-    still missing today's chart, whether that's left over from THIS
-    session or an entirely different, earlier interrupted one.
+    notes with no chart until the pending fix - tonight's nightly job -
+    ran. The archive_all() call below closes that gap: it independently
+    re-derives every tracked symbol's archive from the database (no
+    session state needed at all - the same self-contained call the
+    nightly job trusts), and skip_if_already_archived=True makes it
+    cheap to call unconditionally every time a session completes - it
+    only does real work for whatever's actually still missing today's
+    chart, whether that's left over from THIS session or an entirely
+    different, earlier interrupted one.
+
+    The Daily Report itself is no longer auto-sent right after a
+    session completes (see nightly_archive.py's module docstring) -
+    this same evening, Yahoo Finance's daily close usually isn't
+    finalized yet, so a same-evening report almost always went out with
+    every chart missing (confirmed for real: 3 days running, every
+    chart across every section). The nightly job now sends the one and
+    only report for each day, after its own archive_all() pass has had
+    all night for Yahoo's data to actually be ready.
     """
     pending = session.get("pending_archives", [])
     if pending:
@@ -955,37 +961,6 @@ def _render_todays_thoughts_step(conn, today):
     return False
 
 
-def _send_report_after_session(conn):
-    """
-    Generates and emails today's Daily Report automatically right after
-    a Journal Session finishes, so that's one less thing to remember to
-    do separately on the Logbook page. Guarded by get_daily_report_status
-    first - same check nightly_archive.py's own fallback already makes
-    before calling this - so finishing a second session the same day
-    (or the nightly job running later that night) doesn't send a
-    duplicate email.
-
-    archive_first is left False here: _archive_pending_snapshots() just
-    finished archiving a fresh chart for every ticker that got a "Save &
-    Next" this session, so re-archiving everything again (what
-    archive_first=True does) would pay the several-seconds-per-chart
-    cost twice for the same tickers. The trade-off is that a ticker that
-    was Skipped this session won't have a freshly-archived image in
-    today's report this way - the same as today's existing behavior for
-    any skipped ticker otherwise.
-    """
-    today = timeutil.today_eastern()
-    if database.get_daily_report_status(conn, today):
-        return
-
-    with st.spinner("Generating and emailing today's report..."):
-        success, message = daily_report.generate_and_send_report(conn, today)
-    if success:
-        st.success(message)
-    else:
-        st.error(message)
-
-
 def render_journal_session(conn):
     """
     The guided Journal Session: walks through every ticker in the queue
@@ -1005,7 +980,6 @@ def render_journal_session(conn):
         _archive_pending_snapshots(conn, session)
         database.clear_journal_session_progress(conn)
         st.success(f"Session complete - journaled {len(queue)} ticker(s) today.")
-        _send_report_after_session(conn)
         if st.button("Back to Shortlist"):
             del st.session_state[sk.JOURNAL_SESSION]
             st.rerun()
@@ -1196,10 +1170,13 @@ def _catch_up_missing_archives():
     with their own real scheduling drift (warm_price_cache.yml:
     ~5:30pm ET scheduled, ~7-9pm ET actual; nightly_archive.yml:
     ~midnight scheduled, ~5-7am ET actual - see those workflows' own
-    comments). If a Journal Session's auto-sent Daily Report went out
-    before Yahoo's data was ready, it stayed missing until the next
-    day's jobs ran. This gives it another chance whenever the app is
-    actually being used instead.
+    comments). Without this, a chart could stay missing from the
+    Logbook for hours after it was actually fetchable, simply because
+    nothing happened to retry it. This gives it another chance whenever
+    the app is actually being used instead. (The Daily Report itself no
+    longer sends the same evening at all - see nightly_archive.py's
+    module docstring - so this function's job now is purely keeping the
+    Logbook's own chart history complete, not racing an email.)
 
     Reuses archiving.archive_all(skip_if_already_archived=True) - the
     same call _archive_pending_snapshots() already makes at Journal
