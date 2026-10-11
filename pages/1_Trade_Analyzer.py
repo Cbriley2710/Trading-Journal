@@ -115,7 +115,7 @@ def render_trade_facts(conn, trade):
         fact_tile(cols[6], "Equity Contribution", f"{stats['equity_contribution']:,.2f}%", outcome_color)
 
 
-def render_trade_chart(conn, trade, key_prefix, anchor_id=None, timeframe_label=None):
+def render_trade_chart(conn, trade, key_prefix, anchor_id=None, timeframe_label=None, exits=None):
     """
     The Chart-Settings controls plus the interactive price chart for one
     closed trade - extracted from what used to be this page's own
@@ -124,6 +124,12 @@ def render_trade_chart(conn, trade, key_prefix, anchor_id=None, timeframe_label=
     timeframe) within one script run, the same reason Shortlist's
     render_price_chart() exists as a real function instead of inline
     page code.
+
+    `exits`, if given, is a list of {"date", "price", "quantity"} dicts -
+    see charting.build_figure()'s own docstring on entry_point["exits"].
+    Only the Review Session passes this, for a `trade` that's really a
+    buy lot's blended stand-in (see _combine_trade_group()) - the plain
+    single-trade view below never has more than one real exit to show.
 
     `timeframe_label`, if given, skips rendering the Timeframe radio
     here entirely and fetches/shows that timeframe instead - the Review
@@ -201,6 +207,8 @@ def render_trade_chart(conn, trade, key_prefix, anchor_id=None, timeframe_label=
         "exit_date": trade["date"], "sell_price": trade["sell_price"],
         "direction": trade["direction"],
     }
+    if exits:
+        entry_point["exits"] = exits
 
     saved_drawings = database.get_drawings(conn, trade["symbol"])
 
@@ -362,10 +370,21 @@ def _reorder_for_resume(trades, saved_order):
     member - resuming a partial, different-shaped version of a lot that
     was reviewed together would be more confusing than just dropping it,
     same spirit as Journal Session's own _reorder_for_resume() in
-    pages/2_Shortlist.py."""
+    pages/2_Shortlist.py.
+
+    Also tolerates the OLD, pre-grouping queue shape - a flat list of
+    bare natural-key dicts instead of a list of per-step GROUPS - so a
+    Review Session already in progress when trade grouping shipped
+    resumes fine (ungrouped, one trade per step) instead of crashing
+    the next time the app restarts and tries to read it (a real
+    incident: `for s in group` over a bare dict iterates its KEYS, not
+    natural-key dicts, so _saved_key_tuple(s) blew up on the first
+    string key it saw)."""
     by_key = {_trade_key(t): t for t in trades}
     result = []
     for group in saved_order:
+        if isinstance(group, dict):
+            group = [group]
         members = [by_key[_saved_key_tuple(s)] for s in group if _saved_key_tuple(s) in by_key]
         if len(members) == len(group):
             result.append(members)
@@ -550,6 +569,15 @@ def render_review_session(conn):
     # trade dict; `members` is what actually gets saved against.
     members = queue[index]
     trade = _combine_trade_group(members)
+    # Every real exit event, for the chart to mark individually instead
+    # of just the one blended average `trade["sell_price"]` works out to
+    # - None (not a one-item list) for the ordinary non-grouped case, so
+    # every chart call below falls back to its normal single-exit
+    # marker with zero extra plumbing. See charting.build_figure()'s own
+    # docstring on entry_point["exits"].
+    exits = None
+    if len(members) > 1:
+        exits = [{"date": m["date"], "price": m["sell_price"], "quantity": m["quantity"]} for m in members]
     key_prefix = f"review_{index}"
     anchor_id = f"{key_prefix}_review_anchor"
     should_scroll = st.session_state.pop(sk.SCROLL_TO_REVIEW_ANCHOR, False)
