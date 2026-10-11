@@ -86,14 +86,15 @@ def fact_tile(column, label, value, color=None):
 
 def render_trade_facts(conn, trade):
     """The fact tiles (entry/exit, shares, P/L, % change, days held,
-    equity contribution) for one closed trade - shared by the plain
-    single-trade view and each step of the Review Session below. The
-    actual numbers come from analyze_trades.trade_stats(), so the PDF/
-    Logbook display of the same trade always agrees with what's shown
-    here. Equity Contribution is left off entirely (not shown as a
-    blank/zero tile) if the Jan 1 account value baseline hasn't been
-    set yet on the Settings page - see trade_stats()'s own docstring
-    for why there's nothing meaningful to divide by without it."""
+    entry % of account, equity contribution) for one closed trade -
+    shared by the plain single-trade view and each step of the Review
+    Session below. The actual numbers come from analyze_trades.
+    trade_stats(), so the PDF/Logbook display of the same trade always
+    agrees with what's shown here. Entry % of Account and Equity
+    Contribution are both left off entirely (not shown as blank/zero
+    tiles) if the Jan 1 account value baseline hasn't been set yet on
+    the Settings page - see trade_stats()'s own docstring for why
+    there's nothing meaningful to divide by without it."""
     stats = trade_stats(
         trade["direction"], trade["buy_price"], trade["sell_price"], trade["quantity"],
         trade["profit_loss"], trade["entry_date"].date(), trade["date"].date(),
@@ -101,16 +102,17 @@ def render_trade_facts(conn, trade):
     )
     outcome_color = charting.win_loss_color(trade["profit_loss"] >= 0)
 
-    show_equity = stats["equity_contribution"] is not None
-    cols = st.columns(7 if show_equity else 6)
+    show_account_stats = stats["equity_contribution"] is not None
+    cols = st.columns(8 if show_account_stats else 6)
     fact_tile(cols[0], "Short Entry" if stats["is_short"] else "Entry", f"${stats['entry_price']:,.2f}")
     fact_tile(cols[1], "Cover" if stats["is_short"] else "Exit", f"${stats['exit_price']:,.2f}")
     fact_tile(cols[2], "Shares", f"{trade['quantity']:,.0f}")
     fact_tile(cols[3], "P/L", f"${trade['profit_loss']:,.2f}", outcome_color)
     fact_tile(cols[4], "% Change", f"{stats['pct_change']:,.2f}%", outcome_color)
     fact_tile(cols[5], "Days Held", f"{stats['days_held']:,.0f}")
-    if show_equity:
-        fact_tile(cols[6], "Equity Contribution", f"{stats['equity_contribution']:,.2f}%", outcome_color)
+    if show_account_stats:
+        fact_tile(cols[6], "Entry % of Account", f"{stats['pct_of_account']:,.2f}%")
+        fact_tile(cols[7], "Equity Contribution", f"{stats['equity_contribution']:,.2f}%", outcome_color)
 
 
 def render_trade_chart(conn, trade, key_prefix, anchor_id=None, timeframe_label=None):

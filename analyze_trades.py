@@ -617,24 +617,35 @@ def trade_stats(direction, buy_price, sell_price, quantity, profit_loss, entry_d
 
     `account_value`, if given, is what this trade's profit_loss is
     divided by for "equity_contribution" - how much of a full year's
-    worth of gain/loss this one trade represents. Pass the Jan 1
-    baseline (database.get_account_value()), the same fixed anchor the
-    Dashboard's own Account Performance % already divides by (see that
-    page's notes on why NOT today's fully-calculated account value -
-    it self-inflates as the year goes on, understating every trade's
-    real contribution). None (the default) if the caller doesn't have
-    a baseline to divide by, or hasn't set one yet - equity_contribution
-    comes back None too rather than a division-by-zero or a misleading
-    number.
+    worth of gain/loss this one trade represents - and what its entry
+    cost (entry_price x quantity) is divided by for "pct_of_account" -
+    how big a bet this position was the moment it was opened, as a % of
+    the account. Pass the Jan 1 baseline (database.get_account_value()),
+    the same fixed anchor the Dashboard's own Account Performance %
+    already divides by (see that page's notes on why NOT today's
+    fully-calculated account value - it self-inflates as the year goes
+    on, understating every trade's real contribution/size). None (the
+    default) if the caller doesn't have a baseline to divide by, or
+    hasn't set one yet - both come back None too rather than a
+    division-by-zero or a misleading number.
+
+    pct_of_account is deliberately NOT the same thing as
+    charting.open_position_returns()'s "pct_of_account" for a still-OPEN
+    position - that one uses the position's CURRENT market value (how
+    big a slice of the account it occupies right now); this one uses
+    its ENTRY cost (how big a slice it was the day it was opened),
+    which is what makes sense for a trade that's already closed.
     """
     is_short = direction == "SHORT"
     entry_price, exit_price = (sell_price, buy_price) if is_short else (buy_price, sell_price)
     pct_change = (profit_loss / (entry_price * quantity)) * 100 if entry_price else 0.0
     days_held = (exit_date - entry_date).days
     equity_contribution = (profit_loss / account_value) * 100 if account_value else None
+    pct_of_account = (entry_price * quantity / account_value) * 100 if account_value else None
     return {
         "is_short": is_short, "entry_price": entry_price, "exit_price": exit_price,
         "pct_change": pct_change, "days_held": days_held, "equity_contribution": equity_contribution,
+        "pct_of_account": pct_of_account,
     }
 
 

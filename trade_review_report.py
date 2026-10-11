@@ -134,14 +134,13 @@ def _write_trade_review_page(pdf, review, jan1_balance):
     entry_label = "Short Entry" if stats["is_short"] else "Entry"
     exit_label = "Cover" if stats["is_short"] else "Exit"
     pdf.set_text_color(*MUTED_TEXT_RGB)
-    pdf.cell(
-        0, 10,
-        safe_text(
-            f"{entry_label}: ${stats['entry_price']:,.2f}   {exit_label}: ${stats['exit_price']:,.2f}   "
-            f"Shares: {review['quantity']:,.0f}   Days Held: {stats['days_held']}"
-        ),
-        new_x="LMARGIN", new_y="NEXT",
+    stats_line = (
+        f"{entry_label}: ${stats['entry_price']:,.2f}   {exit_label}: ${stats['exit_price']:,.2f}   "
+        f"Shares: {review['quantity']:,.0f}   Days Held: {stats['days_held']}"
     )
+    if stats["pct_of_account"] is not None:
+        stats_line += f"   Entry % of Account: {stats['pct_of_account']:,.2f}%"
+    pdf.cell(0, 10, safe_text(stats_line), new_x="LMARGIN", new_y="NEXT")
     outcome_rgb = hex_to_rgb(charting.win_loss_color(review["profit_loss"] >= 0))
     pdf.set_text_color(*outcome_rgb)
     pdf.set_font("Helvetica", style="B", size=17)
