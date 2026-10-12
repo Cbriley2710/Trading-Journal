@@ -1346,7 +1346,7 @@ def build_archive_snapshot(symbol, entry_date, buy_price, entry_label, as_of, di
 
 def build_trade_review_snapshot(
     symbol, entry_date, exit_date, buy_price, sell_price, direction, timeframe_label, settings,
-    view_range_override=None,
+    view_range_override=None, exits=None,
 ):
     """
     Builds a chart snapshot for the Trade Review Session (see
@@ -1380,6 +1380,15 @@ def build_trade_review_snapshot(
     timeframe" (pages/1_Trade_Analyzer.py's Review Session) capture
     wherever you've actually panned/zoomed to, rather than always
     resetting to the default view.
+
+    `exits`, if given, is a list of {"date", "price", "quantity"} dicts -
+    every individual sell event for a buy lot reviewed together as one
+    combined step (see pages/1_Trade_Analyzer.py's
+    _group_trades_into_lots()/_combine_trade_group()). `exit_date`/
+    `sell_price` above still drive the default visible window (the
+    LATEST exit, same as always), but when `exits` has more than one
+    entry, build_figure() draws one marker per actual exit instead of a
+    single marker at the blended average - see its own docstring.
     """
     conn = database.get_connection()
     drawings = database.get_drawings(conn, symbol)
@@ -1432,6 +1441,8 @@ def build_trade_review_snapshot(
         "entry_date": entry_date, "buy_price": buy_price,
         "exit_date": exit_date, "sell_price": sell_price, "direction": direction,
     }
+    if exits:
+        entry_point["exits"] = exits
     entry_label = "Short Entry" if direction == "SHORT" else "Entry"
 
     fig, _fit_payload = build_figure(
@@ -1649,6 +1660,14 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
     secondary_y in the subplot specs below - a straight dollar-for-dollar
     comparison against the primary symbol's scale wouldn't mean much,
     since two different stocks are rarely anywhere near the same price).
+
+    `entry_point["exits"]`, if present and longer than one item, draws
+    ONE exit marker per actual sell instead of the usual single marker -
+    see pages/1_Trade_Analyzer.py's Review Session, where a buy lot
+    exited across several sells on different days is reviewed as one
+    combined step but should still show every real action taken on the
+    chart, not just a single blended average.
+
     Returns `(fig, fit_payload)` - `fig` gets rendered via
     render_interactive_chart() (or, for a static image, render_png());
     `fit_payload` is a plain-JSON record of the real price/volume/overlay
@@ -1890,7 +1909,62 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
             hovertemplate="%{x|%b %d, %Y}: $%{y:,.2f}<extra></extra>",
         ), row=1, col=1)
 
-    if is_closed:
+    def _add_trade_day_line(date):
+        """A thin light-grey vertical guide line at `date`, spanning the
+        FULL figure height (yref="paper" ignores row boundaries - 0 is
+        the very bottom of the volume panel, 1 is the very top of the
+        price panel) - makes the exact day a buy/sell happened easy to
+        pick out at a glance, instead of having to carefully trace the
+        small triangle marker down to the candle directly below it."""
+        fig.add_shape(
+            type="line", xref="x", yref="paper", x0=date, x1=date, y0=0, y1=1,
+            line=dict(color=MUTED_COLOR, width=1, dash="dot"), opacity=0.4,
+        )
+
+    exits = entry_point.get("exits")
+    if is_closed and exits and len(exits) > 1:
+        # A buy lot sold off across several SELL transactions on
+        # different days, reviewed together as one combined step (see
+        # pages/1_Trade_Analyzer.py's _group_trades_into_lots()) - one
+        # exit marker per ACTUAL sell instead of a single marker at the
+        # blended average price/date `sell_price`/`exit_date` work out
+        # to elsewhere in this function. The entry marker is drawn once
+        # here (not once per leg - would just stack identical markers on
+        # top of each other), then one line+marker trace per exit, each
+        # colored by THAT leg's own win/loss (not the combined trade's
+        # overall outcome_color, which could be green even if one
+        # individual exit actually lost).
+        fig.add_trace(go.Scatter(
+            x=[entry_date], y=[marker_y], mode="markers",
+            marker=dict(size=14, symbol=entry_symbol, color=CATEGORICAL_PALETTE[0]),
+            name=entry_label, showlegend=False, meta="entry_exit_marker",
+            text=[f"{entry_label}<br>{_format_trade_moment(entry_date)} · ${buy_price:,.2f}"],
+            hovertemplate="%{text}<extra></extra>",
+        ), row=1, col=1)
+        _add_trade_day_line(entry_date)
+        for exit_event in exits:
+            exit_price = exit_event["price"]
+            pl_per_share = (exit_price - buy_price) if direction != "SHORT" else (buy_price - exit_price)
+            leg_color = win_loss_color(pl_per_share >= 0)
+            entry_value, exit_value = (exit_price, buy_price) if direction == "SHORT" else (buy_price, exit_price)
+            fig.add_trace(go.Scatter(
+                x=[entry_date, exit_event["date"]], y=[marker_y, marker_y],
+                mode="lines+markers",
+                line=dict(color=leg_color, width=2, dash="dot"),
+                # size 0 on the entry-side point - the real entry marker
+                # is already drawn above; this trace exists for the line
+                # and the exit-side marker only.
+                marker=dict(size=[0, 14], symbol=["circle", exit_symbol], color=leg_color),
+                name="Exit", showlegend=False, meta="entry_exit_marker",
+                text=[
+                    "",
+                    f"Exit ({exit_event['quantity']:,.0f} sh)<br>{_format_trade_moment(exit_event['date'])} · "
+                    f"${exit_value:,.2f}<br>{'+' if pl_per_share >= 0 else ''}${pl_per_share:,.2f}/share",
+                ],
+                hovertemplate="%{text}<extra></extra>",
+            ), row=1, col=1)
+            _add_trade_day_line(exit_event["date"])
+    elif is_closed:
         # sell_price - buy_price is the per-share profit regardless of
         # direction - for a LONG that's literally sell minus buy; for a
         # SHORT, "sell_price" is the up-front short sale and "buy_price"
@@ -1911,6 +1985,8 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
             ],
             hovertemplate="%{text}<extra></extra>",
         ), row=1, col=1)
+        _add_trade_day_line(entry_date)
+        _add_trade_day_line(exit_date)
     elif entry_label != "Added":
         # No marker at all for a plain watchlist ticker ("Added") - a
         # watchlist add isn't a real trade, and the arrow was clutter
