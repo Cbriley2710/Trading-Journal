@@ -1930,24 +1930,29 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
         where the stock trades afterward, not just which day it
         happened. Starts at `start_date` (the actual day of that
         buy/sell - a line before the trade even happened would be
-        meaningless) and runs to the right edge of the FETCHED history
-        (not just whatever's currently visible - history.index.max() is
-        still correct after scrolling/panning, where visible_range alone
-        wouldn't be), using real data x-coordinates (xref="x") instead
-        of _add_trade_day_line()'s xref="paper" for that reason. `color`
-        is GOOD_COLOR for a buy_price line, CRITICAL_COLOR for a
-        sell_price line - a fixed buy-vs-sell convention (matching how
-        every broker/charting platform colors a buy green and a sell
-        red), NOT the win/loss outcome_color the marker triangles use -
-        a losing trade's buy line is still green, its sell line still
+        meaningless) and runs to the right edge of `visible_range` (the
+        same window right_margin_timedelta() already pads past the last
+        real candle for every caller of this function - see
+        pages/1_Trade_Analyzer.py's render_trade_chart() and this
+        module's build_trade_review_snapshot()/build_archive_snapshot())
+        - reaching all the way to the actual edge of the chart, not just
+        the last candle with real data, which used to leave this line
+        falling noticeably short of the right edge. Falls back to
+        history.index.max() (needing .to_pydatetime() - it's a pandas
+        Timestamp, which kaleido's PNG renderer can't JSON-serialize,
+        unlike entry_date/exit_date here) for the rare caller that
+        doesn't pass visible_range at all. Uses real data x-coordinates
+        (xref="x") either way, not _add_trade_day_line()'s xref="paper" -
+        visible_range is itself in data coordinates. `color` is GOOD_
+        COLOR for a buy_price line, CRITICAL_COLOR for a sell_price
+        line - a fixed buy-vs-sell convention (matching how every
+        broker/charting platform colors a buy green and a sell red),
+        NOT the win/loss outcome_color the marker triangles use - a
+        losing trade's buy line is still green, its sell line still
         red."""
+        right_edge = visible_range[1] if visible_range is not None else history.index.max().to_pydatetime()
         fig.add_shape(
-            # .to_pydatetime() - history.index.max() is a pandas
-            # Timestamp, which kaleido's renderer can't JSON-serialize
-            # (unlike entry_date/exit_date here, already plain
-            # datetimes) - confirmed this raises for real, not a
-            # theoretical concern.
-            type="line", xref="x", yref="y", x0=start_date, x1=history.index.max().to_pydatetime(),
+            type="line", xref="x", yref="y", x0=start_date, x1=right_edge,
             y0=price, y1=price, line=dict(color=color, width=1, dash="dot"), opacity=0.5,
         )
 
