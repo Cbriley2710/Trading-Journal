@@ -1921,22 +1921,34 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
             line=dict(color=MUTED_COLOR, width=1, dash="dot"), opacity=0.4,
         )
 
-    def _add_trade_price_line(price, color):
+    def _add_trade_price_line(price, color, start_date):
         """The same guide-line idea as _add_trade_day_line() above, just
-        horizontal instead of vertical - at `price`, spanning the FULL
-        chart width (xref="paper"), confined to the price panel's own
-        y-axis ("y", row 1's primary axis - a price level means nothing
-        on the volume panel's own scale below it). Makes it easy to see
-        where a buy/sell price sits relative to where the stock is
-        trading now, not just which day it happened. `color` is GOOD_
-        COLOR for a buy_price line, CRITICAL_COLOR for a sell_price
-        line - a fixed buy-vs-sell convention (matching how every
-        broker/charting platform colors a buy green and a sell red),
-        NOT the win/loss outcome_color the marker triangles use - a
-        losing trade's buy line is still green, its sell line still red."""
+        horizontal instead of vertical - at `price`, confined to the
+        price panel's own y-axis ("y", row 1's primary axis - a price
+        level means nothing on the volume panel's own scale below it).
+        Makes it easy to see where a buy/sell price sits relative to
+        where the stock trades afterward, not just which day it
+        happened. Starts at `start_date` (the actual day of that
+        buy/sell - a line before the trade even happened would be
+        meaningless) and runs to the right edge of the FETCHED history
+        (not just whatever's currently visible - history.index.max() is
+        still correct after scrolling/panning, where visible_range alone
+        wouldn't be), using real data x-coordinates (xref="x") instead
+        of _add_trade_day_line()'s xref="paper" for that reason. `color`
+        is GOOD_COLOR for a buy_price line, CRITICAL_COLOR for a
+        sell_price line - a fixed buy-vs-sell convention (matching how
+        every broker/charting platform colors a buy green and a sell
+        red), NOT the win/loss outcome_color the marker triangles use -
+        a losing trade's buy line is still green, its sell line still
+        red."""
         fig.add_shape(
-            type="line", xref="paper", yref="y", x0=0, x1=1, y0=price, y1=price,
-            line=dict(color=color, width=1, dash="dot"), opacity=0.5,
+            # .to_pydatetime() - history.index.max() is a pandas
+            # Timestamp, which kaleido's renderer can't JSON-serialize
+            # (unlike entry_date/exit_date here, already plain
+            # datetimes) - confirmed this raises for real, not a
+            # theoretical concern.
+            type="line", xref="x", yref="y", x0=start_date, x1=history.index.max().to_pydatetime(),
+            y0=price, y1=price, line=dict(color=color, width=1, dash="dot"), opacity=0.5,
         )
 
     exits = entry_point.get("exits")
@@ -1960,7 +1972,7 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
             hovertemplate="%{text}<extra></extra>",
         ), row=1, col=1)
         _add_trade_day_line(entry_date)
-        _add_trade_price_line(buy_price, GOOD_COLOR)
+        _add_trade_price_line(buy_price, GOOD_COLOR, entry_date)
         for exit_event in exits:
             exit_price = exit_event["price"]
             pl_per_share = (exit_price - buy_price) if direction != "SHORT" else (buy_price - exit_price)
@@ -1983,7 +1995,7 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
                 hovertemplate="%{text}<extra></extra>",
             ), row=1, col=1)
             _add_trade_day_line(exit_event["date"])
-            _add_trade_price_line(exit_price, CRITICAL_COLOR)
+            _add_trade_price_line(exit_price, CRITICAL_COLOR, exit_event["date"])
     elif is_closed:
         # sell_price - buy_price is the per-share profit regardless of
         # direction - for a LONG that's literally sell minus buy; for a
@@ -2007,8 +2019,8 @@ def build_figure(symbol, history, entry_point, settings, overlay_history=None, e
         ), row=1, col=1)
         _add_trade_day_line(entry_date)
         _add_trade_day_line(exit_date)
-        _add_trade_price_line(buy_price, GOOD_COLOR)
-        _add_trade_price_line(sell_price, CRITICAL_COLOR)
+        _add_trade_price_line(buy_price, GOOD_COLOR, entry_date)
+        _add_trade_price_line(sell_price, CRITICAL_COLOR, exit_date)
     elif entry_label != "Added":
         # No marker at all for a plain watchlist ticker ("Added") - a
         # watchlist add isn't a real trade, and the arrow was clutter
