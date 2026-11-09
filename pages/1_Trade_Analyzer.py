@@ -36,6 +36,7 @@ hand.
 
 from datetime import timedelta
 
+import pandas as pd
 import streamlit as st
 
 import auth
@@ -951,6 +952,80 @@ def render_review_selection(conn, trades):
         st.rerun()
 
 
+def _is_journaled(trade, reviewed_exact, reviewed_loose):
+    """Whether this closed trade has a saved review in any Review Session
+    (see database.get_reviewed_trade_keys() for the exact/loose sets)."""
+    key = (
+        trade["symbol"], trade["entry_date"].date(), trade["date"].date(), trade["direction"],
+        round(float(trade["quantity"]), 6), round(float(trade["buy_price"]), 6), round(float(trade["sell_price"]), 6))
+    return key in reviewed_exact or key[:4] in reviewed_loose
+
+
+def render_trade_table(conn, trades, reviewed_exact, reviewed_loose):
+    """
+    The trade picker: one row per closed trade with its stats, P/L-type
+    columns colored win/loss (the same customizable colors as the fact
+    tiles), and a "Journaled" column showing whether the trade has a
+    saved review in any Review Session. Click a row to select it
+    (the first row is selected until you click another); returns the
+    selected trade dict. Column headers sort the table.
+    """
+    account_value = database.get_account_value(conn)
+
+    rows = []
+    for t in trades:
+        stats = trade_stats(
+            t["direction"], t["buy_price"], t["sell_price"], t["quantity"], t["profit_loss"],
+            t["entry_date"].date(), t["date"].date(), account_value=account_value)
+        rows.append({
+            "Symbol": t["symbol"] + (" (Short)" if stats["is_short"] else ""),
+            "Entry Date": t["entry_date"].date(),
+            "Exit Date": t["date"].date(),
+            "Entry": stats["entry_price"],
+            "Exit": stats["exit_price"],
+            "Shares": t["quantity"],
+            "P/L": t["profit_loss"],
+            "% Change": stats["pct_change"],
+            "Days Held": stats["days_held"],
+            "Entry % of Acct": stats["pct_of_account"],
+            "Equity Contrib. %": stats["equity_contribution"],
+            "Journaled": "✓ Journaled" if _is_journaled(t, reviewed_exact, reviewed_loose) else "Not yet",
+        })
+    df = pd.DataFrame(rows)
+
+    win_color = charting.win_loss_color(True)
+    loss_color = charting.win_loss_color(False)
+
+    def color_outcome(value):
+        if pd.isna(value):
+            return ""
+        return f"color: {win_color if value >= 0 else loss_color}; font-weight: 600"
+
+    def color_journaled(value):
+        return "" if value.startswith("✓") else "opacity: 0.55"
+
+    outcome_columns = ["P/L", "% Change", "Equity Contrib. %"]
+    styled = (
+        df.style
+        .map(color_outcome, subset=outcome_columns)
+        .map(color_journaled, subset=["Journaled"])
+        .format({
+            "Entry Date": "{:%m/%d/%Y}", "Exit Date": "{:%m/%d/%Y}",
+            "Entry": "${:,.2f}", "Exit": "${:,.2f}", "Shares": "{:,.0f}",
+            "P/L": "{:+,.2f}", "% Change": "{:+,.2f}%", "Days Held": "{:,.0f}",
+            "Entry % of Acct": "{:,.2f}%", "Equity Contrib. %": "{:+,.2f}%",
+        }, na_rep="")
+    )
+
+    event = st.dataframe(
+        styled, hide_index=True, width="stretch", height=min(40 + 35 * len(df), 420),
+        on_select="rerun", selection_mode="single-row", key="trade_table")
+    selected_rows = event.selection.rows
+    selected_index = selected_rows[0] if selected_rows and selected_rows[0] < len(trades) else 0
+    st.caption(f"{len(df)} trade(s) - click a row to view it below.")
+    return trades[selected_index]
+
+
 # --- Page body ----------------------------------------------------------
 
 trades = load_trades()
@@ -1027,7 +1102,7 @@ else:
     min_entry_date, max_entry_date = min(entry_dates), max(entry_dates)
     all_symbols = sorted({t["symbol"] for t in trades_sorted})
 
-    filter_cols = st.columns([2, 2])
+    filter_cols = st.columns([2, 2, 1])
     date_range = filter_cols[0].date_input(
         "Filter by entry date", value=(min_entry_date, max_entry_date),
         min_value=min_entry_date, max_value=max_entry_date,
@@ -1035,6 +1110,10 @@ else:
     selected_symbols = filter_cols[1].multiselect(
         "Filter by ticker", options=all_symbols, default=all_symbols, key="trade_analyzer_ticker_filter",
     )
+
+    journaled_filter = filter_cols[2].selectbox(
+        "Journaled", ["All", "Not journaled", "Journaled"], key="trade_analyzer_journaled_filter")
+    reviewed_exact, reviewed_loose = database.get_reviewed_trade_keys(conn)
 
     # date_input in range mode returns a single date until both ends
     # have been picked - only filter once we actually have a (start,
@@ -1046,15 +1125,15 @@ else:
 
     trades_sorted = [t for t in trades_sorted if t["symbol"] in selected_symbols]
 
+    if journaled_filter != "All":
+        want_journaled = journaled_filter == "Journaled"
+        trades_sorted = [t for t in trades_sorted if _is_journaled(t, reviewed_exact, reviewed_loose) == want_journaled]
+
     if not trades_sorted:
         st.info("No trades match these filters.")
         st.stop()
 
-    selected_index = st.selectbox(
-        "Choose a trade", options=range(len(trades_sorted)),
-        format_func=lambda i: trade_label(trades_sorted[i]),
-    )
-    trade = trades_sorted[selected_index]
+    trade = render_trade_table(conn, trades_sorted, reviewed_exact, reviewed_loose)
 
     render_trade_facts(conn, trade)
     st.divider()

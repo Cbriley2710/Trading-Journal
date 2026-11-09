@@ -1638,6 +1638,32 @@ def get_review_for_trade(conn, report_id, trade):
     return {"id": review_id, "notes": notes, "tags": tags or [], "snapshots": snapshots}
 
 
+def get_reviewed_trade_keys(conn):
+    """
+    Closed trades that have a saved review in ANY Review Session
+    report, as (exact, loose): `exact` is a set of natural-key tuples
+    (symbol, entry_date, exit_date, direction, quantity, buy_price,
+    sell_price) - dates as plain date objects, numbers rounded to 6
+    places so a float round-trip can't cause a false "not reviewed" -
+    and `loose` is a set of (symbol, entry_date, exit_date, direction)
+    for older reviews saved before the price/quantity columns existed
+    (those columns are NULL on them, so they can only be matched on the
+    first four fields). Never trades.id (see trade_reviews' schema
+    comment for why). One query for every trade, for the trade
+    table's "Journaled" column.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT symbol, entry_date, exit_date, direction, quantity, buy_price, sell_price FROM trade_reviews")
+    exact, loose = set(), set()
+    for r in cur.fetchall():
+        if None in (r[4], r[5], r[6]):
+            loose.add((r[0], r[1], r[2], r[3]))
+        else:
+            exact.add((r[0], r[1], r[2], r[3], round(float(r[4]), 6), round(float(r[5]), 6), round(float(r[6]), 6)))
+    return exact, loose
+
+
 def update_trade_review(conn, review_id, notes, new_snapshots, tags=None):
     """
     Updates an already-saved review in place, for the Review Session's
