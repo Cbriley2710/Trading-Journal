@@ -3,24 +3,25 @@ Daily Report
 =====================
 Builds one PDF covering every list on the Shortlist page - Lists 1-4
 (by their saved names) plus Open Positions - with each ticker's
-archived chart image and journal notes for a given day, and emails it
-to a mailing list. Reads exactly the same data the Logbook page
-already shows per symbol (database.get_logbook_entry()), just
-assembled into one file instead of browsed one ticker at a time.
+chart image and journal notes for a given day, and emails it to a
+mailing list. Notes and plan prices come from the saved journal entry
+(database.get_logbook_entries_for_date()); the chart image is built
+fresh for each ticker while the PDF is assembled (nothing is stored).
 
 Landscape, one page per ticker, dark-themed to match the chart images
 themselves (charting.py's own CHART_BACKGROUND/CHART_TEXT_COLOR/
-MUTED_COLOR) - a chart archived from this app is already a wide,
+MUTED_COLOR) - a chart from this app is already a wide,
 dark-background image, so a landscape page fits it without shrinking
 it down, and a dark page background means there's no bright white
 border around a dark chart.
 
-nightly_archive.py is the only caller of generate_and_send_report()
-below - it used to also be auto-sent the same evening a Journal
-Session finished, but that was removed (see nightly_archive.py's
-module docstring): this day's chart images usually aren't actually
-archived yet that early, so a same-evening send went out with every
-chart missing far more often than not.
+The only caller of generate_and_send_report() below is the "Email
+Daily Report" button on the Journal Session's Session complete screen
+(pages/2_Shortlist.py) - nothing sends it automatically. Sent the same
+evening, a ticker's chart can be missing: charting.build_archive_
+snapshot() refuses to draw a chart for a day whose close Yahoo Finance
+hasn't finished publishing yet. Those tickers get a "chart not
+available yet" note on their page and are named in the send result.
 
 SENDING EMAIL: through Gmail's SMTP server, which needs a Google
 Account "App Password" (NOT your regular Gmail password - Gmail
@@ -32,12 +33,12 @@ never your actual account password.
 
 import io
 import smtplib
+from datetime import datetime
 from email.message import EmailMessage
 
 from fpdf import FPDF
 from PIL import Image
 
-import archiving
 import charting
 import database
 import position_sizing
@@ -103,13 +104,27 @@ def _open_position_stats_line(position, conn, account_value):
     return "  ·  ".join(parts)
 
 
-def _write_ticker_page(pdf, section_label, symbol, entry, stats_line=None):
+def _build_chart_image(conn, symbol, entry_date, buy_price, entry_label, as_of, direction="LONG"):
+    """Builds one ticker's chart PNG for the report, or None if it can't
+    be made right now (no price data, or Yahoo hasn't published today's
+    close yet). Never raises - one bad symbol shouldn't sink the report."""
+    try:
+        return charting.build_archive_snapshot(
+            symbol, entry_date, buy_price, entry_label, as_of, direction=direction,
+            stop_loss=database.get_stop_loss(conn, symbol))
+    except Exception as exc:
+        print(f"  {symbol}: chart failed unexpectedly ({exc}), leaving it out.")
+        return None
+
+
+def _write_ticker_page(pdf, section_label, symbol, entry, chart_image, stats_line=None):
     """
     One ticker's own page: a small "which list" breadcrumb, the symbol
-    as a heading, its archived chart image (or a note that it isn't
-    archived yet), and its notes (or a note that none were recorded) -
-    the same pieces the Logbook page shows for one day, just given a
+    as a heading, its chart image (or a note that it isn't available
+    yet), and its notes (or a note that none were recorded), given a
     full page each instead of flowing several onto a shared one.
+    `entry` is the saved journal row for the day, or None if nothing
+    was saved for this ticker.
 
     `stats_line` (an open position's % Change / % of Account, see
     _open_position_stats_line() above) is optional - None for every
@@ -126,13 +141,10 @@ def _write_ticker_page(pdf, section_label, symbol, entry, stats_line=None):
     pdf.cell(0, 16, safe_text(symbol), new_x="LMARGIN", new_y="NEXT")
     pdf.ln(2)
 
-    if entry is None:
-        pdf.set_font("Helvetica", size=17)
-        pdf.cell(0, 9, "Not archived yet.", new_x="LMARGIN", new_y="NEXT")
-        return
+    entry = entry or {}
 
-    if entry["chart_image"]:
-        image = Image.open(io.BytesIO(entry["chart_image"]))
+    if chart_image:
+        image = Image.open(io.BytesIO(chart_image))
         scaled_height_mm = CONTENT_WIDTH_MM * (image.height / image.width)
         # A landscape page is much shorter than it is wide - a chart
         # scaled to the full content width can be taller than what's
@@ -157,7 +169,7 @@ def _write_ticker_page(pdf, section_label, symbol, entry, stats_line=None):
         pdf.ln(3)
     else:
         pdf.set_font("Helvetica", size=17)
-        pdf.cell(0, 9, "No chart archived for this day yet.", new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(0, 9, "Chart not available yet.", new_x="LMARGIN", new_y="NEXT")
 
     # A watchlist ticker's saved "trading plan for next time" (see
     # pages/2_Shortlist.py's render_journal_box()) - never set for an
@@ -186,27 +198,30 @@ def _write_ticker_page(pdf, section_label, symbol, entry, stats_line=None):
         pdf.multi_cell(0, 9, safe_text(stats_line))
         pdf.ln(1)
 
-    notes_text = entry["notes"].strip() if entry["notes"] else ""
+    notes_text = entry["notes"].strip() if entry.get("notes") else ""
     pdf.set_font("Helvetica", style="I", size=16)
     pdf.multi_cell(0, 9, safe_text(notes_text or "No notes recorded for this day."))
 
 
-def build_report_pdf(conn, report_date):
+def build_report_pdf(conn, report_date, missing_charts=None):
     """
     Builds the full report for one day and returns it as PDF bytes: a
     cover page with the date, then one page per ticker - every list
     (Lists 1-4, by their saved names) followed by Open Positions - each
-    showing that day's archived chart + notes via
+    showing a freshly built chart + that day's saved notes via
     database.get_logbook_entries_for_date(). A list with nothing in it
     is skipped entirely rather than given an empty page.
+
+    If `missing_charts` is a list, the symbol of every ticker whose
+    chart couldn't be built gets appended to it.
     """
     names = database.get_watchlist_names(conn)
     watchlist = database.get_watchlist(conn)
     positions = database.get_open_positions(conn)
-    # One query for every symbol's logbook entry on this date, instead
-    # of one query per watchlist ticker plus one per open position -
-    # this used to be a real N+1 pattern felt both as button lag on
-    # "Generate & Email Report" and in the nightly report fallback job.
+    # One query for every symbol's saved journal entry on this date,
+    # instead of one query per watchlist ticker plus one per open
+    # position (a real N+1 pattern that used to make sending laggy).
+    as_of = datetime.combine(report_date, datetime.min.time())
     logbook_entries = database.get_logbook_entries_for_date(conn, report_date)
 
     pdf = DarkReportPDF(format="A4", orientation="L")
@@ -278,13 +293,33 @@ def build_report_pdf(conn, report_date):
         new_x="LMARGIN", new_y="NEXT",
     )
 
+    # A ticker that's both an open position and on a watchlist only
+    # gets its chart built once (positions go first below, so their
+    # real "Entry" marker wins over a watchlist "Added" one).
+    chart_cache = {}
+
+    def chart_for(symbol, entry_date, buy_price, entry_label, direction="LONG"):
+        if symbol not in chart_cache:
+            chart_cache[symbol] = _build_chart_image(
+                conn, symbol, entry_date, buy_price, entry_label, as_of, direction=direction)
+            if chart_cache[symbol] is None and missing_charts is not None:
+                missing_charts.append(symbol)
+        return chart_cache[symbol]
+
+    for position in positions:
+        is_short = position["direction"] == "SHORT"
+        chart_for(
+            position["symbol"], position["entry_date"], position["avg_price"],
+            "Short Entry" if is_short else "Entry", position["direction"])
+
     for list_id in range(1, 5):
-        symbols = [w["symbol"] for w in watchlist if w["list_id"] == list_id]
-        for symbol in symbols:
-            _write_ticker_page(pdf, names[list_id], symbol, logbook_entries.get(symbol))
+        for w in [w for w in watchlist if w["list_id"] == list_id]:
+            symbol = w["symbol"]
+            chart = chart_for(symbol, w["added_at"], None, "Added")
+            _write_ticker_page(pdf, names[list_id], symbol, logbook_entries.get(symbol), chart)
 
     # Computed once, not once per position (same N+1 avoidance as
-    # logbook_entries above) - get_calculated_account_value() already
+    # the saved entries above) - get_calculated_account_value() already
     # loops every open position and fetches each one's current price on
     # its own, so re-deriving it per position here would fetch every
     # position's price len(positions) times over.
@@ -292,7 +327,9 @@ def build_report_pdf(conn, report_date):
     for position in positions:
         entry = logbook_entries.get(position["symbol"])
         stats_line = _open_position_stats_line(position, conn, account_value)
-        _write_ticker_page(pdf, "Open Positions", _position_label(position), entry, stats_line=stats_line)
+        _write_ticker_page(
+            pdf, "Open Positions", _position_label(position), entry, chart_cache.get(position["symbol"]),
+            stats_line=stats_line)
 
     return bytes(pdf.output())
 
@@ -326,30 +363,26 @@ def send_report_email(pdf_bytes, report_date):
         smtp.send_message(msg)
 
 
-def generate_and_send_report(conn, report_date, archive_first=False):
+def generate_and_send_report(conn, report_date):
     """
     Builds and emails the report for one day, then records it in
-    database.daily_reports so nightly_archive.py's fallback knows not
-    to also send one. Never raises - returns (success, message) so
-    both the Logbook page's button and the nightly script can show/log
-    the result the same simple way.
-
-    If archive_first is True, archives a fresh chart for every open
-    position and watchlist ticker (via archiving.archive_all()) before
-    building the PDF - this is what lets the Logbook page's button do
-    everything the nightly job would have done, on demand, instead of
-    only using whatever charts happened to already be archived. Only
-    meaningful for today: a past report_date can't retroactively get a
-    same-day snapshot, so the Logbook page only passes True when the
-    selected date is today.
+    database.daily_reports so the Journal Session screen can show it
+    was sent. Never raises - returns (success, message) so the caller
+    can show the result the same simple way either way. The success
+    message names any tickers whose chart couldn't be built yet.
     """
+    missing_charts = []
     try:
-        if archive_first:
-            archiving.archive_all(conn, report_date)
-        pdf_bytes = build_report_pdf(conn, report_date)
+        pdf_bytes = build_report_pdf(conn, report_date, missing_charts=missing_charts)
         send_report_email(pdf_bytes, report_date)
     except Exception as exc:
         return False, f"Could not generate/send the report: {exc}"
 
     database.mark_daily_report_generated(conn, report_date)
-    return True, "Report generated and emailed."
+    message = "Report generated and emailed."
+    if missing_charts:
+        message += (
+            f" No chart yet for {', '.join(missing_charts)} (Yahoo Finance hasn't "
+            "published today's close for them) - those pages say so."
+        )
+    return True, message

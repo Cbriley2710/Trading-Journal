@@ -53,7 +53,7 @@ REVIEW_PRECHECK = "_review_precheck"
 # Open Positions page
 SCROLL_TO_POSITIONS_ANCHOR = "_scroll_to_positions_anchor"
 
-# Logbook page - also used as a widget key= (the report picker
+# Past Review Reports browser - also used as a widget key= (the report picker
 # selectbox), not just a plain session_state entry - see this module's
 # own docstring.
 REVIEW_REPORT_PICKER = "review_report_picker"

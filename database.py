@@ -39,14 +39,13 @@ through quickly):
     never a risk of it getting out of sync with `transactions`.
 
   - `logbook_entries`: one row per (symbol, calendar day) - the daily
-    journal + archived chart image behind the Shortlist and Logbook
-    pages. See `upsert_logbook_entry()` below for how the "still being
-    written today" and "archived overnight" cases share one row.
+    journal notes and Plan Entry/Stop behind the Shortlist page. (Old rows
+    may still hold an archived chart_image from when a Logbook page
+    existed - nothing reads or writes it any more.)
 
   - `watchlist`: tickers you've manually added to track on the
     Shortlist page, independent of whether you actually hold a
-    position in them. A ticker stays here (and keeps getting archived
-    every night) until you remove it - see `add_to_watchlist()` /
+    position in them. A ticker stays here until you remove it - see `add_to_watchlist()` /
     `remove_from_watchlist()` below.
 
   - `chart_preferences`: a single saved row remembering which moving
@@ -57,7 +56,7 @@ through quickly):
 
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import psycopg2
 from psycopg2.extras import Json, execute_values
@@ -280,19 +279,6 @@ def init_db(conn):
         )
     """)
     # Tracks WHEN a symbol was last removed from every watchlist -
-    # `watchlist` itself only ever holds currently-tracked tickers (a
-    # removal is a hard DELETE, no history kept there), so this is the
-    # only record of "it's been gone for N days" that
-    # symbol_archive_report.archive_and_delete_stale_watchlist_symbols()
-    # needs. remove_from_watchlist() writes a row here; add_to_watchlist()
-    # deletes it (re-adding resets the countdown, same as if it had
-    # never been removed).
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS watchlist_removals (
-            symbol TEXT PRIMARY KEY,
-            removed_at TIMESTAMP NOT NULL
-        )
-    """)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS chart_preferences (
             id INTEGER PRIMARY KEY DEFAULT 1,
@@ -346,9 +332,9 @@ def init_db(conn):
     # CURRENT stop per symbol (overwritten on every edit, see
     # set_stop_loss()'s own note), so there was no way to answer "did
     # THIS closed trade ever have a stop set during its life" once the
-    # position closed or a later trade reused the same symbol. Used by
-    # goals.py's Stop-Loss Usage % goal - a trade only counts as
-    # "protected" if a row here falls between its entry and exit date.
+    # position closed or a later trade reused the same symbol. A trade
+    # counts as "protected" if a row here falls between its entry and
+    # exit date.
     # Starts empty, so only trades closed AFTER this table existed can
     # ever be scored - a known, accepted gap (nothing before this can
     # be retroactively known).
@@ -401,33 +387,6 @@ def init_db(conn):
             amount DOUBLE PRECISION NOT NULL
         )
     """)
-    # One row per goal the user is actually tracking (see goals.py and
-    # pages/6_Goals.py) - `goal_key` is a GOAL_LIBRARY key (e.g.
-    # "win_rate"), not a foreign key into any table, since the library
-    # itself lives in Python code, not the database. A goal_key/
-    # timeframe no longer present in GOAL_LIBRARY (the code changed
-    # since this row was added) is handled at read time, not enforced
-    # here - see get_tracked_goals()'s own note.
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS tracked_goals (
-            id SERIAL PRIMARY KEY,
-            goal_key TEXT NOT NULL,
-            timeframe TEXT NOT NULL,
-            warning_level DOUBLE PRECISION,
-            alert_level DOUBLE PRECISION,
-            created_at TIMESTAMP NOT NULL
-        )
-    """)
-    # Replaced the old Target Value/Comparison (>=/<=/=) model with a
-    # Warning Level/Alert Level pair (see goals.status_zone()) - a
-    # three-way Good/Warning/Alert read instead of a binary Met/Not Met,
-    # nullable until the Settings table's per-goal inputs are filled in.
-    cur.execute("ALTER TABLE tracked_goals DROP COLUMN IF EXISTS target_value")
-    cur.execute("ALTER TABLE tracked_goals DROP COLUMN IF EXISTS comparison")
-    if not _column_exists(cur, "tracked_goals", "warning_level"):
-        cur.execute("ALTER TABLE tracked_goals ADD COLUMN warning_level DOUBLE PRECISION")
-    if not _column_exists(cur, "tracked_goals", "alert_level"):
-        cur.execute("ALTER TABLE tracked_goals ADD COLUMN alert_level DOUBLE PRECISION")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS chart_drawings (
             id SERIAL PRIMARY KEY,
@@ -633,7 +592,7 @@ def init_db(conn):
     # screens. NULL means "not written yet", which is exactly the
     # signal that function uses to decide whether to show that prompt
     # at all (so resuming a session, or re-opening a finished report
-    # on the Logbook page, doesn't ask again).
+    # in Past Review Reports, doesn't ask again).
     if not _column_exists(cur, "trade_review_reports", "predictions_notes"):
         cur.execute("ALTER TABLE trade_review_reports ADD COLUMN predictions_notes TEXT")
     if not _column_exists(cur, "trade_review_reports", "reflections_notes"):
@@ -706,119 +665,6 @@ def init_db(conn):
             queue JSONB NOT NULL,
             current_index INTEGER NOT NULL,
             CONSTRAINT single_row CHECK (id = 1)
-        )
-    """)
-    # The Screener page's signal log (see screener/engine.py and
-    # pages/7_Screener.py) - one row per (signal_date, ticker), for
-    # EVERY baseline-passing candidate, not just the strict ones shown
-    # by default or the ones the user actually acted on. That's the
-    # whole point of logging it at all: reviewing later whether the
-    # strict filter is hiding winners the baseline tier would have
-    # caught, and whether the user's own skips are helping or costing
-    # money - neither question is answerable from a log that only
-    # keeps what was shown/taken. `trigger_price`/`close_price` (not
-    # `trigger`/`close`) sidestep `trigger` being a reserved SQL
-    # keyword and `close` reading oddly unquoted.
-    #
-    # triggered/trigger_date/outcome_*/exit_reason/reconciled_at start
-    # NULL and are filled in later by screener.reconcile - see that
-    # module's own docstring for the three exit conditions it
-    # simulates. user_action/user_note are the only fields this app
-    # itself ever sets directly on an already-logged row (see
-    # update_signal_user_action() below) - everything else about a
-    # signal is immutable once logged, same "append-only" idea
-    # daily_screen.py's own append_log() already uses for its CSV.
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS signal_log (
-            id SERIAL PRIMARY KEY,
-            signal_date DATE NOT NULL,
-            ticker TEXT NOT NULL,
-            tier TEXT NOT NULL,
-            trigger_price DOUBLE PRECISION NOT NULL,
-            stop_price DOUBLE PRECISION NOT NULL,
-            risk_pct DOUBLE PRECISION NOT NULL,
-            shares INTEGER NOT NULL,
-            position_usd DOUBLE PRECISION NOT NULL,
-            risk_usd DOUBLE PRECISION NOT NULL,
-            adr DOUBLE PRECISION NOT NULL,
-            rs_excess DOUBLE PRECISION NOT NULL,
-            rsline_at_high BOOLEAN NOT NULL,
-            nr7_2 BOOLEAN NOT NULL,
-            pct_off_high DOUBLE PRECISION NOT NULL,
-            close_price DOUBLE PRECISION NOT NULL,
-            gate_pct DOUBLE PRECISION,
-            expires DATE NOT NULL,
-            triggered BOOLEAN,
-            trigger_date DATE,
-            user_action TEXT,
-            user_note TEXT,
-            outcome_return DOUBLE PRECISION,
-            outcome_r DOUBLE PRECISION,
-            outcome_bars INTEGER,
-            exit_reason TEXT,
-            reconciled_at TIMESTAMP,
-            created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-            UNIQUE (signal_date, ticker)
-        )
-    """)
-
-    # The curated list of hedge funds tracked on the Institutional
-    # Holdings page - see institutional_holdings.py. `sec_cik` is the
-    # fund's SEC EDGAR filer id (not always the same as its brand name -
-    # e.g. Balyasny Asset Management files under "Longaeva Partners
-    # L.P."). `active` lets a fund be removed from tracking without
-    # losing its already-fetched holdings history (see
-    # deactivate_hedge_fund() below).
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS hedge_funds (
-            id SERIAL PRIMARY KEY,
-            display_name TEXT NOT NULL,
-            sec_cik TEXT NOT NULL UNIQUE,
-            active BOOLEAN NOT NULL DEFAULT TRUE,
-            added_at TIMESTAMP NOT NULL DEFAULT NOW()
-        )
-    """)
-    # One row per fund per stock per quarter, straight from that fund's
-    # 13F filing - kept for every quarter (not just the latest) so
-    # "increased/decreased/new/closed" can be worked out by comparing
-    # two quarters for the same fund+cusip, same idea as trade_reviews
-    # keeping full history instead of overwriting it.
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS hedge_fund_holdings (
-            id SERIAL PRIMARY KEY,
-            fund_id INTEGER NOT NULL REFERENCES hedge_funds(id) ON DELETE CASCADE,
-            cusip TEXT NOT NULL,
-            issuer_name TEXT NOT NULL,
-            ticker TEXT,
-            shares BIGINT NOT NULL,
-            value_usd BIGINT NOT NULL,
-            quarter_end DATE NOT NULL,
-            filed_date DATE NOT NULL,
-            UNIQUE (fund_id, cusip, quarter_end)
-        )
-    """)
-    # The fund's TOTAL reported 13F value for this quarter (every
-    # position it holds, not just the top-300 kept in this table) -
-    # repeated on every row for that fund+quarter rather than a
-    # separate table, so "what % of this fund's portfolio is this
-    # position" is a plain division on the row itself, no join needed.
-    # Nullable because it's only known going forward (see
-    # institutional_holdings.refresh_fund()) - added after this table
-    # already existed.
-    if not _column_exists(cur, "hedge_fund_holdings", "fund_total_value_usd"):
-        cur.execute("ALTER TABLE hedge_fund_holdings ADD COLUMN fund_total_value_usd BIGINT")
-    # A 13F only ever identifies a security by CUSIP, never by ticker -
-    # this is a small cache of CUSIP -> ticker lookups (via OpenFIGI, see
-    # institutional_holdings.resolve_tickers()) so the same CUSIP is
-    # never looked up twice. A NULL ticker means "looked up, no match
-    # found" - still worth caching, so a refresh doesn't keep retrying a
-    # CUSIP that will never resolve (e.g. a foreign security with no US
-    # ticker).
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS cusip_ticker_map (
-            cusip TEXT PRIMARY KEY,
-            ticker TEXT,
-            resolved_at TIMESTAMP NOT NULL DEFAULT NOW()
         )
     """)
     conn.commit()
@@ -1335,26 +1181,22 @@ def get_open_positions(_conn):
     return sorted(positions, key=lambda p: p["entry_date"])
 
 
-def upsert_logbook_entry(conn, symbol, entry_date, notes=None, chart_image=None, archived_at=None):
+def upsert_logbook_entry(conn, symbol, entry_date, notes=None):
     """
-    Adds or updates one day's logbook row for a symbol. Only the fields
-    actually passed in get overwritten - COALESCE keeps whatever was
-    already stored for anything left as None - so the daytime "save my
-    journal notes" action (from the Shortlist page) and the nightly
-    "save the chart image" action (from nightly_archive.py) can both call
-    this without erasing each other's field.
+    Adds or updates one day's journal-notes row for a symbol. Only the
+    fields actually passed in get overwritten - COALESCE keeps whatever
+    was already stored for anything left as None (e.g. a plan saved
+    earlier by save_journal_plan()).
     """
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT INTO logbook_entries (symbol, entry_date, notes, chart_image, archived_at)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO logbook_entries (symbol, entry_date, notes)
+        VALUES (%s, %s, %s)
         ON CONFLICT (symbol, entry_date) DO UPDATE SET
-            notes = COALESCE(EXCLUDED.notes, logbook_entries.notes),
-            chart_image = COALESCE(EXCLUDED.chart_image, logbook_entries.chart_image),
-            archived_at = COALESCE(EXCLUDED.archived_at, logbook_entries.archived_at)
+            notes = COALESCE(EXCLUDED.notes, logbook_entries.notes)
         """,
-        (symbol, entry_date, notes, chart_image, archived_at),
+        (symbol, entry_date, notes),
     )
     conn.commit()
 
@@ -1362,7 +1204,7 @@ def upsert_logbook_entry(conn, symbol, entry_date, notes=None, chart_image=None,
 def save_journal_plan(conn, symbol, entry_date, plan_entry_price, plan_stop_price):
     """
     Saves (or clears) a watchlist ticker's trading plan for one day -
-    unlike upsert_logbook_entry()'s notes/chart_image/archived_at, this
+    unlike upsert_logbook_entry()'s notes, this
     always OVERWRITES both fields with exactly what's passed, including
     None - the same "no COALESCE" convention position_stops already
     uses (see set_stop_loss()/delete_stop_loss()), since the Plan
@@ -1391,7 +1233,7 @@ def get_logbook_entry(conn, symbol, entry_date):
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT notes, chart_image, archived_at, plan_entry_price, plan_stop_price
+        SELECT notes, plan_entry_price, plan_stop_price
         FROM logbook_entries WHERE symbol = %s AND entry_date = %s
         """,
         (symbol, entry_date),
@@ -1401,110 +1243,9 @@ def get_logbook_entry(conn, symbol, entry_date):
         return None
     return {
         "notes": row[0],
-        "chart_image": bytes(row[1]) if row[1] is not None else None,
-        "archived_at": row[2],
-        "plan_entry_price": row[3],
-        "plan_stop_price": row[4],
+        "plan_entry_price": row[1],
+        "plan_stop_price": row[2],
     }
-
-
-def get_logbook_entries_for_symbol(conn, symbol):
-    """
-    Returns every logbook row ever recorded for `symbol`, oldest first,
-    as a list of {entry_date, notes, chart_image, archived_at,
-    plan_entry_price, plan_stop_price} dicts - the "one symbol, every
-    date" counterpart to get_logbook_entries_for_date()'s "one date,
-    every symbol". Used by symbol_archive_report.py to build one PDF
-    covering a watchlist-only ticker's whole journal history before
-    it's deleted.
-    """
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT entry_date, notes, chart_image, archived_at, plan_entry_price, plan_stop_price
-        FROM logbook_entries WHERE symbol = %s ORDER BY entry_date
-        """,
-        (symbol,),
-    )
-    return [
-        {
-            "entry_date": row[0],
-            "notes": row[1],
-            "chart_image": bytes(row[2]) if row[2] is not None else None,
-            "archived_at": row[3],
-            "plan_entry_price": row[4],
-            "plan_stop_price": row[5],
-        }
-        for row in cur.fetchall()
-    ]
-
-
-def has_trade_history(conn, symbol):
-    """
-    Whether `symbol` appears anywhere in the `trades` table (an open OR
-    closed position, ever) - symbol_archive_report.py's line between
-    "this was just a watchlist idea that never went anywhere" (eligible
-    for auto-archive-and-delete once removed long enough) and "this was
-    a real trade" (Logbook kept forever, regardless of watchlist
-    status). Checking `trades` rather than get_open_positions() also
-    catches a symbol that WAS traded and has since fully closed out -
-    still real trade history, not just a watchlist idea.
-    """
-    cur = conn.cursor()
-    cur.execute("SELECT 1 FROM trades WHERE symbol = %s LIMIT 1", (symbol,))
-    return cur.fetchone() is not None
-
-
-def get_stale_watchlist_removals(conn, older_than_days):
-    """
-    Returns the symbols in watchlist_removals whose removed_at is more
-    than `older_than_days` days ago - candidates for
-    symbol_archive_report.py's auto-archive-and-delete (still subject
-    to that function's own has_trade_history() exemption check on top
-    of this).
-    """
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT symbol FROM watchlist_removals WHERE removed_at < %s",
-        (timeutil.now_eastern() - timedelta(days=older_than_days),),
-    )
-    return [row[0] for row in cur.fetchall()]
-
-
-def delete_symbol_logbook_history(conn, symbol):
-    """
-    Permanently deletes EVERYTHING keyed by `symbol` except `trades`/
-    `transactions` (real trade history is never touched by this) -
-    logbook_entries (notes + chart images), chart_drawings,
-    position_stops, price_cache, and its own watchlist_removals
-    tracking row. Called by symbol_archive_report.py only AFTER the
-    archive PDF has been successfully emailed - never before, since
-    this has no undo.
-    """
-    cur = conn.cursor()
-    cur.execute("DELETE FROM logbook_entries WHERE symbol = %s", (symbol,))
-    cur.execute("DELETE FROM chart_drawings WHERE symbol = %s", (symbol,))
-    cur.execute("DELETE FROM position_stops WHERE symbol = %s", (symbol,))
-    cur.execute("DELETE FROM price_cache WHERE symbol = %s", (symbol,))
-    cur.execute("DELETE FROM watchlist_removals WHERE symbol = %s", (symbol,))
-    conn.commit()
-
-
-def has_logbook_chart_image(conn, symbol, entry_date):
-    """
-    Whether a symbol's logbook row for entry_date already has a chart
-    image saved - a lightweight existence check (no chart_image BYTEA
-    pulled over the wire, unlike get_logbook_entry()) for
-    archiving.archive_all()'s skip_if_already_archived option, which
-    calls this once per ticker on every nightly run.
-    """
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT chart_image IS NOT NULL FROM logbook_entries WHERE symbol = %s AND entry_date = %s",
-        (symbol, entry_date),
-    )
-    row = cur.fetchone()
-    return row is not None and row[0]
 
 
 def get_logbook_entries_for_date(conn, entry_date):
@@ -1515,13 +1256,13 @@ def get_logbook_entries_for_date(conn, entry_date):
     to call get_logbook_entry() once per watchlist ticker plus once per
     open position (a real N+1 query pattern on both the "Generate & Email
     Report" button and the nightly report fallback). A symbol with
-    nothing archived for this date simply won't be a key here - look it
+    nothing saved for this date simply won't be a key here - look it
     up with `.get(symbol)`, same None-if-missing behavior as before.
     """
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT symbol, notes, chart_image, archived_at, plan_entry_price, plan_stop_price
+        SELECT symbol, notes, plan_entry_price, plan_stop_price
         FROM logbook_entries WHERE entry_date = %s
         """,
         (entry_date,),
@@ -1529,10 +1270,8 @@ def get_logbook_entries_for_date(conn, entry_date):
     return {
         row[0]: {
             "notes": row[1],
-            "chart_image": bytes(row[2]) if row[2] is not None else None,
-            "archived_at": row[3],
-            "plan_entry_price": row[4],
-            "plan_stop_price": row[5],
+            "plan_entry_price": row[2],
+            "plan_stop_price": row[3],
         }
         for row in cur.fetchall()
     }
@@ -1567,21 +1306,6 @@ def save_daily_journal_note(conn, entry_date, notes):
     conn.commit()
 
 
-def get_journal_note_dates(conn, start_date, end_date):
-    """Every date in [start_date, end_date] (inclusive) that has a
-    daily_journal_notes row, as a set of dates - used by goals.py's
-    Daily Journal % goal, which only needs to know WHICH days were
-    journaled, not the note text itself. A row existing at all counts,
-    even an empty string (see get_daily_journal_note()'s own note on
-    why)."""
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT entry_date FROM daily_journal_notes WHERE entry_date BETWEEN %s AND %s",
-        (start_date, end_date),
-    )
-    return {row[0] for row in cur.fetchall()}
-
-
 def get_previous_journal_date(conn, before_date):
     """
     The most recent date with a daily_journal_notes row, strictly
@@ -1601,70 +1325,6 @@ def get_previous_journal_date(conn, before_date):
     cur = conn.cursor()
     cur.execute("SELECT MAX(entry_date) FROM daily_journal_notes WHERE entry_date < %s", (before_date,))
     return cur.fetchone()[0]
-
-
-def get_logbook_entries(conn, symbol):
-    """Returns every logbook row for a symbol, oldest day first."""
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT entry_date, notes, chart_image, archived_at
-        FROM logbook_entries WHERE symbol = %s ORDER BY entry_date
-        """,
-        (symbol,),
-    )
-    return [
-        {
-            "entry_date": row[0],
-            "notes": row[1],
-            "chart_image": bytes(row[2]) if row[2] is not None else None,
-            "archived_at": row[3],
-        }
-        for row in cur.fetchall()
-    ]
-
-
-def get_logbook_symbols(conn):
-    """Returns every symbol that has at least one logbook entry, alphabetically."""
-    cur = conn.cursor()
-    cur.execute("SELECT DISTINCT symbol FROM logbook_entries ORDER BY symbol")
-    return [row[0] for row in cur.fetchall()]
-
-
-def get_logbook_summary(conn):
-    """
-    Returns one row per symbol with at least one logbook entry - how
-    many entries it has, and its earliest/latest entry_date - without
-    pulling every entry's full notes/chart_image just to build a ticker
-    list. This is what the Logbook page's date-range filter checks a
-    symbol against (does [first_entry, last_entry] overlap the selected
-    range at all) before it bothers fetching that symbol's actual
-    day-by-day entries.
-    """
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT symbol, COUNT(*), MIN(entry_date), MAX(entry_date)
-        FROM logbook_entries
-        GROUP BY symbol
-        ORDER BY symbol
-    """)
-    return [
-        {"symbol": row[0], "entry_count": row[1], "first_entry": row[2], "last_entry": row[3]}
-        for row in cur.fetchall()
-    ]
-
-
-def search_logbook_notes(conn, keyword):
-    """Returns the set of symbols with at least one logbook entry whose
-    notes contain `keyword` (case-insensitive) - used by the Logbook
-    page's keyword filter to narrow the ticker list down to ones worth
-    looking at, before you pick one to actually read."""
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT DISTINCT symbol FROM logbook_entries WHERE notes ILIKE %s",
-        (f"%{keyword}%",),
-    )
-    return {row[0] for row in cur.fetchall()}
 
 
 def get_watchlist(conn):
@@ -1707,10 +1367,6 @@ def add_to_watchlist(conn, symbol, list_id=1):
             "INSERT INTO watchlist (symbol, list_id, added_at) VALUES (%s, %s, %s)",
             (symbol, list_id, timeutil.now_eastern()),
         )
-        # Being (re-)added means it's no longer "removed" - clears any
-        # stale-removal countdown symbol_archive_report.py is tracking,
-        # same as if it had never been removed at all.
-        cur.execute("DELETE FROM watchlist_removals WHERE symbol = %s", (symbol,))
         conn.commit()
         return "added", None
 
@@ -1725,26 +1381,11 @@ def add_to_watchlist(conn, symbol, list_id=1):
 
 def remove_from_watchlist(conn, symbol):
     """
-    Removes a ticker from whichever watchlist it's in - it stops being
-    archived going forward, but its existing logbook_entries history is
-    untouched, same as a closed trade's logbook staying permanently
-    archived (unless it's later auto-archived-and-deleted - see
-    watchlist_removals below and symbol_archive_report.py).
-
-    Records WHEN this happened in watchlist_removals - the starting
-    point for that 1-week countdown. ON CONFLICT (re-removing a symbol
-    that already had a stale, uncleaned-up row for some reason) resets
-    removed_at to now rather than leaving the older timestamp.
+    Removes a ticker from whichever watchlist it's in. Its existing
+    logbook_entries rows (saved notes/plans) are left untouched.
     """
     cur = conn.cursor()
     cur.execute("DELETE FROM watchlist WHERE symbol = %s", (symbol,))
-    cur.execute(
-        """
-        INSERT INTO watchlist_removals (symbol, removed_at) VALUES (%s, %s)
-        ON CONFLICT (symbol) DO UPDATE SET removed_at = EXCLUDED.removed_at
-        """,
-        (symbol, timeutil.now_eastern()),
-    )
     conn.commit()
 
 
@@ -1913,7 +1554,7 @@ def delete_review_report(conn, report_id):
     """Deletes a Trade Review Report and everything under it (cascades
     to its trade_reviews and their trade_review_snapshots) - used when a
     session ends with nothing actually saved (every trade in it was
-    Skipped), so an empty report doesn't clutter the Logbook's review
+    Skipped), so an empty report doesn't clutter the Past Review Reports
     list."""
     cur = conn.cursor()
     cur.execute("DELETE FROM trade_review_reports WHERE id = %s", (report_id,))
@@ -2025,36 +1666,6 @@ def update_trade_review(conn, review_id, notes, new_snapshots, tags=None):
             (review_id, timeframe, chart_image),
         )
     conn.commit()
-
-
-def get_reviewed_trade_keys(conn):
-    """
-    Every reviewed trade across EVERY report, flat (not scoped to one
-    report_id the way get_review_report() is) - used by goals.py's
-    Monthly Review Credit % goal, which needs to check "has this trade
-    been reviewed, and was that review's report actually finished (has
-    reflections) and finished by when." Returns a list of
-    {"symbol", "entry_date", "exit_date", "direction", "quantity",
-    "buy_price", "sell_price", "report_created_at", "reflections_notes"}
-    - the first seven fields are the same natural key trade_reviews
-    itself is matched by everywhere else (see pages/1_Trade_Analyzer.py's
-    _trade_key()), not trades.id.
-    """
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT tr.symbol, tr.entry_date, tr.exit_date, tr.direction, tr.quantity,
-               tr.buy_price, tr.sell_price, r.created_at, r.reflections_notes
-        FROM trade_reviews tr
-        JOIN trade_review_reports r ON r.id = tr.report_id
-    """)
-    return [
-        {
-            "symbol": row[0], "entry_date": row[1], "exit_date": row[2], "direction": row[3],
-            "quantity": row[4], "buy_price": row[5], "sell_price": row[6],
-            "report_created_at": row[7], "reflections_notes": row[8],
-        }
-        for row in cur.fetchall()
-    ]
 
 
 def get_review_reports(conn):
@@ -2211,10 +1822,9 @@ def clear_review_session_progress(conn):
 def get_tracked_symbols(conn):
     """
     Every symbol currently worth pre-warming a price cache for: every
-    open position plus every watchlist ticker, deduplicated - the same
-    universe archiving.archive_all() already iterates for the nightly
-    Logbook snapshot, just symbols only (no entry dates/directions,
-    which warming a plain price cache doesn't need).
+    open position plus every watchlist ticker, deduplicated - symbols
+    only (no entry dates/directions, which warming a plain price cache
+    doesn't need).
     """
     positions = {p["symbol"] for p in get_open_positions(conn)}
     watchlist = {w["symbol"] for w in get_watchlist(conn)}
@@ -2289,9 +1899,8 @@ def save_cached_next_earnings_date(conn, symbol, next_earnings_date):
 def clear_stale_price_cache(conn, expected_day):
     """
     Deletes any cached price history not tagged with `expected_day` -
-    called by nightly_archive.py once its own (near-midnight) archiving
-    is done, which is the "discard after midnight" half of the price
-    cache's lifecycle. Covers both an ordinary day's now-stale cache AND
+    called by warm_price_cache.py once its own warming is done, which is
+    the cleanup half of the price cache's lifecycle. Covers both an ordinary day's now-stale cache AND
     a symbol that's no longer tracked at all (removed from every
     watchlist, position closed) - either way, nothing refreshed it for
     `expected_day`, so it's safe to drop; a symbol that IS still tracked
@@ -2406,16 +2015,6 @@ def set_stop_loss(conn, symbol, stop_loss):
         (symbol, stop_loss, now),
     )
     conn.commit()
-
-
-def get_stop_loss_events(conn):
-    """Every stop_loss_events row ever logged, as {"symbol", "stop_loss",
-    "set_at"} dicts - used by goals.py's Stop-Loss Usage % goal to check
-    whether a closed trade had a stop set at some point during its
-    life."""
-    cur = conn.cursor()
-    cur.execute("SELECT symbol, stop_loss, set_at FROM stop_loss_events")
-    return [{"symbol": row[0], "stop_loss": row[1], "set_at": row[2]} for row in cur.fetchall()]
 
 
 def delete_stop_loss(conn, symbol):
@@ -2950,9 +2549,9 @@ def _save_position_sizing_state(conn, current_tier_index, last_down_window_key, 
 
 def get_daily_report_status(conn, report_date):
     """Returns when the daily PDF report was generated/emailed for a
-    given date, or None if it hasn't been yet - used both by the
-    Logbook page's status caption and by nightly_archive.py to decide
-    whether it needs to generate the report itself as a fallback."""
+    given date, or None if it hasn't been yet - used by the
+    Journal Session's "Email Daily Report" button to show whether
+    today's report was already sent."""
     cur = conn.cursor()
     cur.execute("SELECT generated_at FROM daily_reports WHERE report_date = %s", (report_date,))
     row = cur.fetchone()
@@ -2966,8 +2565,8 @@ def mark_daily_report_generated(conn, report_date):
     always count as the latest "done" marker. `generated_at` is
     computed in Python (US Eastern - see timeutil.py) rather than
     SQL's NOW(), which reflects the database server's own timezone
-    (UTC on Neon) - this value is shown directly on the Logbook page
-    ("generated and emailed... at H:MM AM/PM"), so it needs to be your
+    (UTC on Neon) - this value is shown directly on the Journal Session
+    screen ("emailed at H:MM AM/PM"), so it needs to be your
     time, not the server's."""
     cur = conn.cursor()
     cur.execute(
@@ -2978,470 +2577,4 @@ def mark_daily_report_generated(conn, report_date):
         """,
         (report_date, timeutil.now_eastern()),
     )
-    conn.commit()
-
-
-def get_tracked_goals(conn):
-    """
-    Every goal currently being tracked (see pages/6_Goals.py), oldest
-    first, as {"id", "goal_key", "timeframe", "warning_level",
-    "alert_level"} dictionaries. Not joined against goals.GOAL_LIBRARY
-    here - a row whose goal_key/timeframe no longer matches anything in
-    the library (the code changed since it was added) is still
-    returned as-is; it's the PAGE's job to notice that and show it as
-    stale rather than this function silently hiding it.
-    """
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT id, goal_key, timeframe, warning_level, alert_level FROM tracked_goals ORDER BY created_at"
-    )
-    return [
-        {"id": row[0], "goal_key": row[1], "timeframe": row[2], "warning_level": row[3], "alert_level": row[4]}
-        for row in cur.fetchall()
-    ]
-
-
-def add_tracked_goal(conn, goal_key, timeframe, warning_level=None, alert_level=None):
-    """Starts tracking one goal - see get_tracked_goals() for the shape
-    this later comes back as. Warning/Alert Level start unset (checking
-    a goal on in the Available Goals table doesn't ask for them up
-    front) - set them afterward via update_tracked_goal() in the
-    Actively Tracked table."""
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO tracked_goals (goal_key, timeframe, warning_level, alert_level, created_at)
-        VALUES (%s, %s, %s, %s, %s)
-        """,
-        (goal_key, timeframe, warning_level, alert_level, timeutil.now_eastern()),
-    )
-    conn.commit()
-
-
-def update_tracked_goal(conn, goal_id, warning_level, alert_level):
-    """Changes an already-tracked goal's Warning/Alert Level in place -
-    used when you want to move the bar on a goal without losing its
-    history of being tracked (re-adding it would look identical today,
-    but this is clearer about what actually happened)."""
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE tracked_goals SET warning_level = %s, alert_level = %s WHERE id = %s",
-        (warning_level, alert_level, goal_id),
-    )
-    conn.commit()
-
-
-def delete_tracked_goal(conn, goal_id):
-    """Stops tracking one goal - permanent, no undo (nothing else in
-    the database references a tracked goal, so there's nothing else to
-    clean up alongside it)."""
-    cur = conn.cursor()
-    cur.execute("DELETE FROM tracked_goals WHERE id = %s", (goal_id,))
-    conn.commit()
-
-
-# The Screener page's signal log (see screener/engine.py's own module
-# docstring and the signal_log table in init_db() above) - column order
-# here is the one source of truth _signal_row_to_dict() and every
-# SELECT below rely on, so a new column always gets added to BOTH the
-# CREATE TABLE and this list together.
-_SIGNAL_LOG_COLUMNS = [
-    "signal_date", "ticker", "tier", "trigger_price", "stop_price", "risk_pct",
-    "shares", "position_usd", "risk_usd", "adr", "rs_excess", "rsline_at_high",
-    "nr7_2", "pct_off_high", "close_price", "gate_pct", "expires",
-    "triggered", "trigger_date", "user_action", "user_note",
-    "outcome_return", "outcome_r", "outcome_bars", "exit_reason", "reconciled_at",
-]
-
-
-def _signal_row_to_dict(row):
-    return dict(zip(_SIGNAL_LOG_COLUMNS, row))
-
-
-def save_signals(conn, watchlist):
-    """
-    Bulk-logs every row in `watchlist` (a screener.engine.ScreenResult.
-    watchlist-shaped DataFrame, or anything with the same column names -
-    see screener/engine.py's make_orders()) into signal_log. Dedupes on
-    (signal_date, ticker) via ON CONFLICT DO NOTHING - the same "first
-    logged wins, permanently" semantics daily_screen.py's own
-    append_log() uses for its CSV, so a signal's logged numbers never
-    change even if it gets re-screened (carried forward at a different
-    age) on a later run.
-
-    Deliberately logs EVERY row passed in, strict and baseline alike -
-    the caller (pages/7_Screener.py) is responsible for passing the
-    FULL watchlist here regardless of which tier it's currently
-    displaying, since an unlogged baseline candidate can never be
-    reviewed later (see this module's own note on signal_log above).
-
-    Returns how many rows were actually NEW (not already logged).
-    """
-    if watchlist.empty:
-        return 0
-    cur = conn.cursor()
-    inserted = 0
-    for _, s in watchlist.iterrows():
-        cur.execute(
-            """
-            INSERT INTO signal_log
-                (signal_date, ticker, tier, trigger_price, stop_price, risk_pct,
-                 shares, position_usd, risk_usd, adr, rs_excess, rsline_at_high,
-                 nr7_2, pct_off_high, close_price, gate_pct, expires)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (signal_date, ticker) DO NOTHING
-            """,
-            (s.signal_date, s.ticker, s.tier, s.trigger, s.stop, s.risk_pct,
-             int(s.shares), s.position, s.risk_usd, s.adr, s.rs_excess, bool(s.rsline_at_high),
-             bool(s.nr7_2), s.pct_off_high, s.close, s.gate_pct, s.expires),
-        )
-        inserted += cur.rowcount
-    conn.commit()
-    return inserted
-
-
-def get_unreconciled_signals(conn):
-    """
-    Every signal screener.reconcile hasn't finished resolving yet -
-    reconciled_at IS NULL covers both a brand-new signal (nothing
-    checked at all) and a triggered-but-still-open one (see
-    screener.reconcile.reconcile_signal()'s `resolved` flag) - both
-    need re-checking against fresh price data on the next reconciliation
-    run.
-    """
-    cur = conn.cursor()
-    cur.execute(f"""
-        SELECT {", ".join(_SIGNAL_LOG_COLUMNS)} FROM signal_log
-        WHERE reconciled_at IS NULL
-        ORDER BY signal_date, ticker
-    """)
-    return [_signal_row_to_dict(row) for row in cur.fetchall()]
-
-
-def update_signal_reconciliation(conn, signal_date, ticker, triggered=None, trigger_date=None,
-                                  outcome_return=None, outcome_r=None, outcome_bars=None,
-                                  exit_reason=None, mark_reconciled=False):
-    """
-    Writes whatever screener.reconcile.reconcile_signal() figured out
-    for one signal. `mark_reconciled` sets reconciled_at to NOW() (a
-    FINAL answer - never checked again) only when True; a
-    `triggered=True, mark_reconciled=False` call (the "still open, no
-    exit yet" case) writes the partial info without closing the row
-    out, so get_unreconciled_signals() keeps surfacing it for the next
-    run. COALESCE keeps any field not passed here unchanged, the same
-    "only overwrite what's actually given" convention
-    upsert_logbook_entry() already uses elsewhere in this file.
-    """
-    cur = conn.cursor()
-    cur.execute(
-        """
-        UPDATE signal_log SET
-            triggered = COALESCE(%s, triggered),
-            trigger_date = COALESCE(%s, trigger_date),
-            outcome_return = COALESCE(%s, outcome_return),
-            outcome_r = COALESCE(%s, outcome_r),
-            outcome_bars = COALESCE(%s, outcome_bars),
-            exit_reason = COALESCE(%s, exit_reason),
-            reconciled_at = CASE WHEN %s THEN NOW() ELSE reconciled_at END
-        WHERE signal_date = %s AND ticker = %s
-        """,
-        (triggered, trigger_date, outcome_return, outcome_r, outcome_bars, exit_reason,
-         mark_reconciled, signal_date, ticker),
-    )
-    conn.commit()
-
-
-def update_signal_user_action(conn, signal_date, ticker, user_action, user_note=None):
-    """Records what the user actually did with a logged signal (taken/
-    skipped/missed) - the only fields on an already-logged signal_log
-    row this app ever lets the user edit directly (see the History tab
-    on pages/7_Screener.py). Without this, the signal log can log
-    candidates but never answer whether a discretionary skip helped or
-    cost money - see screener/engine.py's own module docstring."""
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE signal_log SET user_action = %s, user_note = %s WHERE signal_date = %s AND ticker = %s",
-        (user_action, user_note, signal_date, ticker),
-    )
-    conn.commit()
-
-
-def get_signals_for_history(conn, start_date, end_date, tier=None):
-    """
-    Every logged signal (strict AND baseline) between `start_date` and
-    `end_date` inclusive, newest first - the History tab's own table
-    and summary stats (see pages/7_Screener.py) are both built from
-    this. `tier`, if given, restricts to just "strict" or "baseline".
-    """
-    cur = conn.cursor()
-    if tier:
-        cur.execute(f"""
-            SELECT {", ".join(_SIGNAL_LOG_COLUMNS)} FROM signal_log
-            WHERE signal_date BETWEEN %s AND %s AND tier = %s
-            ORDER BY signal_date DESC, ticker
-        """, (start_date, end_date, tier))
-    else:
-        cur.execute(f"""
-            SELECT {", ".join(_SIGNAL_LOG_COLUMNS)} FROM signal_log
-            WHERE signal_date BETWEEN %s AND %s
-            ORDER BY signal_date DESC, ticker
-        """, (start_date, end_date))
-    return [_signal_row_to_dict(row) for row in cur.fetchall()]
-
-
-# --- Institutional Holdings (13F tracker) -------------------------------
-# See institutional_holdings.py for the SEC EDGAR / OpenFIGI fetching
-# logic that calls these - this section is just the plain CRUD layer,
-# same split as screener/data.py (fetching) vs database.py (storage).
-
-def seed_hedge_funds(conn):
-    """
-    Inserts the starting list of 20 tracked hedge funds, but only if
-    the table is completely empty - so this is safe to call every time
-    the app starts (same "seed once" idea as other one-time setup in
-    this file) without ever overwriting funds you've since added or
-    removed from the Institutional Holdings page.
-    """
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM hedge_funds")
-    if cur.fetchone()[0] > 0:
-        return
-
-    starting_funds = [
-        ("Citadel Advisors", "0001423053"),
-        ("Millennium Management", "0001273087"),
-        ("D. E. Shaw & Co.", "0001009207"),
-        ("Bridgewater Associates", "0001350694"),
-        ("TCI Fund Management", "0001647251"),
-        ("Renaissance Technologies", "0001037389"),
-        ("Point72 Asset Management", "0001603466"),
-        ("Two Sigma Investments", "0001179392"),
-        ("Elliott Investment Management", "0001791786"),
-        ("Viking Global Investors", "0001103804"),
-        ("Tiger Global Management", "0001167483"),
-        ("Lone Pine Capital", "0001061165"),
-        ("Coatue Management", "0001135730"),
-        ("Third Point", "0001040273"),
-        ("Pershing Square Capital Management", "0001336528"),
-        ("ExodusPoint Capital Management", "0001736225"),
-        ("Balyasny Asset Management", "0002054122"),
-        ("Soros Fund Management", "0001029160"),
-        ("AQR Capital Management", "0001167557"),
-        ("The Baupost Group", "0001061768"),
-    ]
-    cur.executemany(
-        "INSERT INTO hedge_funds (display_name, sec_cik) VALUES (%s, %s)",
-        starting_funds,
-    )
-    conn.commit()
-
-
-def get_hedge_funds(conn, active_only=True):
-    """Every tracked fund, alphabetical by display name."""
-    cur = conn.cursor()
-    if active_only:
-        cur.execute("SELECT id, display_name, sec_cik, active FROM hedge_funds WHERE active ORDER BY display_name")
-    else:
-        cur.execute("SELECT id, display_name, sec_cik, active FROM hedge_funds ORDER BY display_name")
-    return [
-        {"id": row[0], "display_name": row[1], "sec_cik": row[2], "active": row[3]}
-        for row in cur.fetchall()
-    ]
-
-
-def add_hedge_fund(conn, display_name, sec_cik):
-    """
-    Adds a fund to track, from the "Manage Tracked Funds" form on the
-    Institutional Holdings page. If this CIK was tracked before and
-    then removed, this re-activates it (and keeps its old holdings
-    history) instead of erroring on the UNIQUE constraint - same
-    "re-adding un-removes it" idea as add_to_watchlist() above.
-    """
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO hedge_funds (display_name, sec_cik) VALUES (%s, %s)
-        ON CONFLICT (sec_cik) DO UPDATE SET display_name = EXCLUDED.display_name, active = TRUE
-        """,
-        (display_name, sec_cik),
-    )
-    conn.commit()
-
-
-def deactivate_hedge_fund(conn, fund_id):
-    """Removes a fund from the tracked list without deleting its
-    already-fetched holdings history - the "remove" button just stops
-    it from showing up or being refreshed going forward."""
-    cur = conn.cursor()
-    cur.execute("UPDATE hedge_funds SET active = FALSE WHERE id = %s", (fund_id,))
-    conn.commit()
-
-
-def get_fund_quarters(conn, fund_id, limit=2):
-    """The most recent `limit` quarter_end dates this fund's holdings
-    have been fetched for, newest first - used to know both "what's the
-    latest quarter" (for the as-of caption) and "what's the one before
-    that" (to work out New/Increased/Decreased/Closed)."""
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT DISTINCT quarter_end FROM hedge_fund_holdings WHERE fund_id = %s ORDER BY quarter_end DESC LIMIT %s",
-        (fund_id, limit),
-    )
-    return [row[0] for row in cur.fetchall()]
-
-
-def get_fund_holdings(conn, fund_id, quarter_end):
-    """Every position this fund reported for one specific quarter."""
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT cusip, issuer_name, ticker, shares, value_usd, filed_date, fund_total_value_usd
-        FROM hedge_fund_holdings WHERE fund_id = %s AND quarter_end = %s
-        """,
-        (fund_id, quarter_end),
-    )
-    return [
-        {
-            "cusip": row[0], "issuer_name": row[1], "ticker": row[2],
-            "shares": row[3], "value_usd": row[4], "filed_date": row[5],
-            "fund_total_value_usd": row[6],
-        }
-        for row in cur.fetchall()
-    ]
-
-
-def get_fund_holding_for_ticker_in_quarters(conn, fund_id, ticker, quarters):
-    """
-    Returns {quarter_end: holding_dict} for whichever of the given
-    quarters this fund held `ticker` in - a targeted alternative to
-    get_fund_holdings() for get_snapshot_for_ticker(), which only ever
-    needs ONE ticker's row (if any) from a fund's latest one or two
-    quarters. Fetching the fund's full ~300-position list per quarter
-    just to filter for a single row in Python (the original approach)
-    meant transferring up to ~600 rows per fund for a single ticker
-    lookup - this transfers at most 2.
-    """
-    if not quarters:
-        return {}
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT quarter_end, cusip, issuer_name, ticker, shares, value_usd, fund_total_value_usd
-        FROM hedge_fund_holdings WHERE fund_id = %s AND ticker = %s AND quarter_end = ANY(%s)
-        """,
-        (fund_id, ticker, list(quarters)),
-    )
-    return {
-        row[0]: {
-            "cusip": row[1], "issuer_name": row[2], "ticker": row[3],
-            "shares": row[4], "value_usd": row[5], "fund_total_value_usd": row[6],
-        }
-        for row in cur.fetchall()
-    }
-
-
-def get_newest_quarter_across_funds(conn):
-    """The most recent quarter_end ANY tracked fund has reported -
-    used to flag a fund whose own latest data is older than that (it
-    hasn't filed its most recent 13F yet, or filed late) so that's
-    visible instead of silently understating its current position."""
-    cur = conn.cursor()
-    cur.execute("SELECT MAX(quarter_end) FROM hedge_fund_holdings")
-    return cur.fetchone()[0]
-
-
-def get_all_recent_quarters(conn, limit=8):
-    """Every distinct quarter_end across ALL tracked funds, newest
-    first - the column headers for the History tab's fund x quarter
-    grid. A union across funds, not one fund's own list, since not
-    every fund has data for the exact same set of quarters (e.g.
-    Balyasny's shorter real filing history)."""
-    cur = conn.cursor()
-    cur.execute("SELECT DISTINCT quarter_end FROM hedge_fund_holdings ORDER BY quarter_end DESC LIMIT %s", (limit,))
-    return [row[0] for row in cur.fetchall()]
-
-
-def get_fund_ticker_history(conn, fund_id, ticker):
-    """Every quarter this fund held `ticker` (not just the latest one
-    or two) as {quarter_end: portfolio_pct}, oldest first - the full
-    multi-quarter trend behind the History tab, as opposed to get_
-    fund_holdings()'s single-quarter snapshot. A quarter this fund
-    didn't hold the ticker simply has no key here - the caller (see
-    institutional_holdings.get_ticker_history()) treats a missing key
-    as "not held that quarter", not zero."""
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT quarter_end, value_usd, fund_total_value_usd
-        FROM hedge_fund_holdings WHERE fund_id = %s AND ticker = %s
-        ORDER BY quarter_end
-        """,
-        (fund_id, ticker),
-    )
-    return {
-        row[0]: (row[1] / row[2] * 100 if row[2] else None)
-        for row in cur.fetchall()
-    }
-
-
-def save_fund_holdings(conn, fund_id, quarter_end, filed_date, holdings, fund_total_value_usd):
-    """
-    Stores one fund's full 13F for one quarter - `holdings` is a list
-    of {cusip, issuer_name, ticker, shares, value_usd} dicts (already
-    trimmed to the fund's biggest positions - see institutional_
-    holdings._MAX_POSITIONS_PER_FUND). `fund_total_value_usd` is the
-    fund's TRUE total across every position it reported, computed
-    before that trim, so % of portfolio stays accurate even for
-    positions outside the top 300. ON CONFLICT overwrites rather than
-    skips, so re-running a refresh after a fund files a 13F-HR/A
-    amendment picks up the corrected numbers instead of keeping the
-    original filing's stale ones.
-    """
-    cur = conn.cursor()
-    for h in holdings:
-        cur.execute(
-            """
-            INSERT INTO hedge_fund_holdings
-                (fund_id, cusip, issuer_name, ticker, shares, value_usd, quarter_end, filed_date, fund_total_value_usd)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (fund_id, cusip, quarter_end) DO UPDATE SET
-                issuer_name = EXCLUDED.issuer_name,
-                ticker = EXCLUDED.ticker,
-                shares = EXCLUDED.shares,
-                value_usd = EXCLUDED.value_usd,
-                filed_date = EXCLUDED.filed_date,
-                fund_total_value_usd = EXCLUDED.fund_total_value_usd
-            """,
-            (fund_id, h["cusip"], h["issuer_name"], h.get("ticker"), h["shares"], h["value_usd"],
-             quarter_end, filed_date, fund_total_value_usd),
-        )
-    conn.commit()
-
-
-def get_cusip_tickers(conn, cusips):
-    """Returns {cusip: ticker} for whichever of these CUSIPs have
-    already been looked up (via cusip_ticker_map) - a missing key means
-    "never looked up yet", a key mapped to None means "looked up,
-    genuinely no ticker found". Callers use this to figure out which
-    CUSIPs still need an OpenFIGI lookup."""
-    if not cusips:
-        return {}
-    cur = conn.cursor()
-    cur.execute("SELECT cusip, ticker FROM cusip_ticker_map WHERE cusip = ANY(%s)", (list(cusips),))
-    return {row[0]: row[1] for row in cur.fetchall()}
-
-
-def save_cusip_tickers(conn, cusip_to_ticker):
-    """Caches a batch of CUSIP -> ticker lookups (ticker may be None,
-    meaning OpenFIGI genuinely had no match) so the same CUSIP is never
-    re-queried on a later refresh."""
-    cur = conn.cursor()
-    for cusip, ticker in cusip_to_ticker.items():
-        cur.execute(
-            """
-            INSERT INTO cusip_ticker_map (cusip, ticker, resolved_at) VALUES (%s, %s, NOW())
-            ON CONFLICT (cusip) DO UPDATE SET ticker = EXCLUDED.ticker, resolved_at = NOW()
-            """,
-            (cusip, ticker),
-        )
     conn.commit()

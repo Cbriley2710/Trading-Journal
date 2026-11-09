@@ -42,7 +42,7 @@ from ui import stat_tile
 
 # Reusing charting.py's colors (rather than picking new ones here) keeps
 # this page's charts looking like the same dark, DeepVue-styled charts
-# used everywhere else in the app - Trade Analyzer, Shortlist, Logbook.
+# used everywhere else in the app - Trade Analyzer, Shortlist.
 # Win/loss coloring itself goes through charting.win_loss_color(is_win)
 # at each use below, not a module-level GOOD_COLOR/CRITICAL_COLOR alias
 # like this used to have - see that function's own docstring for why
@@ -70,8 +70,8 @@ conn = database.get_connection()
 # plus everything that's happened since: deposits, closed-trade P/L, and
 # open positions' unrealized P/L right now. Dollar figures further down
 # this page are shown as a % of this calculated value. The actual math
-# lives in charting.get_calculated_account_value() now (shared with
-# goals.py's "Account Growth" goal), not duplicated here.
+# lives in charting.get_calculated_account_value() now, not
+# duplicated here.
 jan1_balance = database.get_account_value(conn)
 deposits = database.get_deposits(conn)
 jan1_date = date(timeutil.today_eastern().year, 1, 1)

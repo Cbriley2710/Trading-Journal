@@ -13,26 +13,22 @@ Also warms each symbol's next earnings date into earnings_cache (see
 charting.warm_earnings_cache_for_symbol()), which feeds the Journal
 Session's "earnings within 10 days" status-bar badge.
 
-WHY THIS EXISTS, SEPARATE FROM nightly_archive.py: that job runs near
-midnight (not right after close - see its own workflow's comment on
-cron/DST), which is often already well into, or past, a typical evening
-Journal Session. This runs earlier (~4:30pm ET), so by the time you
-actually sit down to journal, every ticker's chart data is already
-warm - the FIRST view of each ticker each day, which used to always
-pay for a live Yahoo Finance fetch, now usually doesn't.
+WHY IT RUNS EARLY (~4:30pm ET): so by the time you actually sit down to
+journal, every ticker's chart data is already warm - the FIRST view of
+each ticker each day, which used to always pay for a live Yahoo Finance
+fetch, now usually doesn't.
 
-Deliberately does NOT also archive a Logbook snapshot or send the
-Daily Report - nightly_archive.py already does that (near midnight,
-capturing the full day's final close). Building a chart PNG (see
-charting.render_png()) is real, comparatively expensive work; doing it
-again here too, a few hours before nightly_archive.py does it anyway,
-would just be duplicate effort for no benefit.
+Also does the cache's cleanup step once warming is done: any cached
+history not tagged with the current expected trading day (a day's
+now-stale cache, or a symbol no longer tracked at all) is deleted - see
+database.clear_stale_price_cache().
 """
 
 import time
 
 import charting
 import database
+import timeutil
 
 # A short pause between each symbol's fetch, so warming the cache for
 # every tracked symbol back-to-back doesn't read as a burst of rapid
@@ -52,6 +48,10 @@ def main():
         earnings_result = charting.warm_earnings_cache_for_symbol(symbol)
         print(f"  {symbol} earnings: {earnings_result}")
         time.sleep(PAUSE_BETWEEN_SYMBOLS_SECONDS)
+    # Uses expected_last_trading_day(), not today's calendar date - see
+    # clear_stale_price_cache()'s own docstring for why comparing against
+    # the literal calendar day wiped out a perfectly good weekend cache.
+    database.clear_stale_price_cache(conn, timeutil.expected_last_trading_day())
     print("Done.")
 
 

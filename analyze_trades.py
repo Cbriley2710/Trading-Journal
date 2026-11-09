@@ -606,7 +606,7 @@ def trade_stats(direction, buy_price, sell_price, quantity, profit_loss, entry_d
     using the actual signed profit_loss so a profitable short doesn't
     show a misleading negative %), days held, and equity contribution.
     Shared by Trade Analyzer's fact tiles, the Trade Review Report
-    PDF's per-trade page, and the Logbook page's Trade Reviews section,
+    PDF's per-trade page, and the Past Review Reports browser,
     so all three compute these exactly the same way instead of three
     separate copies of this math drifting apart.
 

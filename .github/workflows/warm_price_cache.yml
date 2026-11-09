@@ -2,18 +2,15 @@ name: Warm Price Cache
 
 # Runs warm_price_cache.py shortly after market close, so the FIRST
 # time a ticker's chart gets opened each day - often during an evening
-# Journal Session - doesn't pay for a live Yahoo Finance fetch. Separate
-# from, and earlier than, Nightly Archive: that job runs near midnight
-# (see its own workflow's comment), which is often already well past a
-# typical evening session. This one is also much lighter - no chart
-# image rendering, no emailing, just fetching and caching raw price
-# data - so no Chromium install step is needed here.
+# Journal Session - doesn't pay for a live Yahoo Finance fetch. Light work -
+# no chart image rendering, no emailing, just fetching and caching raw
+# price data - so no Chromium install step is needed here.
 #
 # "30 21 * * 1-5" is ~4:30pm Eastern Standard Time (21:30 UTC), Monday
 # through Friday only (no point warming on a weekend when nothing
 # traded). Cron doesn't adjust for daylight saving, so during Eastern
-# Daylight Time this actually fires around 5:30pm instead - the same
-# known, accepted limitation as Nightly Archive's own schedule.
+# Daylight Time this actually fires around 5:30pm instead - a known,
+# accepted limitation.
 #
 # workflow_dispatch lets you trigger this manually (from the Actions
 # tab on GitHub) any time, instead of waiting for the schedule - useful
@@ -42,18 +39,15 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python warm_price_cache.py
 
-      # See nightly_archive.yml's matching "Pause before the friend
-      # run" step for why this exists - warm_price_cache.py already
-      # paces its OWN per-symbol requests (PAUSE_BETWEEN_SYMBOLS_
-      # SECONDS), but that resets at the start of each script, so
-      # nothing was pacing the gap BETWEEN the self run above and the
-      # friend run below, always second, in the same job.
+      # warm_price_cache.py already paces its OWN per-symbol requests
+      # (PAUSE_BETWEEN_SYMBOLS_SECONDS), but that resets at the start of
+      # each script, so nothing was pacing the gap BETWEEN the self run
+      # above and the friend run below, always second, in the same job.
       - name: Pause before the friend run
         run: sleep 30
 
       # Same script, same repo, but pointed at a second person's own
-      # database via their own repository secret (prefixed FRIEND_) -
-      # same dual-deployment pattern Nightly Archive already uses.
+      # database via their own repository secret (prefixed FRIEND_).
       # continue-on-error so a problem here never marks the run that
       # already warmed your own cache as failed.
       - name: Warm price cache (friend)

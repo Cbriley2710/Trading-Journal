@@ -15,7 +15,7 @@ with a plain message rather than a crash.
 
 The actual chart-building (candlesticks, moving averages, colors,
 ticker overlay) lives in charting.py, shared with the Shortlist page
-and the nightly archive script - this file just wires up trade
+and the Daily Report - this file just wires up trade
 selection and the fact tiles around it.
 
 Also here: the guided Review Session (see render_review_session()
@@ -25,8 +25,8 @@ a date range instead of today's open positions/watchlist. A review can
 also capture chart snapshots at more than one timeframe per trade (see
 "Save this timeframe" below) - useful when something notable shows up
 on, say, the hourly chart but not the daily one. Saved reviews are
-browsed on the Logbook page's "Trade Reviews" section, the same way
-Journal Session's notes end up browsable on Logbook itself.
+browsed in the "Past Review Reports" expander on this same page (see
+review_browser.py).
 
 This is a second "page" of the dashboard app - Streamlit automatically
 turns any file placed in a pages/ folder next to dashboard.py into its
@@ -42,6 +42,7 @@ import auth
 import charting
 import database
 import nav
+import review_browser
 import session_keys as sk
 import twitter_post
 import ui
@@ -57,7 +58,7 @@ nav.render_top_nav("trade_analyzer")
 st.title("Trade Analyzer")
 
 # The buckets a reviewed trade can be tagged with (see render_review_session()
-# below) - a fixed list rather than free-text so the Logbook/PDF can filter
+# below) - a fixed list rather than free-text so the PDF can filter
 # and count by bucket later without having to parse free-form tag text. A
 # trade can have more than one (e.g. "Emotional Buy/Sell" AND "Panic Sell"),
 # so this backs a multiselect, not a single choice - stored as a plain list
@@ -90,7 +91,7 @@ def render_trade_facts(conn, trade):
     account, equity contribution) for one closed trade - shared by the
     plain single-trade view and each step of the Review Session below.
     The actual numbers come from analyze_trades.trade_stats(), so the
-    PDF/Logbook display of the same trade always agrees with what's
+    PDF display of the same trade always agrees with what's
     shown here. Entry % of Account and Equity Contribution are both
     left off entirely (not shown as blank/zero tiles) if the Jan 1
     account value baseline hasn't been set yet on the Settings page -
@@ -543,7 +544,7 @@ def render_review_session(conn):
         if trade_count == 0:
             # Every trade in the queue was Skipped - nothing worth
             # keeping, so don't leave an empty report cluttering the
-            # Logbook's Trade Reviews list. No point asking for
+            # Past Review Reports list. No point asking for
             # Reflections on a session with nothing reviewed in it.
             database.clear_review_session_progress(conn)
             database.delete_review_report(conn, session["report_id"])
@@ -555,7 +556,7 @@ def render_review_session(conn):
             database.clear_review_session_progress(conn)
             st.success(
                 f"Review complete - {trade_count} trade(s) saved. "
-                "See the Logbook page's Trade Reviews section to browse or email it."
+                "See 'Past Review Reports' below to browse or email it."
             )
         if st.button("Back to Trade Analyzer"):
             del st.session_state[sk.REVIEW_SESSION]
@@ -771,8 +772,8 @@ def render_review_session(conn):
         # step, not just `trade` (the blended stand-in used for display
         # above) - a grouped buy lot (see _group_trades_into_lots())
         # should read as one review no matter which of its member exit
-        # dates you later look it up by (Logbook, the Monthly Review
-        # Credit % goal, the PDF). Each member is looked up individually
+        # dates you later look it up by (the Past Review Reports list,
+        # the PDF). Each member is looked up individually
         # rather than trusting `existing_review` for all of them, so a
         # lot that was only PARTLY saved before (e.g. an interrupted
         # earlier session) still gets its missing member(s) inserted
@@ -1016,6 +1017,8 @@ else:
     if st.button("🔍 Start Review Session"):
         st.session_state[sk.REVIEW_SELECTING] = True
         st.rerun()
+    with st.expander("Past Review Reports"):
+        review_browser.render_past_reviews(conn)
     st.divider()
 
     trades_sorted = sorted(trades, key=lambda t: t["date"], reverse=True)

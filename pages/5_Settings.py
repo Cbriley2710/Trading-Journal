@@ -55,7 +55,7 @@ settings = database.get_strategy_settings(conn)
 st.header("Import Trades")
 st.caption(
     "Two ways to get trade history into the shared database (the same "
-    "one the Dashboard, Trade Analyzer, Shortlist, and Logbook pages all "
+    "one the Dashboard, Trade Analyzer, and Shortlist pages all "
     "read from): connect Fidelity once through SnapTrade for automatic "
     "daily syncing, or drop in a CSV export from Fidelity or Schwab any "
     "time. Both write to the same `transactions` table and are "

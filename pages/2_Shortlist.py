@@ -3,20 +3,18 @@ Shortlist
 =====================
 Five side-by-side lists feed the same daily routine: pick a ticker,
 review its chart, and write down your thoughts for today. Clicking
-Save archives a chart snapshot (via charting.build_archive_snapshot() -
-a fixed 180-trading-day window, not whatever the interactive chart
-happens to be showing) together with your notes into that ticker's
-permanent Logbook, right away - no need to wait for anything.
-nightly_archive.py still runs as a fallback for any ticker you don't
-get around to saving on a given day.
+Save stores your notes (and optional Plan Entry/Stop) for that ticker
+and day. Finishing a Journal Session offers to email the Daily Report,
+which builds each ticker's chart image fresh at that moment (see
+daily_report.py).
 
   - Lists 1-4: tickers you add by hand (one at a time or a pasted
     comma-separated batch), independent of whether you actually hold a
     position - see database.get_watchlist(). Each list's name is
     editable, a ticker lives in one list at a time, and a "Remove All"
     button clears a whole list at once. A ticker stays listed (and
-    keeps getting archived) until you remove it; removing it doesn't
-    erase its Logbook history.
+    stays on the list until you remove it; removing it doesn't erase its
+    saved notes.
 
   - List 5 ("Open Positions"): auto-updates from your actual trades -
     see database.get_open_positions() - and isn't manually editable,
@@ -37,9 +35,9 @@ from datetime import datetime, timedelta
 
 import streamlit as st
 
-import archiving
 import auth
 import charting
+import daily_report
 import database
 import nav
 import session_keys as sk
@@ -197,7 +195,7 @@ def render_journal_box(conn, symbol, key_prefix, submit_labels=("Save",), on_wat
 
     The last entry (if there is one) is shown read-only so you can see
     what you said before writing today's - otherwise reviewing that
-    means leaving this view for the Logbook. It's the last JOURNALING
+    means leaving this view for another page. It's the last JOURNALING
     day's entry (see timeutil.last_journaling_day()), not just literal
     calendar-yesterday - on a Sunday, calendar-yesterday is Saturday,
     which never has an entry (nothing trades Friday evening or
@@ -369,24 +367,16 @@ def render_journal_box(conn, symbol, key_prefix, submit_labels=("Save",), on_wat
     return clicked, notes, remove_from_watchlist, plan_entry_price, plan_stop_price, post_to_x
 
 
-def save_journal_entry(conn, symbol, entry_point, entry_label, notes, stop_loss=None,
-                        plan_entry_price=None, plan_stop_price=None):
-    """Archives today's chart snapshot and saves the journal entry -
-    the actual work behind every "Save" button on this page, whether
-    it's the plain single-ticker view or a Journal Session step.
-    `plan_entry_price`/`plan_stop_price` (always None for a non-
-    watchlist symbol - see render_journal_box()) are saved separately
-    via database.save_journal_plan(), not upsert_logbook_entry() - see
-    that function's own docstring for why."""
+def save_journal_entry(conn, symbol, notes, plan_entry_price=None, plan_stop_price=None):
+    """Saves today's journal entry - the actual work behind every "Save"
+    button on this page, whether it's the plain single-ticker view or a
+    Journal Session step. `plan_entry_price`/`plan_stop_price` (always
+    None for a non-watchlist symbol - see render_journal_box()) are
+    saved separately via database.save_journal_plan(), not
+    upsert_logbook_entry() - see that function's own docstring for why."""
     today = timeutil.today_eastern()
-    with st.spinner("Saving and archiving today's chart..."):
-        png_bytes = charting.build_archive_snapshot(
-            symbol, entry_point["entry_date"], entry_point["buy_price"], entry_label,
-            datetime.combine(today, datetime.min.time()), direction=entry_point.get("direction", "LONG"),
-            stop_loss=stop_loss)
-    database.upsert_logbook_entry(conn, symbol, today, notes=notes, chart_image=png_bytes)
+    database.upsert_logbook_entry(conn, symbol, today, notes=notes)
     database.save_journal_plan(conn, symbol, today, plan_entry_price, plan_stop_price)
-    return png_bytes
 
 
 def render_chart_and_journal(conn, symbol, entry_point, entry_label, key_prefix, stop_loss=None, on_watchlist=False):
@@ -431,22 +421,15 @@ def render_chart_and_journal(conn, symbol, entry_point, entry_label, key_prefix,
         conn, symbol, key_prefix, on_watchlist=on_watchlist)
 
     if clicked:
-        png_bytes = save_journal_entry(
-            conn, symbol, entry_point, entry_label, notes, stop_loss=stop_loss,
-            plan_entry_price=plan_entry_price, plan_stop_price=plan_stop_price)
-        if png_bytes is not None:
-            st.success("Saved - today's chart has been archived to the Logbook.")
-        else:
-            st.warning(
-                "Notes saved, but no price data was found to archive a chart "
-                "image right now (tonight's fallback archive will try again)."
-            )
+        save_journal_entry(
+            conn, symbol, notes, plan_entry_price=plan_entry_price, plan_stop_price=plan_stop_price)
+        st.success("Saved.")
         if remove_from_watchlist:
             database.remove_from_watchlist(conn, symbol)
             selected = st.session_state.get(sk.WATCHLIST_SELECTED)
             if selected and selected.get("source") == "watchlist" and selected.get("symbol") == symbol:
                 del st.session_state[sk.WATCHLIST_SELECTED]
-            st.toast(f"Removed {symbol} from its watchlist. Its Logbook history is kept.")
+            st.toast(f"Removed {symbol} from its watchlist. Its saved notes are kept.")
         # Lands back on the chart/journal box (not the page's outer top,
         # above the nav bar and lists) - a plain rerun from a form
         # submit would otherwise leave you having to scroll back down
@@ -601,7 +584,7 @@ def render_lists_section(conn):
             # form purely to keep its original side-by-side layout with
             # Add - it doesn't depend on the text box at all.
             # "Remove All" needs two clicks, not one - clearing a whole
-            # list has no undo (Logbook history survives, but the
+            # list has no undo (saved notes survive, but the
             # watchlist membership itself is gone). The first click just
             # arms this list's confirm flag and relabels the same
             # button; a SECOND click, with it armed, is what actually
@@ -642,12 +625,6 @@ def render_lists_section(conn):
                     with st.spinner(f"Warming price cache for {', '.join(newly_added)}..."):
                         for sym in newly_added:
                             charting.warm_price_cache_for_symbol(sym)
-                    # So _catch_up_missing_archives() (see below) tries
-                    # archiving THIS ticker on the very next rerun -
-                    # which happens automatically right after this form
-                    # submits - instead of returning its still-cached
-                    # "nothing to do" result from up to an hour ago.
-                    _catch_up_missing_archives.clear()
                 parts = []
                 if newly_added:
                     parts.append(f"Added {len(newly_added)} ticker(s) to {new_name}.")
@@ -673,7 +650,7 @@ def render_lists_section(conn):
                         del st.session_state[sk.WATCHLIST_SELECTED]
                     del st.session_state[remove_confirm_key]
                     st.session_state[sk.WATCHLIST_MESSAGE] = (
-                        f"Cleared {new_name} ({len(list_symbols)} ticker(s)). Their Logbook history is kept."
+                        f"Cleared {new_name} ({len(list_symbols)} ticker(s)). Their saved notes are kept."
                     )
                     st.rerun()
 
@@ -692,8 +669,8 @@ def render_lists_section(conn):
                     # One click, not two - removing a single ticker this
                     # way is common day-to-day list grooming (unlike
                     # "Remove All" above, which stays a two-click confirm
-                    # since it drops an entire list at once). Its Logbook
-                    # history is kept either way, so a wrong click here
+                    # since it drops an entire list at once). Its saved
+                    # notes are kept either way, so a wrong click here
                     # isn't a real loss - just re-add the ticker.
                     if ticker_cols[1].button("✕", key=f"wlx_{list_id}_{entry['symbol']}"):
                         database.remove_from_watchlist(conn, entry["symbol"])
@@ -701,7 +678,7 @@ def render_lists_section(conn):
                         if selected and selected.get("source") == "watchlist" and selected.get("symbol") == entry["symbol"]:
                             del st.session_state[sk.WATCHLIST_SELECTED]
                         st.session_state[sk.WATCHLIST_MESSAGE] = (
-                            f"Removed {entry['symbol']}. Its Logbook history is kept."
+                            f"Removed {entry['symbol']}. Its saved notes are kept."
                         )
                         st.rerun()
 
@@ -841,66 +818,26 @@ def _advance_session(conn, session, queue):
     st.rerun()
 
 
-def _archive_pending_snapshots(conn, session):
+def _render_email_report_button(conn):
     """
-    Builds and archives the actual Logbook chart image for every ticker
-    Save & Next was used on this session - deferred here, all at once,
-    rather than paying for a snapshot render (see charting.render_png()'s
-    own docstring on why that's slow: several seconds of fixed kaleido/
-    Chromium startup cost, regardless of image size) on every single
-    step of the session. Notes themselves were already saved instantly
-    at the time (see render_journal_session() below) - this only fills
-    in the chart image half, reusing archiving.archive_ticker() (the
-    same function the nightly job's fallback uses) so there's one place
-    that does this, not two.
-
-    `session["pending_archives"]` is plain in-memory state, not
-    persisted to the database like the queue/index are - if the tab
-    gets closed (or "Exit Session" is clicked) mid-session with some
-    notes already saved but not yet archived this way, that list is
-    gone the moment the session is resumed (a fresh page load means a
-    fresh, empty st.session_state) with nothing left to say those
-    tickers still need archiving.
-
-    A REAL INCIDENT this caused: a session interrupted mid-way, then
-    resumed and finished later - the resumed segment's own tickers
-    archived fine (they're in THIS run's pending_archives), but every
-    ticker from the interrupted EARLIER segment kept its real saved
-    notes with no chart until the pending fix - tonight's nightly job -
-    ran. The archive_all() call below closes that gap: it independently
-    re-derives every tracked symbol's archive from the database (no
-    session state needed at all - the same self-contained call the
-    nightly job trusts), and skip_if_already_archived=True makes it
-    cheap to call unconditionally every time a session completes - it
-    only does real work for whatever's actually still missing today's
-    chart, whether that's left over from THIS session or an entirely
-    different, earlier interrupted one.
-
-    The Daily Report itself is no longer auto-sent right after a
-    session completes (see nightly_archive.py's module docstring) -
-    this same evening, Yahoo Finance's daily close usually isn't
-    finalized yet, so a same-evening report almost always went out with
-    every chart missing (confirmed for real: 3 days running, every
-    chart across every section). The nightly job now sends the one and
-    only report for each day, after its own archive_all() pass has had
-    all night for Yahoo's data to actually be ready.
+    The one way a Daily Report ever gets sent: an explicit click here on
+    the Session complete screen - nothing is scheduled or automatic.
+    Each ticker's chart is built fresh while the PDF is assembled (see
+    daily_report.build_report_pdf()), which can take a little while and
+    leaves a ticker's chart out of the PDF if Yahoo Finance hasn't
+    published today's close for it yet (the message below lists them).
     """
-    pending = session.get("pending_archives", [])
-    if pending:
-        today = timeutil.today_eastern()
-        as_of = datetime.combine(today, datetime.min.time())
-        progress = st.progress(0.0, text=f"Archiving chart 1 of {len(pending)}...")
-        for i, entry in enumerate(pending):
-            progress.progress(i / len(pending), text=f"Archiving chart {i + 1} of {len(pending)}: {entry['symbol']}...")
-            archiving.archive_ticker(
-                conn, entry["symbol"], entry["entry_point"]["entry_date"], entry["entry_point"].get("buy_price"),
-                entry["entry_label"], today, as_of,
-                direction=entry["entry_point"].get("direction", "LONG"), stop_loss=entry["stop_loss"],
-            )
-        progress.empty()
-        session["pending_archives"] = []
-
-    archiving.archive_all(conn, timeutil.today_eastern(), skip_if_already_archived=True)
+    today = timeutil.today_eastern()
+    sent_at = database.get_daily_report_status(conn, today)
+    if sent_at:
+        st.caption(f"Today's report was already emailed at {sent_at:%I:%M %p}. Clicking again sends another copy.")
+    if st.button("Email Daily Report", type="primary", key="email_daily_report"):
+        with st.spinner("Building charts and emailing the report - this can take a minute..."):
+            success, message = daily_report.generate_and_send_report(conn, today)
+        if success:
+            st.success(message)
+        else:
+            st.error(message)
 
 
 def _render_todays_thoughts_step(conn, today):
@@ -977,9 +914,9 @@ def render_journal_session(conn):
         return
 
     if index >= len(queue):
-        _archive_pending_snapshots(conn, session)
         database.clear_journal_session_progress(conn)
         st.success(f"Session complete - journaled {len(queue)} ticker(s) today.")
+        _render_email_report_button(conn)
         if st.button("Back to Shortlist"):
             del st.session_state[sk.JOURNAL_SESSION]
             st.rerun()
@@ -1044,24 +981,17 @@ def render_journal_session(conn):
         # this is a standalone "I'm done with this ticker" decision,
         # independent of whether there's also a note worth saving today.
         database.remove_from_watchlist(conn, symbol)
-        st.toast(f"Removed {symbol} from its watchlist. Its Logbook history is kept.")
+        st.toast(f"Removed {symbol} from its watchlist. Its saved notes are kept.")
 
     if clicked == "Save & Next →" and post_to_x:
-        # Built synchronously here (unlike the deferred-to-session-end
-        # path below) since the tweet preview needs a real image to
-        # show before Post/Cancel - the same cost save_journal_entry()
-        # already pays for the single-ticker view's Save button, just
-        # paid here instead of at session end. The result is used for
-        # the real Logbook archive too (chart_image= below), so this
-        # ticker doesn't ALSO get queued into pending_archives and
-        # rendered a second time for nothing.
+        # Built synchronously here since the tweet preview needs a real
+        # image to show before Post/Cancel.
+        save_journal_entry(conn, symbol, notes, plan_entry_price=plan_entry_price, plan_stop_price=plan_stop_price)
         with st.spinner("Building chart for the tweet preview..."):
             png_bytes = charting.build_archive_snapshot(
                 symbol, entry_point["entry_date"], entry_point["buy_price"], item["entry_label"],
                 datetime.combine(timeutil.today_eastern(), datetime.min.time()),
                 direction=entry_point.get("direction", "LONG"), stop_loss=stop_loss)
-        database.upsert_logbook_entry(conn, symbol, timeutil.today_eastern(), notes=notes, chart_image=png_bytes)
-        database.save_journal_plan(conn, symbol, timeutil.today_eastern(), plan_entry_price, plan_stop_price)
         if png_bytes is not None:
             st.session_state[sk.PENDING_TWEET] = {
                 "symbol": symbol, "image": png_bytes,
@@ -1072,17 +1002,7 @@ def render_journal_session(conn):
             st.warning("No price data available to build a chart for the tweet - notes saved, skipping the tweet.")
             _advance_session(conn, session, queue)
     elif clicked == "Save & Next →":
-        # Notes save instantly; the chart snapshot itself is deferred to
-        # _archive_pending_snapshots() at the end of the session - see
-        # its own docstring for why (rendering one right now would cost
-        # several seconds per ticker, almost entirely kaleido/Chromium
-        # startup overhead, not anything proportional to the image).
-        database.upsert_logbook_entry(conn, symbol, timeutil.today_eastern(), notes=notes)
-        database.save_journal_plan(conn, symbol, timeutil.today_eastern(), plan_entry_price, plan_stop_price)
-        session.setdefault("pending_archives", []).append({
-            "symbol": symbol, "entry_point": entry_point,
-            "entry_label": item["entry_label"], "stop_loss": stop_loss,
-        })
+        save_journal_entry(conn, symbol, notes, plan_entry_price=plan_entry_price, plan_stop_price=plan_stop_price)
         _advance_session(conn, session, queue)
     elif clicked == "Skip":
         _advance_session(conn, session, queue)
@@ -1154,55 +1074,7 @@ def render_journal_list_selection(conn):
         st.rerun()
 
 
-@st.cache_data(ttl=3600, show_spinner="Checking for any tickers still needing today's chart...")
-def _catch_up_missing_archives():
-    """
-    Best-effort retry for any tracked symbol still missing today's
-    Logbook chart - called every time this page loads (see the
-    unconditional call right below). A REAL, CONFIRMED root cause this
-    exists for: Yahoo Finance's daily price bar for "today" can stay
-    unavailable (Open/High/Low/Close all NaN) for many hours after
-    close - confirmed live against 6 different tracked symbols, all
-    still "not_ready" at 9:18pm ET, 5+ hours after close. charting.
-    build_archive_snapshot() correctly refuses to archive in that case
-    (a good guard, not the bug) - but the only things that ever retried
-    a "not ready yet" symbol were two scheduled GitHub Actions jobs
-    with their own real scheduling drift (warm_price_cache.yml:
-    ~5:30pm ET scheduled, ~7-9pm ET actual; nightly_archive.yml:
-    ~midnight scheduled, ~5-7am ET actual - see those workflows' own
-    comments). Without this, a chart could stay missing from the
-    Logbook for hours after it was actually fetchable, simply because
-    nothing happened to retry it. This gives it another chance whenever
-    the app is actually being used instead. (The Daily Report itself no
-    longer sends the same evening at all - see nightly_archive.py's
-    module docstring - so this function's job now is purely keeping the
-    Logbook's own chart history complete, not racing an email.)
-
-    Reuses archiving.archive_all(skip_if_already_archived=True) - the
-    same call _archive_pending_snapshots() already makes at Journal
-    Session completion (for a DIFFERENT reason - recovering a PREVIOUS
-    interrupted session's lost pending_archives) - cheap (a plain DB
-    check) for anything already archived, real work only for whatever's
-    still genuinely missing. Rejected: unconditionally refreshing every
-    tracked symbol's full history on every page load - archive_all()'s
-    own skip flag already makes this efficient without that.
-
-    Cached for an hour so this can't turn into a live Yahoo Finance
-    call on every single click while using this page - cleared
-    explicitly right after a new ticker's added (see the watchlist
-    "Add" handling above) so that addition is tried on the very next
-    rerun instead of waiting out the hour.
-
-    Does NOT guarantee same-evening completeness - if Yahoo genuinely
-    hasn't published a symbol's close yet, no retry here changes that;
-    it only narrows the window and raises the odds of catching it.
-    """
-    conn = database.get_connection()
-    return archiving.archive_all(conn, timeutil.today_eastern(), skip_if_already_archived=True)
-
-
 conn = database.get_connection()
-_catch_up_missing_archives()
 
 pending_tweet = st.session_state.get(sk.PENDING_TWEET)
 if pending_tweet is not None and pending_tweet.get("session_key") == sk.JOURNAL_SESSION:

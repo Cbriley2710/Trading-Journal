@@ -33,10 +33,6 @@ PAGES = [
     ("trade_analyzer", "Trade Analyzer", "pages/1_Trade_Analyzer.py"),
     ("shortlist", "Shortlist", "pages/2_Shortlist.py"),
     ("open_positions", "Open Positions", "pages/4_Open_Positions.py"),
-    ("logbook", "Logbook", "pages/3_Logbook.py"),
-    ("goals", "Goals", "pages/6_Goals.py"),
-    ("screener", "Screener", "pages/7_Screener.py"),
-    ("institutional_holdings", "Institutional Holdings", "pages/8_Institutional_Holdings.py"),
     ("settings", "Settings", "pages/5_Settings.py"),
 ]
 

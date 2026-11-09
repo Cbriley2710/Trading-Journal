@@ -2,7 +2,7 @@
 Charting
 =====================
 The shared chart-building code behind every price chart in this project -
-Trade Analyzer, the Shortlist page, and the nightly archive script all call
+Trade Analyzer, the Shortlist page, and the Daily Report all call
 into this module, so a chart looks and behaves the same everywhere and a
 fix/improvement only has to happen in one place.
 
@@ -18,7 +18,7 @@ opened (and, if the trade is already closed, where it was exited):
     {"entry_date": datetime, "buy_price": float,
      "exit_date": datetime or None, "sell_price": float or None}
 Trade Analyzer passes both (a closed trade); the Shortlist page and the
-nightly archive script pass entry-only dicts (exit_date/sell_price = None),
+Daily Report pass entry-only dicts (exit_date/sell_price = None),
 since those positions haven't been sold yet.
 """
 
@@ -27,7 +27,7 @@ import json
 import math
 import re
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from datetime import time as dtime
 from pathlib import Path
 
@@ -242,7 +242,7 @@ def right_margin_timedelta(interval):
     numbers that could drift out of sync with those."""
     return timedelta(days=RIGHT_MARGIN_CANDLES * LOOKBACK_DAYS_PER_PERIOD[interval])
 
-# Used by the nightly archive script, which has no interactive toolbar to
+# Used by the Daily Report, which has no interactive toolbar to
 # pull settings from - a plain, consistent snapshot for every ticker.
 DEFAULT_SETTINGS = {
     "chart_type": "Candlestick",
@@ -833,36 +833,6 @@ def fetch_earnings_dates_in_range(symbol, start_date, end_date):
     return sorted(d.date() for d in index if start_date <= d.date() <= end_date)
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_period_return_pct(symbol, period_start):
-    """
-    A benchmark's own % price change from period_start through today -
-    used by goals.py's "Equity Growth vs SPY/QQQ" goals to see whether
-    the account is beating the market over the same stretch. Reuses
-    fetch_history() (no moving averages needed) rather than a fresh
-    yfinance call, so this gets the same persistent Daily price_cache/
-    hour-long st.cache_data benefits every chart already relies on -
-    cached for an hour here too, same reasoning as fetch_history()'s
-    own docstring (mostly past days that never change).
-
-    Returns None if there's no price data for the range at all (bad
-    symbol, rate-limited, market hasn't opened yet this period) -
-    callers already treat None as "can't compute this goal right now."
-    """
-    # fetch_history() compares its display_start against a DatetimeIndex
-    # internally, so this needs to be a real datetime, not the plain
-    # date period_start comes in as (same conversion ma_strategy.py's
-    # own fetch_history() call already needs, for the same reason).
-    start = datetime.combine(period_start, datetime.min.time())
-    end = datetime.combine(timeutil.today_eastern(), datetime.min.time())
-    history = fetch_history(symbol, start, start, end, "1d", [])
-    if history.empty:
-        return None
-    first_close = history["Close"].iloc[0]
-    last_close = history["Close"].iloc[-1]
-    return (last_close - first_close) / first_close * 100
-
-
 def get_calculated_account_value(conn):
     """
     Today's account value, built up from the Jan 1 baseline (database.
@@ -873,9 +843,7 @@ def get_calculated_account_value(conn):
     set yet (database.set_account_value()).
 
     Extracted from what used to be dashboard.py's own inline
-    calculation (its Account Performance section) so goals.py's
-    "Account Growth" goal computes this exactly the same way, instead
-    of a second copy of this math drifting apart from the original.
+    calculation (its Account Performance section).
     Always anchored at Jan 1 specifically - not a general "value as of
     any date" function, since unrealized P/L only means anything for
     RIGHT NOW (a past date's open positions would need historical
@@ -959,11 +927,9 @@ def build_mark_to_market_curve(trades_records, open_positions, daily_index):
     MORE valid data behind any given day, never less), just far fewer
     live Yahoo Finance calls.
 
-    Shared by the Dashboard's own Equity Curve chart and goals.py's
-    Equity Growth goals (see goals.build_context()'s
-    "mark_to_market_pl_since") so both read the account's performance
-    the exact same way - moved here from dashboard.py for that reason,
-    rather than goals.py growing its own second copy of this math.
+    Shared by the Dashboard's Equity Curve chart and its Account
+    Performance tiles - moved here from dashboard.py so both read the
+    account's performance the exact same way.
     """
     # .normalize() (here and at every other pd.Timestamp(...) conversion
     # in this function) drops entry_date/date down to midnight before
@@ -1059,9 +1025,8 @@ def period_pl_from_curve(curve, window_start):
     `window_start=None` (or a date earlier than the curve itself starts)
     means "from the very beginning" - the curve's own first value.
 
-    Shared by the Dashboard's Account Performance tiles, its Equity
-    Curve chart, and goals.py's Equity Growth tracking (see
-    goals._make_mark_to_market_pl_since()), so all three read a given
+    Shared by the Dashboard's Account Performance tiles and its Equity
+    Curve chart, so both read a given
     window's gain exactly the same way and can never disagree about it
     - a real bug this fixes: Account Performance used to compute YTD
     with a different formula than the Equity Curve chart's own YTD line

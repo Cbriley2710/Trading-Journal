@@ -6,7 +6,7 @@ Analyzer.py's guided Review Session) and emails it - the same idea as
 daily_report.py, just covering a batch of CLOSED trades reviewed
 together instead of "today's" open positions/watchlist. Reads exactly
 what database.get_review_report() already returns (the same data the
-Logbook page's Trade Reviews section browses), assembled into one file.
+Past Review Reports browser shows), assembled into one file.
 
 Landscape, dark-themed, same shared report_utils.py pieces
 (get_secret/safe_text/hex_to_rgb) daily_report.py uses - the actual
@@ -107,7 +107,7 @@ def _write_trade_review_page(pdf, review, jan1_balance):
     divides this trade's profit_loss by - see trade_stats()'s own
     docstring for why; left off the stats line entirely if it hasn't
     been set yet, same as the other two places this same math is shown
-    (Trade Analyzer, Logbook)."""
+    (Trade Analyzer, review_browser.py)."""
     pdf.add_page()
     short_tag = " (Short)" if review["direction"] == "SHORT" else ""
 
@@ -367,7 +367,7 @@ def send_review_report_email(pdf_bytes, report):
 def generate_and_send_review_report(conn, report_id):
     """
     Builds and emails one Trade Review Report, then records it as sent
-    (see database.mark_review_report_sent()) so the Logbook page's
+    (see database.mark_review_report_sent()) so the Past Review Reports
     status caption reflects it. Never raises - returns (success,
     message), same contract as daily_report.generate_and_send_report().
     """

@@ -3,7 +3,7 @@ Timeutil
 =====================
 A trading journal should agree with you about what day/time it is -
 but the server this app runs on (Streamlit Community Cloud, and the
-separate GitHub Actions runner nightly_archive.py runs on) has no
+separate GitHub Actions runner the scheduled jobs run on) has no
 particular reason to be set to your timezone. Both default to UTC,
 which is several hours ahead of US Eastern - enough that in the
 evening the server can already think it's "tomorrow" while it's still
@@ -51,7 +51,7 @@ def expected_last_trading_day():
 
     Used to tag and check the persistent price cache (see charting.py's
     warm_price_cache_for_symbol()/_daily_history_from_cache() and
-    database.clear_stale_price_cache(), called from nightly_archive.py)
+    database.clear_stale_price_cache(), called from warm_price_cache.py)
     by the TRADING DAY the cached data actually covers, rather than by
     whatever calendar day happens to be "today" the instant a scheduled
     job executes. That distinction matters because GitHub Actions
@@ -70,15 +70,11 @@ def expected_last_trading_day():
     Also rolls back a calendar day BEFORE the weekend check whenever
     it's still early morning (before the market could plausibly have
     opened, let alone closed, today) - this is what makes
-    nightly_archive.py's ~midnight-to-1am GitHub Actions run correctly
-    target the trading day that just finished, rather than the brand
-    new calendar day it's already rolled over into by the time it
-    executes. A real bug found in production: that job archives each
-    ticker's chart under whatever day THIS function returns, and
-    without this adjustment it was archiving under a day that hadn't
-    traded yet (Yahoo Finance had no close for it at all), while the
-    actual just-finished trading day's own Logbook entry never got
-    revisited/fixed by this nightly "safety net" run at all.
+    a ~midnight-to-1am GitHub Actions run correctly target the trading
+    day that just finished, rather than the brand new calendar day it's
+    already rolled over into by the time it executes (a real production
+    bug back when a nightly job tagged each day's data by whatever day
+    THIS function returned).
     """
     now = now_eastern()
     reference_date = now.date()
@@ -98,12 +94,6 @@ def is_journaling_day(day):
     instead, and there's no Saturday session to journal about). True
     for every other day, Sunday included, since a Sunday entry is where
     Friday's session actually gets covered.
-
-    This is the SAME Friday/Saturday exclusion goals.py's own
-    _daily_journal_pct() already uses when counting which days count
-    toward the "Daily Journal %" goal - kept here as one shared
-    definition so a future change to which days get excluded only has
-    to happen in one place.
     """
     return day.weekday() not in (4, 5)  # Friday=4, Saturday=5
 
@@ -126,36 +116,3 @@ def last_journaling_day(day):
         d -= timedelta(days=1)
     return d
 
-
-def today_market_has_closed():
-    """
-    True once today's regular trading session has closed - False on a
-    weekend (nothing closes "today" specifically) or any time before
-    4:30pm Eastern on a weekday. The 30-minute buffer past the literal
-    4:00pm close matches this project's other post-close jobs (see
-    warm_price_cache.py's own ~4:30pm ET schedule) - Yahoo Finance's
-    own data isn't necessarily finalized the instant the closing bell
-    rings.
-
-    NOT the same question expected_last_trading_day() answers (that
-    one seriously means "which trading day should already have SOME
-    completed close, treating an in-progress today as not it yet" -
-    used for cache freshness, where a live in-progress "today" IS
-    valid/wanted during market hours). This one exists specifically
-    for nightly_archive.py's automatic Logbook archiving: even once
-    expected_last_trading_day() resolves to today (any time from
-    9:30am on), Yahoo Finance already has A row for today the whole
-    time the market's open - live-updating, not finalized - so the
-    existing "does the data reach the target day" completeness check
-    in charting.build_archive_snapshot() can't tell "today, still
-    trading" apart from "today, actually closed" on its own. A real
-    bug found in production: GitHub Actions' scheduling delay landed
-    this job at 10:48am ET one day, well after 9:30am, so it archived
-    every tracked ticker's chart using that morning's still-forming
-    candle as if it were the day's final one - hours before the
-    session was actually over.
-    """
-    now = now_eastern()
-    if now.weekday() >= 5:
-        return False
-    return (now.hour, now.minute) >= (16, 30)

@@ -1,7 +1,6 @@
 name: SnapTrade Sync
 
-# Runs snaptrade_daily_sync.py on a schedule, separate from the
-# Nightly Archive workflow - see that script's own notes for why.
+# Runs snaptrade_daily_sync.py on a schedule.
 #
 # Fires TWICE a day (20:01 and 21:01 UTC, roughly bracketing 4:01pm US
 # Eastern across both EST and EDT) purely for redundancy against

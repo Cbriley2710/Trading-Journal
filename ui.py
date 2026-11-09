@@ -175,9 +175,7 @@ def parse_ticker_input(text):
     spaces, tabs, or new lines between tickers - however it was copied)
     into a clean, de-duplicated list of uppercase symbols, keeping the
     order they were typed. Shared by the Shortlist page's watchlist-add
-    box and the Screener page's ticker list - moved here (rather than
-    living only on Shortlist, where it started) once a second page
-    needed the exact same parsing.
+    box - kept in ui.py so any page can reuse the exact same parsing.
     """
     symbols = []
     for part in text.replace(",", " ").split():

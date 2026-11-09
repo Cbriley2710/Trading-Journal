@@ -20,7 +20,7 @@ def get_secret(key):
     environment variable - the same dual lookup
     database._get_database_url() uses, needed here too since report
     code runs both inside Streamlit (a page's button) and inside plain
-    scripts (nightly_archive.py, run by GitHub Actions with no
+    scripts (run by GitHub Actions with no
     st.secrets file)."""
     try:
         return st.secrets[key]
