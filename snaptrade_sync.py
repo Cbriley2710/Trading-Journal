@@ -358,6 +358,11 @@ def fetch_activities(start_date, end_date):
                     "price": float(row["price"]),
                     "quantity": abs(float(row["units"])),
                     "source": "snaptrade",
+                    # The broker's own account number (SnapTrade calls it
+                    # "number") - database.import_transactions_snaptrade()
+                    # only keeps it if it matches an account already
+                    # registered from a CSV import.
+                    "account": account.get("number"),
                 })
 
             if len(rows) < 1000:

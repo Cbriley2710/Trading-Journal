@@ -158,9 +158,56 @@ def load_transactions(filename):
                 "price": float(price),
                 "quantity": abs(float(quantity)),
                 "source": "csv",
+                # Only present in Fidelity's multi-account export
+                # ("Accounts_History.csv"); a single-account file has
+                # neither column, so these are None (= "unassigned" -
+                # see database.py's UNASSIGNED note).
+                "account": (row.get("Account Number") or "").strip() or None,
+                "account_name": (row.get("Account") or "").strip() or None,
             })
 
     return transactions
+
+
+def load_deposits(filename):
+    """
+    Pulls the cash deposits and withdrawals out of a Fidelity export:
+    every wire transfer or electronic funds transfer row ("WIRE
+    TRANSFER FROM BANK", "Electronic Funds Transfer Received",
+    "...Paid", "WIRE TRANSFER TO BANK"). The row's Amount is already
+    signed (negative = money leaving the account).
+
+    Returns [{"date": date, "amount": float, "account": number or
+    None, "account_name": label or None}]. Dividends, interest and
+    trades are ignored. Only Fidelity exports are read (a Schwab file
+    returns []).
+    """
+    deposits = []
+    with open(filename, newline="", encoding="utf-8-sig") as csv_file:
+        reader = csv.reader(csv_file)
+        header_row = None
+        for row in reader:
+            if row and row[0] == "Run Date":
+                header_row = row
+                break
+        if header_row is None:
+            return deposits
+
+        for row in csv.DictReader(csv_file, fieldnames=header_row):
+            action = (row.get("Action") or "").strip().upper()
+            if not ("WIRE TRANSFER" in action or "ELECTRONIC FUNDS TRANSFER" in action):
+                continue
+            run_date = (row.get("Run Date") or "").strip()
+            amount = (row.get("Amount ($)") or "").strip()
+            if not run_date or not amount:
+                continue
+            deposits.append({
+                "date": datetime.strptime(run_date, "%m/%d/%Y").date(),
+                "amount": float(amount),
+                "account": (row.get("Account Number") or "").strip() or None,
+                "account_name": (row.get("Account") or "").strip() or None,
+            })
+    return deposits
 
 
 def find_csv_file_schwab():
@@ -596,6 +643,21 @@ def trade_label(trade):
         f"{trade['symbol']}{short_tag}: {trade['entry_date']:%m/%d/%Y} to "
         f"{trade['date']:%m/%d/%Y} ({sign}${trade['profit_loss']:,.2f})"
     )
+
+
+def is_trade_journaled(trade, reviewed_exact, reviewed_loose):
+    """
+    Whether a closed trade has a saved review in any Review Session.
+    `reviewed_exact`/`reviewed_loose` are what
+    database.get_reviewed_trade_keys() returns. Matches on the trade's
+    natural-key fields (never trades.id - see trade_reviews' schema
+    comment in database.py); numbers are rounded to 6 places so a float
+    round-trip can't cause a false "not journaled".
+    """
+    key = (
+        trade["symbol"], trade["entry_date"].date(), trade["date"].date(), trade["direction"],
+        round(float(trade["quantity"]), 6), round(float(trade["buy_price"]), 6), round(float(trade["sell_price"]), 6))
+    return key in reviewed_exact or key[:4] in reviewed_loose
 
 
 def trade_stats(direction, buy_price, sell_price, quantity, profit_loss, entry_date, exit_date, account_value=None):

@@ -45,9 +45,10 @@ import database
 import nav
 import review_browser
 import session_keys as sk
+import monthly_review
 import twitter_post
 import ui
-from analyze_trades import review_session_summary, trade_label, trade_stats
+from analyze_trades import is_trade_journaled, review_session_summary, trade_label, trade_stats
 
 st.set_page_config(page_title="Trade Analyzer", page_icon="📈", layout="wide", initial_sidebar_state="collapsed")
 
@@ -76,7 +77,7 @@ TRADE_REVIEW_TAGS = [
 
 def load_trades():
     conn = database.get_connection()
-    return database.get_trades(conn)
+    return database.get_trades(conn, nav.selected_account())
 
 
 def fact_tile(column, label, value, color=None):
@@ -101,7 +102,7 @@ def render_trade_facts(conn, trade):
     stats = trade_stats(
         trade["direction"], trade["buy_price"], trade["sell_price"], trade["quantity"],
         trade["profit_loss"], trade["entry_date"].date(), trade["date"].date(),
-        account_value=database.get_account_value(conn),
+        account_value=database.get_account_value(conn, database.account_for_trade(trade)),
     )
     outcome_color = charting.win_loss_color(trade["profit_loss"] >= 0)
 
@@ -952,13 +953,29 @@ def render_review_selection(conn, trades):
         st.rerun()
 
 
-def _is_journaled(trade, reviewed_exact, reviewed_loose):
-    """Whether this closed trade has a saved review in any Review Session
-    (see database.get_reviewed_trade_keys() for the exact/loose sets)."""
-    key = (
-        trade["symbol"], trade["entry_date"].date(), trade["date"].date(), trade["direction"],
-        round(float(trade["quantity"]), 6), round(float(trade["buy_price"]), 6), round(float(trade["sell_price"]), 6))
-    return key in reviewed_exact or key[:4] in reviewed_loose
+def render_monthly_review_banner(trades, reviewed_exact, reviewed_loose):
+    """
+    A reminder, shown above the trade table, to review last month's
+    trades - only while last month still has closed trades with no
+    saved review (see monthly_review.py; the same check drives the
+    reminder email sent on the 1st). The button jumps straight into the
+    Review Session's selection screen with that month's date range
+    already filled in and every trade checked.
+    """
+    pending = monthly_review.pending_for_previous_month(trades, reviewed_exact, reviewed_loose)
+    if pending is None:
+        return
+    month_start, month_trades, unreviewed = pending
+    message_col, button_col = st.columns([4, 1])
+    message_col.warning(
+        f"Time to review {month_start:%B %Y}: {len(unreviewed)} of its {len(month_trades)} closed "
+        "trade(s) haven't been journaled yet.")
+    if button_col.button(f"Review {month_start:%B}", type="primary", key="monthly_review_banner_btn"):
+        exit_dates = [t["date"].date() for t in month_trades]
+        st.session_state[sk.REVIEW_DATE_RANGE] = (min(exit_dates), max(exit_dates))
+        st.session_state[sk.REVIEW_PRECHECK] = True
+        st.session_state[sk.REVIEW_SELECTING] = True
+        st.rerun()
 
 
 def render_trade_table(conn, trades, reviewed_exact, reviewed_loose):
@@ -970,14 +987,20 @@ def render_trade_table(conn, trades, reviewed_exact, reviewed_loose):
     (the first row is selected until you click another); returns the
     selected trade dict. Column headers sort the table.
     """
-    account_value = database.get_account_value(conn)
+    # Each trade is divided by ITS OWN account's Jan 1 balance.
+    balances = {}
+    account_names = {a["number"]: a["name"] for a in database.get_accounts(conn)}
 
     rows = []
     for t in trades:
+        acct = database.account_for_trade(t)
+        if acct not in balances:
+            balances[acct] = database.get_account_value(conn, acct)
         stats = trade_stats(
             t["direction"], t["buy_price"], t["sell_price"], t["quantity"], t["profit_loss"],
-            t["entry_date"].date(), t["date"].date(), account_value=account_value)
+            t["entry_date"].date(), t["date"].date(), account_value=balances[acct])
         rows.append({
+            "Account": account_names.get(t["account"], "Unassigned"),
             "Symbol": t["symbol"] + (" (Short)" if stats["is_short"] else ""),
             "Entry Date": t["entry_date"].date(),
             "Exit Date": t["date"].date(),
@@ -989,7 +1012,7 @@ def render_trade_table(conn, trades, reviewed_exact, reviewed_loose):
             "Days Held": stats["days_held"],
             "Entry % of Acct": stats["pct_of_account"],
             "Equity Contrib. %": stats["equity_contribution"],
-            "Journaled": "✓ Journaled" if _is_journaled(t, reviewed_exact, reviewed_loose) else "Not yet",
+            "Journaled": "✓ Journaled" if is_trade_journaled(t, reviewed_exact, reviewed_loose) else "Not yet",
         })
     df = pd.DataFrame(rows)
 
@@ -1096,6 +1119,9 @@ else:
         review_browser.render_past_reviews(conn)
     st.divider()
 
+    reviewed_exact, reviewed_loose = database.get_reviewed_trade_keys(conn)
+    render_monthly_review_banner(trades, reviewed_exact, reviewed_loose)
+
     trades_sorted = sorted(trades, key=lambda t: t["date"], reverse=True)
 
     entry_dates = [t["entry_date"].date() for t in trades_sorted]
@@ -1113,7 +1139,6 @@ else:
 
     journaled_filter = filter_cols[2].selectbox(
         "Journaled", ["All", "Not journaled", "Journaled"], key="trade_analyzer_journaled_filter")
-    reviewed_exact, reviewed_loose = database.get_reviewed_trade_keys(conn)
 
     # date_input in range mode returns a single date until both ends
     # have been picked - only filter once we actually have a (start,
@@ -1127,7 +1152,7 @@ else:
 
     if journaled_filter != "All":
         want_journaled = journaled_filter == "Journaled"
-        trades_sorted = [t for t in trades_sorted if _is_journaled(t, reviewed_exact, reviewed_loose) == want_journaled]
+        trades_sorted = [t for t in trades_sorted if is_trade_journaled(t, reviewed_exact, reviewed_loose) == want_journaled]
 
     if not trades_sorted:
         st.info("No trades match these filters.")

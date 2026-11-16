@@ -55,7 +55,8 @@ def position_label(position):
 
 
 conn = database.get_connection()
-positions = database.get_open_positions(conn)
+account = nav.selected_account()  # see nav.py's account selector (None = all accounts)
+positions = database.get_open_positions(conn, account)
 stops = database.get_all_stop_losses(conn)
 ma_defaults = database.get_strategy_settings(conn)
 # One query for every position's MA settings instead of one per position
@@ -68,11 +69,11 @@ all_ma_settings = database.get_all_position_ma_settings(conn, ma_defaults)
 # and realized P/L, plus open positions' unrealized P/L below once it's
 # known - so the Cash bar and % of account figures further down reflect
 # an actually-maintained account value instead of a stale typed-in one.
-jan1_balance = database.get_account_value(conn)
-deposits = database.get_deposits(conn)
+jan1_balance = database.get_account_value(conn, account)
+deposits = database.get_deposits(conn, account)
 jan1_date = date(timeutil.today_eastern().year, 1, 1)
 deposits_this_year = sum(d["amount"] for d in deposits if d["deposit_date"] >= jan1_date)
-realized_pl_this_year = database.get_realized_pl_since(conn, jan1_date)
+realized_pl_this_year = database.get_realized_pl_since(conn, jan1_date, account)
 account_value = (jan1_balance + deposits_this_year + realized_pl_this_year) if jan1_balance else None
 
 # --- Gather live data for every open position ---------------------------

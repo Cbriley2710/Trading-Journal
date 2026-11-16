@@ -62,6 +62,9 @@ nav.render_top_nav("dashboard")
 st.title("Trading Journal Dashboard")
 
 conn = database.get_connection()
+# Which account(s) this whole page covers - see nav.py's account selector
+# (None = all accounts combined).
+account = nav.selected_account()
 
 # --- Calculated account value --------------------------------------------
 # Rather than needing the actual current account value typed in and kept
@@ -72,15 +75,15 @@ conn = database.get_connection()
 # this page are shown as a % of this calculated value. The actual math
 # lives in charting.get_calculated_account_value() now, not
 # duplicated here.
-jan1_balance = database.get_account_value(conn)
-deposits = database.get_deposits(conn)
+jan1_balance = database.get_account_value(conn, account)
+deposits = database.get_deposits(conn, account)
 jan1_date = date(timeutil.today_eastern().year, 1, 1)
 deposits_this_year = sum(d["amount"] for d in deposits if d["deposit_date"] >= jan1_date)
-realized_pl_this_year = database.get_realized_pl_since(conn, jan1_date)
+realized_pl_this_year = database.get_realized_pl_since(conn, jan1_date, account)
 
 if jan1_balance:
     with st.spinner("Fetching current prices for account value..."):
-        account_value = charting.get_calculated_account_value(conn)
+        account_value = charting.get_calculated_account_value(conn, account)
     # Backed out of account_value rather than re-fetching live prices a
     # second time - get_calculated_account_value()'s own math is
     # exactly jan1_balance + deposits_this_year + realized_pl_this_year
@@ -99,7 +102,7 @@ def load_trades():
     DataFrame (a table you can filter/sort/summarize easily), reusing
     database.get_trades() from Phase 1 - no separate data-loading logic."""
     conn = database.get_connection()
-    trades = database.get_trades(conn)
+    trades = database.get_trades(conn, account)
     return pd.DataFrame(trades)
 
 
@@ -131,7 +134,7 @@ if trades_df.empty:
 # sections below - for the shared fix to that second part.
 full_curve_pl = None
 if jan1_balance:
-    all_open_positions = database.get_open_positions(conn)
+    all_open_positions = database.get_open_positions(conn, account)
     full_start = trades_df["entry_date"].min().normalize()
     today_ts = pd.Timestamp(timeutil.today_eastern())
     full_daily_index = pd.date_range(start=full_start, end=today_ts, freq="D")
@@ -437,7 +440,7 @@ if "Equity Allocation" in visible_sections:
     if not account_value:
         st.info("Set your account value above to see equity allocation across open positions.")
     else:
-        open_positions = database.get_open_positions(conn)
+        open_positions = database.get_open_positions(conn, account)
         if not open_positions:
             st.info(
                 "No open positions right now. A ticker shows up here as soon as "
@@ -614,14 +617,27 @@ with st.expander("Account Settings"):
         "and trading P/L build up from there automatically, so this doesn't "
         "need to be kept up to date by hand."
     )
-    new_jan1_balance = st.number_input(
-        "Account Value as of Jan 1 ($)", min_value=0.0, value=jan1_balance or 0.0,
-        step=100.0, format="%.2f", key="jan1_balance_input",
-    )
-    if st.button("Save Jan 1 Value"):
-        database.set_account_value(conn, new_jan1_balance)
-        st.success(f"Jan 1 account value saved at ${new_jan1_balance:,.2f}.")
-        st.rerun()
+    if account is None:
+        # Editing needs ONE account to write to - the combined view only
+        # shows each account's saved baseline.
+        account_names = {a["number"]: a["name"] for a in database.get_accounts(conn)}
+        st.info(
+            "Pick a specific account in the Account selector at the top of the page "
+            "to edit its Jan 1 balance and add deposits/withdrawals to it."
+        )
+        for number, name in [(n, account_names[n]) for n in account_names] + [(database.UNASSIGNED, "Unassigned")]:
+            balance = database.get_account_value(conn, number)
+            if balance is not None:
+                st.write(f"{name}: Jan 1 balance ${balance:,.2f}")
+    else:
+        new_jan1_balance = st.number_input(
+            "Account Value as of Jan 1 ($)", min_value=0.0, value=jan1_balance or 0.0,
+            step=100.0, format="%.2f", key=f"jan1_balance_input_{account}",
+        )
+        if st.button("Save Jan 1 Value"):
+            database.set_account_value(conn, new_jan1_balance, account)
+            st.success(f"Jan 1 account value saved at ${new_jan1_balance:,.2f}.")
+            st.rerun()
 
     if jan1_balance:
         st.caption(
@@ -641,20 +657,21 @@ with st.expander("Account Settings"):
         )
 
     st.header("Deposits & Withdrawals")
-    st.caption("Enter a positive amount for a deposit, or a negative amount for a withdrawal.")
-    deposit_cols = st.columns([1, 1, 1])
-    deposit_amount = deposit_cols[0].number_input(
-        "Amount ($, negative = withdrawal)", step=100.0, format="%.2f", key="deposit_amount_input")
-    deposit_date = deposit_cols[1].date_input("Date", value=timeutil.today_eastern(), key="deposit_date_input")
-    deposit_cols[2].write("")  # vertical spacer so the button lines up with the inputs above
-    if deposit_cols[2].button("Add"):
-        if deposit_amount != 0:
-            database.add_deposit(conn, deposit_date, deposit_amount)
-            action = "Deposit" if deposit_amount > 0 else "Withdrawal"
-            st.success(f"{action} of ${abs(deposit_amount):,.2f} on {deposit_date:%m/%d/%Y} added.")
-            st.rerun()
-        else:
-            st.warning("Enter an amount other than $0.")
+    if account is not None:
+        st.caption("Enter a positive amount for a deposit, or a negative amount for a withdrawal.")
+        deposit_cols = st.columns([1, 1, 1])
+        deposit_amount = deposit_cols[0].number_input(
+            "Amount ($, negative = withdrawal)", step=100.0, format="%.2f", key="deposit_amount_input")
+        deposit_date = deposit_cols[1].date_input("Date", value=timeutil.today_eastern(), key="deposit_date_input")
+        deposit_cols[2].write("")  # vertical spacer so the button lines up with the inputs above
+        if deposit_cols[2].button("Add"):
+            if deposit_amount != 0:
+                database.add_deposit(conn, deposit_date, deposit_amount, account)
+                action = "Deposit" if deposit_amount > 0 else "Withdrawal"
+                st.success(f"{action} of ${abs(deposit_amount):,.2f} on {deposit_date:%m/%d/%Y} added.")
+                st.rerun()
+            else:
+                st.warning("Enter an amount other than $0.")
 
     if deposits:
         for d in sorted(deposits, key=lambda d: d["deposit_date"], reverse=True):

@@ -50,6 +50,12 @@ APPLIED_MONTH_CHOICE = "_applied_month_choice"
 REVIEW_DATE_RANGE = "review_date_range"
 REVIEW_PRECHECK = "_review_precheck"
 
+# Which brokerage account every page is showing (see nav.py's account
+# selector): None = all accounts combined, database.UNASSIGNED, or one
+# account number. Stored under its own key (not just the selectbox's
+# widget key) so the choice survives switching pages.
+SELECTED_ACCOUNT = "selected_account"
+
 # Open Positions page
 SCROLL_TO_POSITIONS_ANCHOR = "_scroll_to_positions_anchor"
 

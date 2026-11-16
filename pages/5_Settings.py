@@ -175,6 +175,30 @@ st.caption(
 
 ui.render_csv_import_widget(conn, key="settings")
 
+st.subheader("Accounts")
+st.caption(
+    "Every brokerage account found in a multi-account Fidelity export "
+    "(Accounts_History.csv) gets tracked separately - pick one in the "
+    "Account selector at the top of any page. Trades imported before "
+    "accounts existed show as Unassigned until you re-import an export "
+    "that contains them. Rename an account here if you'd like a different "
+    "label."
+)
+accounts = database.get_accounts(conn)
+if not accounts:
+    st.info("No accounts yet - they appear after you import a multi-account export.")
+for account_row in accounts:
+    name_cols = st.columns([2, 2, 1])
+    new_name = name_cols[0].text_input(
+        f"Name for account ending {account_row['number'][-4:]}", value=account_row["name"],
+        key=f"account_name_{account_row['number']}")
+    name_cols[1].write("")
+    if new_name.strip() and new_name.strip() != account_row["name"] and name_cols[2].button(
+            "Save", key=f"save_account_name_{account_row['number']}"):
+        database.rename_account(conn, account_row["number"], new_name.strip())
+        nav.clear_account_choices_cache()
+        st.rerun()
+
 st.divider()
 
 st.header("Price Cache")

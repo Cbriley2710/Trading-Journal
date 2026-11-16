@@ -20,6 +20,7 @@ import streamlit.components.v1 as components
 import analyze_trades
 import charting
 import database
+import nav
 import position_sizing
 import timeutil
 
@@ -237,7 +238,8 @@ def render_csv_import_widget(conn, key):
 
     try:
         with st.spinner("Importing transactions..."):
-            new_count = database.import_transactions(conn, tmp_path)
+            import_stats = {}
+            new_count = database.import_transactions(conn, tmp_path, import_stats)
             trade_count = database.rebuild_trades(conn)
     except ValueError:
         # detect_csv_source() raises this when the file isn't a
@@ -251,9 +253,14 @@ def render_csv_import_widget(conn, key):
         )
     else:
         database.record_csv_upload(conn, timeutil.now_eastern())
+        nav.clear_account_choices_cache()
         st.success(
             f"Imported {new_count} new transaction row(s). "
             f"{trade_count} completed stock trade(s) total in the database."
+            + (f" {import_stats['adopted']} existing row(s) were assigned to their account."
+               if import_stats.get("adopted") else "")
+            + (f" {import_stats['deposits']} new deposit/withdrawal(s) found."
+               if import_stats.get("deposits") else "")
         )
     finally:
         tmp_path.unlink(missing_ok=True)

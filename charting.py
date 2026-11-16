@@ -833,14 +833,16 @@ def fetch_earnings_dates_in_range(symbol, start_date, end_date):
     return sorted(d.date() for d in index if start_date <= d.date() <= end_date)
 
 
-def get_calculated_account_value(conn):
+def get_calculated_account_value(conn, account=None):
     """
     Today's account value, built up from the Jan 1 baseline (database.
     get_account_value()) plus everything that's happened since:
     deposits, closed-trade P/L, and every open position's unrealized
     P/L right now - rather than needing the real number typed in and
     kept up to date by hand. Returns None if no Jan 1 baseline has been
-    set yet (database.set_account_value()).
+    set yet (database.set_account_value()). `account` (None = all
+    accounts combined, database.UNASSIGNED, or one account number)
+    limits every part of the calculation to that account.
 
     Extracted from what used to be dashboard.py's own inline
     calculation (its Account Performance section).
@@ -850,17 +852,17 @@ def get_calculated_account_value(conn):
     prices this app doesn't track - see project notes on why a true
     historical account-value curve isn't built yet).
     """
-    jan1_balance = database.get_account_value(conn)
+    jan1_balance = database.get_account_value(conn, account)
     if not jan1_balance:
         return None
 
     jan1_date = date(timeutil.today_eastern().year, 1, 1)
-    deposits = database.get_deposits(conn)
+    deposits = database.get_deposits(conn, account)
     deposits_this_year = sum(d["amount"] for d in deposits if d["deposit_date"] >= jan1_date)
-    realized_pl_this_year = database.get_realized_pl_since(conn, jan1_date)
+    realized_pl_this_year = database.get_realized_pl_since(conn, jan1_date, account)
 
     total_unrealized_pl_now = 0.0
-    for position in database.get_open_positions(conn):
+    for position in database.get_open_positions(conn, account):
         current_price = fetch_latest_price(position["symbol"])
         if current_price is None:
             continue

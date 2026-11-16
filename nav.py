@@ -20,6 +20,7 @@ import base64
 import streamlit as st
 
 import database
+import session_keys as sk
 
 # (stable page id, default label shown on its button, file path Streamlit
 # needs for switch_page). "dashboard" is the main entry script
@@ -109,6 +110,48 @@ def _apply_background():
     )
 
 
+@st.cache_data(ttl=30, show_spinner=False)
+def _load_account_choices():
+    """Cached read of the account selector's options (see database.
+    get_account_choices()) - render_top_nav() runs on every rerun of
+    every page, so this avoids a few small queries each time."""
+    return database.get_account_choices(database.get_connection())
+
+
+def clear_account_choices_cache():
+    """Call right after an import so a newly-discovered account shows in
+    the selector immediately instead of after the cache's 30s TTL."""
+    _load_account_choices.clear()
+
+
+def selected_account():
+    """The account the selector currently points at, in the form every
+    database read function takes as `account`: None for all accounts
+    combined, database.UNASSIGNED, or one account number. Call this
+    AFTER render_top_nav() on a page, so it reflects a change made on
+    this very run."""
+    return st.session_state.get(sk.SELECTED_ACCOUNT)
+
+
+def _render_account_selector():
+    """A small "Account" dropdown under the nav buttons - hidden until at
+    least one account is known (no multi-account import yet), so a
+    single-account setup looks exactly like before."""
+    choices = _load_account_choices()
+    if len(choices) < 2:
+        return
+    values = [value for value, _label in choices]
+    labels = dict(choices)
+    current = st.session_state.get(sk.SELECTED_ACCOUNT)
+    if current not in values:
+        current = None
+    label_col, picker_col, _spacer = st.columns([1, 3, 8])
+    label_col.markdown("**Account**")
+    st.session_state[sk.SELECTED_ACCOUNT] = picker_col.selectbox(
+        "Account", values, index=values.index(current), format_func=lambda v: labels[v],
+        label_visibility="collapsed", key="account_picker")
+
+
 def render_top_nav(current_page):
     """
     Call this once near the top of every page, right after the password
@@ -179,4 +222,5 @@ def render_top_nav(current_page):
             elif col.button(label, width="stretch", key=f"nav_btn_{page_id}"):
                 st.switch_page(path)
 
+    _render_account_selector()
     st.divider()

@@ -448,7 +448,7 @@ def position_label(position):
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def _cached_account_value():
+def _cached_account_value(account=None):
     """
     A short-lived cache around charting.get_calculated_account_value(),
     which loops EVERY open position and fetches each one's current price
@@ -461,7 +461,7 @@ def _cached_account_value():
     whole session, short enough that "% of Account" is never meaningfully
     stale.
     """
-    return charting.get_calculated_account_value(database.get_connection())
+    return charting.get_calculated_account_value(database.get_connection(), account)
 
 
 def render_position_stats(position, conn):
@@ -488,7 +488,7 @@ def render_position_stats(position, conn):
     pct_of_account = None
     unrealized_color = None
     if current_price is not None:
-        returns = charting.open_position_returns(position, current_price, _cached_account_value())
+        returns = charting.open_position_returns(position, current_price, _cached_account_value(nav.selected_account()))
         unrealized_pl = returns["unrealized_pl"]
         pct_change = returns["pct_change"]
         pct_of_account = returns["pct_of_account"]
@@ -550,7 +550,7 @@ def render_lists_section(conn):
 
     names = database.get_watchlist_names(conn)
     watchlist = database.get_watchlist(conn)
-    positions = database.get_open_positions(conn)
+    positions = database.get_open_positions(conn, nav.selected_account())
     positions_by_symbol = {p["symbol"]: p for p in positions}
 
     # A message from the previous button click (add/remove), stashed in
@@ -749,7 +749,7 @@ def build_journal_queue(conn, list_ids=None):
     seen_symbols = set()
 
     if list_ids is None or 5 in list_ids:
-        for position in database.get_open_positions(conn):
+        for position in database.get_open_positions(conn, nav.selected_account()):
             is_short = position["direction"] == "SHORT"
             queue.append({
                 "symbol": position["symbol"],
@@ -1045,7 +1045,7 @@ def render_journal_list_selection(conn):
     st.caption("Pick which lists to include in today's session - uncheck any you want to skip.")
 
     watchlist = database.get_watchlist(conn)
-    open_position_count = len(database.get_open_positions(conn))
+    open_position_count = len(database.get_open_positions(conn, nav.selected_account()))
     watchlist_names = database.get_watchlist_names(conn)
 
     checked_list_ids = []

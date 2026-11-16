@@ -66,6 +66,7 @@ import snaptrade_sync
 import timeutil
 from analyze_trades import (
     detect_csv_source,
+    load_deposits,
     load_transactions,
     load_transactions_schwab,
     match_trades_lifo,
@@ -199,6 +200,35 @@ def init_db(conn):
     # rows stay at midnight regardless of this column's type.
     if _column_type(cur, "transactions", "date") == "date":
         cur.execute("ALTER TABLE transactions ALTER COLUMN date TYPE TIMESTAMP")
+    # Which brokerage account a transaction belongs to (Fidelity's
+    # "Account Number" column from a multi-account export) - NULL means
+    # "unassigned": every row imported before accounts were tracked, or
+    # from an export that doesn't say (a single-account file, Schwab).
+    # An unassigned row gets claimed by the right account the next time
+    # a multi-account export containing that same fill is imported (see
+    # _insert_transactions()'s "adopt" step).
+    if not _column_exists(cur, "transactions", "account"):
+        cur.execute("ALTER TABLE transactions ADD COLUMN account TEXT")
+    # The old UNIQUE (date, symbol, action, price, quantity) would have
+    # treated the SAME fill in two different accounts as one duplicate -
+    # replaced by a unique index that also includes the account
+    # (COALESCE so two unassigned rows still collide like before).
+    # `ON CONFLICT DO NOTHING` in _insert_transactions() works with it.
+    cur.execute("ALTER TABLE transactions DROP CONSTRAINT IF EXISTS transactions_date_symbol_action_price_quantity_key")
+    cur.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS transactions_unique_fill
+        ON transactions (date, symbol, action, price, quantity, (COALESCE(account, '')))
+    """)
+    # Every brokerage account seen in an import: its number (the
+    # Fidelity "Account Number") and a display name (starts as Fidelity's
+    # own "Account" label like "Individual" or "ROTH" - renameable on
+    # the Settings page).
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS accounts (
+            account_number TEXT PRIMARY KEY,
+            name TEXT NOT NULL
+        )
+    """)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS trades (
             id SERIAL PRIMARY KEY,
@@ -223,6 +253,10 @@ def init_db(conn):
         cur.execute("""
             ALTER TABLE trades ADD COLUMN direction TEXT NOT NULL DEFAULT 'LONG'
         """)
+    # Same account tag as transactions.account above - rebuild_trades()
+    # matches buys to sells separately within each account.
+    if not _column_exists(cur, "trades", "account"):
+        cur.execute("ALTER TABLE trades ADD COLUMN account TEXT")
     # Same DATE->TIMESTAMP widening as transactions.date above, and for
     # the same reason - rebuild_trades() carries entry_date/exit_date
     # straight through from a transaction's own timestamp, so `trades`
@@ -354,6 +388,24 @@ def init_db(conn):
             CONSTRAINT single_row CHECK (id = 1)
         )
     """)
+    # The Jan 1 starting balance, one row PER ACCOUNT (this replaces the
+    # old single-row account_settings table, which is left in place but
+    # no longer read). account = '' is the "unassigned" bucket - the
+    # old single balance is copied there once, below, so nothing is lost.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS account_balances (
+            account TEXT PRIMARY KEY,
+            jan1_balance DOUBLE PRECISION NOT NULL,
+            updated_at TIMESTAMP
+        )
+    """)
+    cur.execute("SELECT 1 FROM account_balances LIMIT 1")
+    if cur.fetchone() is None:
+        cur.execute("""
+            INSERT INTO account_balances (account, jan1_balance, updated_at)
+            SELECT '', account_value, updated_at FROM account_settings
+            WHERE id = 1 AND account_value IS NOT NULL
+        """)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS daily_reports (
             report_date DATE PRIMARY KEY,
@@ -387,6 +439,10 @@ def init_db(conn):
             amount DOUBLE PRECISION NOT NULL
         )
     """)
+    # Which account a deposit/withdrawal went into (NULL = unassigned,
+    # same convention as transactions.account).
+    if not _column_exists(cur, "deposits", "account"):
+        cur.execute("ALTER TABLE deposits ADD COLUMN account TEXT")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS chart_drawings (
             id SERIAL PRIMARY KEY,
@@ -667,10 +723,90 @@ def init_db(conn):
             CONSTRAINT single_row CHECK (id = 1)
         )
     """)
+    # One row per month a "review last month's trades" reminder email
+    # was sent for (month_start = that month's 1st) - so re-running the
+    # scheduled job, or triggering it by hand, never sends the same
+    # month's reminder twice. See monthly_review.py.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS monthly_review_reminders (
+            month_start DATE PRIMARY KEY,
+            sent_at TIMESTAMP NOT NULL
+        )
+    """)
     conn.commit()
 
 
-def _insert_transactions(conn, transactions):
+# --- Accounts ------------------------------------------------------------
+# A page's account selector (see nav.py) is one of three things, passed
+# as `account` to the read functions below:
+#   None        -> every account combined ("All accounts")
+#   UNASSIGNED  -> only rows with no account recorded
+#   "<number>"  -> one specific account's own rows
+UNASSIGNED = "__unassigned__"
+
+
+def _account_clause(account, column="account"):
+    """SQL fragment (+ params) restricting a query to `account` - see the
+    None/UNASSIGNED/number convention above. Meant to be appended after
+    an existing WHERE condition (it starts with " AND ")."""
+    if account is None:
+        return "", ()
+    if account == UNASSIGNED:
+        return f" AND {column} IS NULL", ()
+    return f" AND {column} = %s", (account,)
+
+
+def account_for_trade(trade):
+    """The `account` argument that selects exactly this trade's own
+    account (see the convention above) - for looking up that account's
+    Jan 1 balance when computing a trade's % of account."""
+    return trade.get("account") or UNASSIGNED
+
+
+def get_accounts(conn):
+    """Every known account as [{"number", "name"}], by name."""
+    cur = conn.cursor()
+    cur.execute("SELECT account_number, name FROM accounts ORDER BY name, account_number")
+    return [{"number": r[0], "name": r[1]} for r in cur.fetchall()]
+
+
+def register_account(conn, number, name):
+    """Remembers an account seen in an import - the first name seen
+    sticks, so a rename on the Settings page survives later imports."""
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO accounts (account_number, name) VALUES (%s, %s) ON CONFLICT (account_number) DO NOTHING",
+        (number, name or number),
+    )
+    conn.commit()
+
+
+def rename_account(conn, number, name):
+    cur = conn.cursor()
+    cur.execute("UPDATE accounts SET name = %s WHERE account_number = %s", (name, number))
+    conn.commit()
+
+
+def has_unassigned_transactions(conn):
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM transactions WHERE account IS NULL LIMIT 1")
+    return cur.fetchone() is not None
+
+
+def get_account_choices(conn):
+    """The account selector's options as [(value, label)] - "All
+    accounts" first (value None), then each known account, then
+    "Unassigned" only while some transactions still have no account.
+    With no accounts known yet (no multi-account import so far) this is
+    just "All accounts", so the selector can be hidden entirely."""
+    choices = [(None, "All accounts")]
+    choices += [(a["number"], a["name"]) for a in get_accounts(conn)]
+    if has_unassigned_transactions(conn) and len(choices) > 1:
+        choices.append((UNASSIGNED, "Unassigned"))
+    return choices
+
+
+def _insert_transactions(conn, transactions, stats=None):
     """
     Adds any of these normalized transaction dicts ({"date", "symbol",
     "action", "price", "quantity", "source"} - see analyze_trades.load_
@@ -754,13 +890,23 @@ def _insert_transactions(conn, transactions):
     backstop on the batched insert, for the unlikely case something else
     wrote the same exact row between this function's read and write.
 
+    ACCOUNTS: each transaction dict may carry an "account" (the broker's
+    account number) or None for "unknown". Two rows are only the same
+    fill if their accounts agree - or either one is None, which matches
+    anything. That wildcard is what lets a re-import CLAIM old
+    unassigned rows: when an incoming row with a real account matches
+    an existing unassigned row, that row is updated to the account
+    instead of being skipped (counted in stats["adopted"] if a `stats`
+    dict is passed in). The same fill in two DIFFERENT accounts is
+    correctly kept as two rows.
+
     Returns how many new rows were actually added.
     """
     cur = conn.cursor()
-    cur.execute("SELECT date, symbol, action, price, quantity, source FROM transactions")
+    cur.execute("SELECT date, symbol, action, price, quantity, source, account, id FROM transactions")
     existing = [
         {"date": row[0], "symbol": row[1], "action": row[2], "price": row[3],
-         "quantity": row[4], "source": row[5]}
+         "quantity": row[4], "source": row[5], "account": row[6], "id": row[7]}
         for row in cur.fetchall()
     ]
 
@@ -775,6 +921,10 @@ def _insert_transactions(conn, transactions):
     def same_fill(t, e):
         t_date = as_date(t["date"])
         if as_date(e["date"]) != t_date or e["symbol"] != t["symbol"] or e["quantity"] != t["quantity"]:
+            return False
+        # Different known accounts are never the same fill (None =
+        # unknown, matches either) - see this function's ACCOUNTS note.
+        if t.get("account") is not None and e["account"] is not None and t["account"] != e["account"]:
             return False
 
         involves_snaptrade = "snaptrade" in (t["source"], e["source"])
@@ -833,7 +983,14 @@ def _insert_transactions(conn, transactions):
             # exact-match branch exists to protect (two real fills at
             # $31.96 and $31.98) differ by a whole 2 cents, which
             # survives rounding either way.
-            return round(e["price"], 2) == round(t["price"], 2)
+            #
+            # Also accept a difference of up to half a cent: rounding
+            # each side to cents separately can split a half-cent tie
+            # the wrong way (a legacy 55.095 rounds to 55.09 while the
+            # CSV's 55.10 stays 55.10 - confirmed for real, ACMR, which
+            # left a phantom duplicate open position). Two genuinely
+            # separate fills still differ by at least a whole cent.
+            return round(e["price"], 2) == round(t["price"], 2) or abs(e["price"] - t["price"]) <= 0.0051
 
         return abs(e["price"] - t["price"]) <= max(0.01, e["price"] * 0.002)
 
@@ -841,6 +998,7 @@ def _insert_transactions(conn, transactions):
         return any(same_fill(t, e) for e in others)
 
     to_insert = []
+    adoptions = []
     for t in transactions:
         # Checked against `existing` AND every row already accepted
         # earlier in THIS SAME batch - a CSV/sync response can itself
@@ -848,9 +1006,24 @@ def _insert_transactions(conn, transactions):
         # original per-row loop caught that too (each INSERT was
         # visible to the next row's SELECT within the same open,
         # not-yet-committed transaction).
-        if is_duplicate(t, existing) or is_duplicate(t, to_insert):
+        match = next((e for e in existing if same_fill(t, e)), None)
+        if match is not None:
+            # Already stored - but if the stored copy has no account yet
+            # and this one does, claim it for that account (once: the
+            # in-memory copy is updated so a later row can't re-claim it).
+            if match["account"] is None and t.get("account") is not None:
+                adoptions.append((t["account"], match["id"]))
+                match["account"] = t["account"]
+            continue
+        if is_duplicate(t, to_insert):
             continue
         to_insert.append(t)
+
+    if adoptions:
+        cur.executemany("UPDATE transactions SET account = %s WHERE id = %s", adoptions)
+        conn.commit()
+    if stats is not None:
+        stats["adopted"] = len(adoptions)
 
     if not to_insert:
         return 0
@@ -858,7 +1031,7 @@ def _insert_transactions(conn, transactions):
     inserted = execute_values(
         cur,
         """
-        INSERT INTO transactions (date, symbol, action, price, quantity, source)
+        INSERT INTO transactions (date, symbol, action, price, quantity, source, account)
         VALUES %s
         ON CONFLICT DO NOTHING
         RETURNING id
@@ -867,7 +1040,7 @@ def _insert_transactions(conn, transactions):
         # a TIMESTAMP now (see init_db()'s migration note) specifically
         # so a SnapTrade-sourced row's real execution time-of-day
         # survives being stored, not just its calendar date.
-        [(t["date"], t["symbol"], t["action"], t["price"], t["quantity"], t["source"])
+        [(t["date"], t["symbol"], t["action"], t["price"], t["quantity"], t["source"], t.get("account"))
          for t in to_insert],
         fetch=True,
     )
@@ -875,7 +1048,7 @@ def _insert_transactions(conn, transactions):
     return len(inserted)
 
 
-def import_transactions(conn, csv_path):
+def import_transactions(conn, csv_path, stats=None):
     """
     Reads every buy/sell (and short-sale) row out of the CSV and adds
     any that aren't already stored. Auto-detects whether the file is a
@@ -887,7 +1060,42 @@ def import_transactions(conn, csv_path):
     """
     source = detect_csv_source(csv_path)
     transactions = load_transactions_schwab(csv_path) if source == "schwab" else load_transactions(csv_path)
-    return _insert_transactions(conn, transactions)
+    deposits = load_deposits(csv_path) if source != "schwab" else []
+    if stats is not None:
+        stats["deposits"] = _insert_deposits_from_csv(conn, deposits)
+    # Remember every account this file mentions (Fidelity multi-account
+    # exports only - see load_transactions()).
+    for number, name in {(t["account"], t.get("account_name")) for t in transactions if t.get("account")}:
+        register_account(conn, number, name)
+    return _insert_transactions(conn, transactions, stats)
+
+
+def _insert_deposits_from_csv(conn, deposits):
+    """
+    Adds the wire/electronic transfers found in an export (see
+    analyze_trades.load_deposits()) to the deposits table, skipping any
+    that's already there for the same account, date and amount - so
+    re-importing overlapping files never double-counts a deposit.
+    Returns how many were added.
+    """
+    cur = conn.cursor()
+    cur.execute("SELECT deposit_date, amount, account FROM deposits")
+    existing = {(r[0], round(r[1], 2), r[2]) for r in cur.fetchall()}
+    added = 0
+    for d in deposits:
+        if d["account"]:
+            register_account(conn, d["account"], d["account_name"])
+        key = (d["date"], round(d["amount"], 2), d["account"])
+        if key in existing:
+            continue
+        cur.execute(
+            "INSERT INTO deposits (deposit_date, amount, account) VALUES (%s, %s, %s)",
+            (d["date"], d["amount"], d["account"]),
+        )
+        existing.add(key)
+        added += 1
+    conn.commit()
+    return added
 
 
 def import_transactions_snaptrade(conn, start_date, end_date):
@@ -903,6 +1111,14 @@ def import_transactions_snaptrade(conn, start_date, end_date):
     Returns how many new rows were actually added.
     """
     transactions = snaptrade_sync.fetch_activities(start_date, end_date)
+    # SnapTrade reports its own account number; only trust it if it
+    # matches an account an import already registered (the wildcard
+    # None otherwise - see _insert_transactions()'s ACCOUNTS note - so a
+    # differently-formatted number can't create phantom duplicates).
+    known = {a["number"] for a in get_accounts(conn)}
+    for t in transactions:
+        if t.get("account") not in known:
+            t["account"] = None
     return _insert_transactions(conn, transactions)
 
 
@@ -1003,6 +1219,24 @@ def clear_trade_cache():
     get_open_positions.clear()
 
 
+def _load_transactions_by_account(cur, account=None):
+    """Every transaction (restricted to `account` - see the None/
+    UNASSIGNED/number convention near get_accounts()), grouped as
+    {account_number_or_None: [transaction dicts]} so each account can be
+    matched on its own."""
+    clause, params = _account_clause(account)
+    cur.execute(
+        f"SELECT date, symbol, action, price, quantity, account FROM transactions WHERE TRUE{clause}",
+        params,
+    )
+    grouped = {}
+    for row in cur.fetchall():
+        grouped.setdefault(row[5], []).append({
+            "date": row[0], "symbol": row[1], "action": row[2], "price": row[3], "quantity": row[4],
+        })
+    return grouped
+
+
 def rebuild_trades(conn):
     """
     Recalculates the entire `trades` table from scratch, using every
@@ -1023,31 +1257,26 @@ def rebuild_trades(conn):
     Returns how many trades were computed.
     """
     cur = conn.cursor()
-    cur.execute("SELECT date, symbol, action, price, quantity FROM transactions")
     # `date` is a real datetime already (see init_db()'s DATE->TIMESTAMP
     # migration note) - no need to reconstruct one the way this used to
     # when the column only ever held a plain date, since that would
     # silently flatten a SnapTrade-sourced row's real time-of-day back
     # to midnight right before match_trades_lifo() ever saw it.
-    transactions = [
-        {
-            "date": row[0],
-            "symbol": row[1],
-            "action": row[2],
-            "price": row[3],
-            "quantity": row[4],
-        }
-        for row in cur.fetchall()
-    ]
-
-    closed_trades, _open_long_lots, _open_short_lots = match_trades_lifo(transactions)
-    stock_trades = [t for t in closed_trades if not t["symbol"].strip().startswith("-")]
+    stock_trades = []
+    for account, transactions in _load_transactions_by_account(cur).items():
+        # Matched separately within each account - a buy in one account
+        # must never be consumed by a sell in another.
+        closed_trades, _open_long_lots, _open_short_lots = match_trades_lifo(transactions)
+        for t in closed_trades:
+            if not t["symbol"].strip().startswith("-"):
+                t["account"] = account
+                stock_trades.append(t)
 
     cur.execute("DELETE FROM trades")
     cur.executemany(
         """
-        INSERT INTO trades (symbol, entry_date, buy_price, quantity, exit_date, sell_price, profit_loss, direction)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO trades (symbol, entry_date, buy_price, quantity, exit_date, sell_price, profit_loss, direction, account)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """,
         [
             (
@@ -1059,6 +1288,7 @@ def rebuild_trades(conn):
                 t["sell_price"],
                 t["profit_loss"],
                 t["direction"],
+                t["account"],
             )
             for t in stock_trades
         ],
@@ -1070,7 +1300,7 @@ def rebuild_trades(conn):
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def get_trades(_conn):
+def get_trades(_conn, account=None):
     """
     Returns every completed trade from the `trades` table, oldest
     first, in the same dictionary shape build_trade_tracker.py and
@@ -1083,14 +1313,18 @@ def get_trades(_conn):
     tells st.cache_data to key the cache on nothing but the function's
     other arguments - there are none here, so effectively one shared
     cache entry for the whole process - rather than trying to hash the
-    connection object itself, which it can't do anyway.
+    connection object itself, which it can't do anyway. `account`, though,
+    IS part of the cache key (None = every account, UNASSIGNED, or one
+    account number - see get_accounts()), so each view caches separately.
     """
+    clause, params = _account_clause(account)
     cur = _conn.cursor()
-    cur.execute("""
-        SELECT symbol, entry_date, buy_price, quantity, exit_date, sell_price, profit_loss, direction
+    cur.execute(f"""
+        SELECT symbol, entry_date, buy_price, quantity, exit_date, sell_price, profit_loss, direction, account
         FROM trades
+        WHERE TRUE{clause}
         ORDER BY entry_date
-    """)
+    """, params)
 
     # entry_date/exit_date come back as real datetimes already (see
     # init_db()'s DATE->TIMESTAMP migration note) - reconstructing them
@@ -1107,12 +1341,13 @@ def get_trades(_conn):
             "sell_price": row[5],
             "profit_loss": row[6],
             "direction": row[7],
+            "account": row[8],
         }
         for row in cur.fetchall()
     ]
 
 
-def _aggregate_open_lots(open_lots, direction):
+def _aggregate_open_lots(open_lots, direction, account=None):
     """
     Turns match_trades_lifo()'s per-symbol list of still-open lots into
     one row per symbol (total shares, a quantity-weighted average
@@ -1133,12 +1368,38 @@ def _aggregate_open_lots(open_lots, direction):
             "quantity": total_quantity,
             "avg_price": total_cost / total_quantity,
             "entry_date": min(lot["date"] for lot in lots),
+            "account": account,
         })
     return positions
 
 
+def _merge_positions_across_accounts(positions):
+    """
+    The "All accounts" view: the same symbol/direction held in several
+    accounts becomes ONE row (shares summed, quantity-weighted average
+    price, earliest entry date) - so everything downstream that keys on
+    a symbol (stops, the Shortlist queue, ...) keeps working unchanged.
+    `account` on a merged row is the single account if only one holds
+    it, else None.
+    """
+    merged = {}
+    for p in positions:
+        key = (p["symbol"], p["direction"])
+        if key not in merged:
+            merged[key] = dict(p)
+            continue
+        m = merged[key]
+        total_quantity = m["quantity"] + p["quantity"]
+        m["avg_price"] = (m["avg_price"] * m["quantity"] + p["avg_price"] * p["quantity"]) / total_quantity
+        m["quantity"] = total_quantity
+        m["entry_date"] = min(m["entry_date"], p["entry_date"])
+        if m["account"] != p["account"]:
+            m["account"] = None
+    return list(merged.values())
+
+
 @st.cache_data(ttl=60, show_spinner=False)
-def get_open_positions(_conn):
+def get_open_positions(_conn, account=None):
     """
     Returns currently-open positions (bought but not yet sold, or sold
     short but not yet covered), computed fresh from match_trades_lifo()'s
@@ -1154,29 +1415,25 @@ def get_open_positions(_conn):
 
     Cached (see get_trades() above for why, and clear_trade_cache()
     below for how it's kept fresh after an import).
+
+    `account` (None = all accounts combined, UNASSIGNED, or one account
+    number) - each account is matched on its own; the combined view then
+    merges a symbol held in several accounts into one row (see
+    _merge_positions_across_accounts()).
     """
-    cur = _conn.cursor()
-    cur.execute("SELECT date, symbol, action, price, quantity FROM transactions")
     # `date` is a real datetime already - see rebuild_trades()'s own
     # note on this same pattern for why no datetime.combine() is needed
     # (or wanted) here anymore.
-    transactions = [
-        {
-            "date": row[0],
-            "symbol": row[1],
-            "action": row[2],
-            "price": row[3],
-            "quantity": row[4],
-        }
-        for row in cur.fetchall()
-    ]
+    positions = []
+    for acct, transactions in _load_transactions_by_account(_conn.cursor(), account).items():
+        _closed_trades, open_long_lots, open_short_lots = match_trades_lifo(transactions)
+        positions += (
+            _aggregate_open_lots(open_long_lots, "LONG", acct)
+            + _aggregate_open_lots(open_short_lots, "SHORT", acct)
+        )
 
-    _closed_trades, open_long_lots, open_short_lots = match_trades_lifo(transactions)
-
-    positions = (
-        _aggregate_open_lots(open_long_lots, "LONG")
-        + _aggregate_open_lots(open_short_lots, "SHORT")
-    )
+    if account is None:
+        positions = _merge_positions_across_accounts(positions)
 
     return sorted(positions, key=lambda p: p["entry_date"])
 
@@ -2412,59 +2669,74 @@ def clear_nav_labels(conn):
     conn.commit()
 
 
-def get_account_value(conn):
+def get_account_value(conn, account=None):
     """Returns the saved Jan 1 (start-of-year) account value baseline,
     or None if it hasn't been set yet. This is a fixed starting point,
     not today's value - the Dashboard adds this year's deposits and
     profit/loss on top of it to arrive at today's calculated account
     value, so this number only needs to be set once a year instead of
-    kept manually up to date."""
+    kept manually up to date.
+
+    One baseline per account: `account` is one account number,
+    UNASSIGNED (the old single balance lives here until you move it),
+    or None for ALL accounts - the sum of every saved baseline."""
     cur = conn.cursor()
-    cur.execute("SELECT account_value FROM account_settings WHERE id = 1")
+    if account is None:
+        cur.execute("SELECT SUM(jan1_balance) FROM account_balances")
+    else:
+        cur.execute(
+            "SELECT jan1_balance FROM account_balances WHERE account = %s",
+            ("" if account == UNASSIGNED else account,),
+        )
     row = cur.fetchone()
     return row[0] if row else None
 
 
-def set_account_value(conn, account_value):
-    """Saves (or updates) the Jan 1 account value baseline - overwriting
-    whatever was saved before. Meant to be set once at the start of each
-    year, not adjusted day to day (deposits and trading P/L already
-    account for everything since then). `updated_at` is computed in
-    Python (US Eastern - see timeutil.py) rather than SQL's NOW(),
-    which reflects the database server's own timezone (UTC on Neon),
-    not yours."""
+def set_account_value(conn, account_value, account):
+    """Saves (or updates) one account's Jan 1 balance baseline -
+    overwriting whatever was saved before. Meant to be set once at the
+    start of each year, not adjusted day to day (deposits and trading
+    P/L already account for everything since then). `account` must be a
+    specific account number or UNASSIGNED, never None. `updated_at` is
+    computed in Python (US Eastern - see timeutil.py) rather than SQL's
+    NOW(), which reflects the database server's own timezone (UTC on
+    Neon), not yours."""
+    assert account is not None, "set_account_value needs a specific account"
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT INTO account_settings (id, account_value, updated_at)
-        VALUES (1, %s, %s)
-        ON CONFLICT (id) DO UPDATE SET
-            account_value = EXCLUDED.account_value,
+        INSERT INTO account_balances (account, jan1_balance, updated_at)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (account) DO UPDATE SET
+            jan1_balance = EXCLUDED.jan1_balance,
             updated_at = EXCLUDED.updated_at
         """,
-        (account_value, timeutil.now_eastern()),
+        ("" if account == UNASSIGNED else account, account_value, timeutil.now_eastern()),
     )
     conn.commit()
 
 
-def get_deposits(conn):
-    """Returns every deposit/withdrawal ever recorded, oldest first, as
+def get_deposits(conn, account=None):
+    """Returns every deposit/withdrawal ever recorded (for `account` -
+    None means all accounts), oldest first, as
     {"id", "deposit_date", "amount"} dictionaries. A withdrawal is
     stored as a negative amount - summing this column is all the
     calculated account value needs, so there's no separate table or
     sign-flipping logic for the two."""
+    clause, params = _account_clause(account)
     cur = conn.cursor()
-    cur.execute("SELECT id, deposit_date, amount FROM deposits ORDER BY deposit_date")
+    cur.execute(f"SELECT id, deposit_date, amount FROM deposits WHERE TRUE{clause} ORDER BY deposit_date", params)
     return [{"id": row[0], "deposit_date": row[1], "amount": row[2]} for row in cur.fetchall()]
 
 
-def add_deposit(conn, deposit_date, amount):
+def add_deposit(conn, deposit_date, amount, account):
     """Records one deposit (positive amount) or withdrawal (negative
-    amount) for the trading account."""
+    amount) into one account (a number, or UNASSIGNED)."""
+    assert account is not None, "add_deposit needs a specific account"
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO deposits (deposit_date, amount) VALUES (%s, %s)",
-        (deposit_date, amount),
+        "INSERT INTO deposits (deposit_date, amount, account) VALUES (%s, %s, %s)",
+        (deposit_date, amount, None if account == UNASSIGNED else account),
     )
     conn.commit()
 
@@ -2476,13 +2748,18 @@ def delete_deposit(conn, deposit_id):
     conn.commit()
 
 
-def get_realized_pl_since(conn, since_date):
+def get_realized_pl_since(conn, since_date, account=None):
     """Total profit/loss of every closed trade exited on or after
-    since_date - used to build up this year's calculated account value
-    on top of the Jan 1 baseline, without double-counting trades from
-    before then (those are already baked into that baseline)."""
+    since_date (in `account` - None means all) - used to build up this
+    year's calculated account value on top of the Jan 1 baseline,
+    without double-counting trades from before then (those are already
+    baked into that baseline)."""
+    clause, params = _account_clause(account)
     cur = conn.cursor()
-    cur.execute("SELECT COALESCE(SUM(profit_loss), 0) FROM trades WHERE exit_date >= %s", (since_date,))
+    cur.execute(
+        f"SELECT COALESCE(SUM(profit_loss), 0) FROM trades WHERE exit_date >= %s{clause}",
+        (since_date, *params),
+    )
     return cur.fetchone()[0]
 
 
@@ -2569,6 +2846,29 @@ def _save_position_sizing_state(conn, current_tier_index, last_down_window_key, 
             updated_at = EXCLUDED.updated_at
         """,
         (current_tier_index, last_down_window_key, last_up_window_key, timeutil.now_eastern()),
+    )
+    conn.commit()
+
+
+def get_monthly_reminder_sent(conn, month_start):
+    """When the review reminder email for the month starting
+    `month_start` was sent, or None if it hasn't been."""
+    cur = conn.cursor()
+    cur.execute("SELECT sent_at FROM monthly_review_reminders WHERE month_start = %s", (month_start,))
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def mark_monthly_reminder_sent(conn, month_start):
+    """Records that the review reminder for the month starting
+    `month_start` went out (Eastern time, same as every other stamp here)."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO monthly_review_reminders (month_start, sent_at) VALUES (%s, %s)
+        ON CONFLICT (month_start) DO UPDATE SET sent_at = EXCLUDED.sent_at
+        """,
+        (month_start, timeutil.now_eastern()),
     )
     conn.commit()
 

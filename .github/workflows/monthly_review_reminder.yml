@@ -1,0 +1,51 @@
+name: Monthly Review Reminder
+
+# Runs monthly_review.py on the 1st of every month, which emails a
+# reminder to review last month's closed trades - but only if last month
+# had trades that aren't journaled yet, and only once per month (the
+# script records what it sent), so re-running this by hand is harmless.
+#
+# "0 14 1 * *" is 14:00 UTC on the 1st = 9am Eastern Standard Time /
+# 10am Eastern Daylight Time. The script itself works out "last month"
+# from the US Eastern date, so a late-running scheduler (GitHub's
+# scheduled triggers can run hours late) still targets the right month.
+#
+# workflow_dispatch lets you trigger this manually from the Actions tab,
+# e.g. to test it.
+on:
+  schedule:
+    - cron: "0 14 1 * *"
+  workflow_dispatch: {}
+
+jobs:
+  remind:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Send review reminder
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          REPORT_EMAIL_FROM: ${{ secrets.REPORT_EMAIL_FROM }}
+          REPORT_EMAIL_APP_PASSWORD: ${{ secrets.REPORT_EMAIL_APP_PASSWORD }}
+          REPORT_EMAIL_RECIPIENTS: ${{ secrets.REPORT_EMAIL_RECIPIENTS }}
+        run: python monthly_review.py
+
+      # Same script pointed at the friend's own database and email via
+      # their own repository secrets (prefixed FRIEND_). continue-on-
+      # error so a problem here never fails the run above.
+      - name: Send review reminder (friend)
+        continue-on-error: true
+        env:
+          DATABASE_URL: ${{ secrets.FRIEND_DATABASE_URL }}
+          REPORT_EMAIL_FROM: ${{ secrets.FRIEND_REPORT_EMAIL_FROM }}
+          REPORT_EMAIL_APP_PASSWORD: ${{ secrets.FRIEND_REPORT_EMAIL_APP_PASSWORD }}
+          REPORT_EMAIL_RECIPIENTS: ${{ secrets.FRIEND_REPORT_EMAIL_RECIPIENTS }}
+        run: python monthly_review.py
