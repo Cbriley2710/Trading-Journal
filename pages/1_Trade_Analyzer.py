@@ -45,7 +45,6 @@ import database
 import nav
 import review_browser
 import session_keys as sk
-import monthly_review
 import twitter_post
 import ui
 from analyze_trades import is_trade_journaled, review_session_summary, trade_label, trade_stats
@@ -953,31 +952,6 @@ def render_review_selection(conn, trades):
         st.rerun()
 
 
-def render_monthly_review_banner(trades, reviewed_exact, reviewed_loose):
-    """
-    A reminder, shown above the trade table, to review last month's
-    trades - only while last month still has closed trades with no
-    saved review (see monthly_review.py; the same check drives the
-    reminder email sent on the 1st). The button jumps straight into the
-    Review Session's selection screen with that month's date range
-    already filled in and every trade checked.
-    """
-    pending = monthly_review.pending_for_previous_month(trades, reviewed_exact, reviewed_loose)
-    if pending is None:
-        return
-    month_start, month_trades, unreviewed = pending
-    message_col, button_col = st.columns([4, 1])
-    message_col.warning(
-        f"Time to review {month_start:%B %Y}: {len(unreviewed)} of its {len(month_trades)} closed "
-        "trade(s) haven't been journaled yet.")
-    if button_col.button(f"Review {month_start:%B}", type="primary", key="monthly_review_banner_btn"):
-        exit_dates = [t["date"].date() for t in month_trades]
-        st.session_state[sk.REVIEW_DATE_RANGE] = (min(exit_dates), max(exit_dates))
-        st.session_state[sk.REVIEW_PRECHECK] = True
-        st.session_state[sk.REVIEW_SELECTING] = True
-        st.rerun()
-
-
 def render_trade_table(conn, trades, reviewed_exact, reviewed_loose):
     """
     The trade picker: one row per closed trade with its stats, P/L-type
@@ -1120,7 +1094,6 @@ else:
     st.divider()
 
     reviewed_exact, reviewed_loose = database.get_reviewed_trade_keys(conn)
-    render_monthly_review_banner(trades, reviewed_exact, reviewed_loose)
 
     trades_sorted = sorted(trades, key=lambda t: t["date"], reverse=True)
 

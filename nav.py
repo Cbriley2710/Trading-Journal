@@ -20,6 +20,7 @@ import base64
 import streamlit as st
 
 import database
+import monthly_review
 import session_keys as sk
 
 # (stable page id, default label shown on its button, file path Streamlit
@@ -152,6 +153,51 @@ def _render_account_selector():
         label_visibility="collapsed", key="account_picker")
 
 
+@st.cache_data(ttl=30, show_spinner=False)
+def _load_monthly_review_pending():
+    """
+    Cached check behind the monthly review banner (see monthly_review.py):
+    (month_start, trade_count, unreviewed_count, first_exit, last_exit)
+    for last month's closed trades across ALL accounts, or None when
+    there's nothing to review. Cached for 30s since every page asks on
+    every rerun.
+    """
+    conn = database.get_connection()
+    reviewed_exact, reviewed_loose = database.get_reviewed_trade_keys(conn)
+    pending = monthly_review.pending_for_previous_month(database.get_trades(conn), reviewed_exact, reviewed_loose)
+    if pending is None:
+        return None
+    month_start, month_trades, unreviewed = pending
+    exit_dates = [t["date"].date() for t in month_trades]
+    return month_start, len(month_trades), len(unreviewed), min(exit_dates), max(exit_dates)
+
+
+def _render_monthly_review_banner():
+    """
+    A reminder, at the top of EVERY page, to review last month's trades -
+    shown while last month still has closed trades with no saved review
+    (the same check that drives the reminder email sent on the 1st).
+    Its button opens the Trade Analyzer's Review Session selection screen
+    with that month's date range filled in and every trade checked.
+    Hidden while a Review Session is already underway.
+    """
+    if st.session_state.get(sk.REVIEW_SESSION) is not None or st.session_state.get(sk.REVIEW_SELECTING):
+        return
+    pending = _load_monthly_review_pending()
+    if pending is None:
+        return
+    month_start, trade_count, unreviewed_count, first_exit, last_exit = pending
+    message_col, button_col = st.columns([4, 1])
+    message_col.warning(
+        f"Time to review {month_start:%B %Y}: {unreviewed_count} of its {trade_count} closed "
+        "trade(s) haven't been journaled yet.")
+    if button_col.button(f"Review {month_start:%B}", type="primary", key="monthly_review_banner_btn"):
+        st.session_state[sk.REVIEW_DATE_RANGE] = (first_exit, last_exit)
+        st.session_state[sk.REVIEW_PRECHECK] = True
+        st.session_state[sk.REVIEW_SELECTING] = True
+        st.switch_page("pages/1_Trade_Analyzer.py")
+
+
 def render_top_nav(current_page):
     """
     Call this once near the top of every page, right after the password
@@ -223,4 +269,5 @@ def render_top_nav(current_page):
                 st.switch_page(path)
 
     _render_account_selector()
+    _render_monthly_review_banner()
     st.divider()
