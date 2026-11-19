@@ -425,6 +425,7 @@ def _render_review_intro(conn, session):
     the first trade - "predictions_notes" being NULL is what signals
     this hasn't been written yet (see database.get_review_report()),
     so resuming an in-progress session never asks again."""
+    _render_previous_review(conn, session["report_id"])
     st.subheader("Before You Begin")
     with st.form(key="review_intro_form", clear_on_submit=True, border=False):
         notes = st.text_area(
@@ -436,7 +437,39 @@ def _render_review_intro(conn, session):
             st.rerun()
 
 
-def _render_review_summary(reviews):
+def _render_previous_review(conn, current_report_id):
+    """
+    Shown above the opening journal box: how the PREVIOUS Review Session
+    went - what you wrote before you began (your goals/predictions), its
+    Session Summary numbers, and your closing reflections - so this
+    session starts from what you said last time. "Previous" is the most
+    recent other report that actually has reviewed trades; nothing is
+    shown if there isn't one yet.
+    """
+    previous = next(
+        (r for r in database.get_review_reports(conn) if r["id"] != current_report_id and r["trade_count"] > 0),
+        None)
+    if previous is None:
+        return
+    report = database.get_review_report(conn, previous["id"])
+    if report["range_start"] and report["range_end"]:
+        range_text = f"{report['range_start']:%m/%d/%Y} to {report['range_end']:%m/%d/%Y}"
+    else:
+        range_text = "all trades"
+    st.subheader(f"Your Last Review Session - {report['created_at']:%B %d, %Y}")
+    st.caption(f"Trades closed {range_text} - {len(report['reviews'])} reviewed.")
+
+    st.markdown("**What you wrote before you began**")
+    st.write(report["predictions_notes"] or "_Nothing written._")
+
+    _render_review_summary(report["reviews"])
+
+    st.markdown("**Your reflections afterward**")
+    st.write(report["reflections_notes"] or "_No reflections were written for that session._")
+    st.divider()
+
+
+def _render_review_summary(reviews, caption=None):
     """Renders analyze_trades.review_session_summary()'s numbers -
     shown once, on the Reflections screen, so the session's closing
     journal entry can actually be written with the real numbers in
@@ -446,6 +479,8 @@ def _render_review_summary(reviews):
     if summary is None:
         return
     st.subheader("Session Summary")
+    if caption:
+        st.caption(caption)
 
     win_color = charting.win_loss_color(True)
     loss_color = charting.win_loss_color(False)
