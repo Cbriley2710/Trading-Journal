@@ -801,6 +801,73 @@ def review_session_summary(reviews):
     }
 
 
+def review_session_stats(reviews, account_values, portfolio_value=None):
+    """
+    Every number in the rolling "last 6 sessions" table on the Review
+    Session's final page, for ONE session's reviewed trades.
+    `reviews` is the same list review_session_summary() takes;
+    `account_values` is a list the same length - each trade's own
+    account's Jan 1 balance (or None if unknown), which the average
+    position size divides by. `portfolio_value` is the combined Jan 1
+    balance of ALL accounts, which the session's total gain/loss
+    divides by. Returns None for an empty session.
+
+    Includes everything review_session_summary() already works out
+    (batting average, total P/L, average win/loss in $ and %), plus:
+      - avg_position_pct: average starting position size, as a % of the
+        account (cost of the entry / the account's Jan 1 balance)
+      - equity_change_pct: the session's total P/L as a % of the
+        combined balance of all accounts (NOT each trade's own account
+        percentages added together - those have different bases, so
+        their sum isn't a meaningful number)
+      - profit_factor: total won / total lost - above 1 means the
+        winners outweighed the losers (None with no losses)
+      - largest_loss_dollar / largest_loss_pct: the single worst trade's
+        P/L, and that loss as a % of ITS OWN account's Jan 1 balance
+        (None if the session had no losses / that account has no balance)
+      - expectancy: average P/L per trade
+      - avg_days_win / avg_days_loss: how long winners vs losers were
+        held (a common tell - cutting winners short, holding losers)
+    Any figure that can't be worked out (no balance, no wins, ...) is
+    None, never zero.
+    """
+    summary = review_session_summary(reviews)
+    if summary is None:
+        return None
+
+    positions = []
+    days_win, days_loss = [], []
+    worst = None  # (profit_loss, % of its account or None) of the biggest losing trade
+    for review, balance in zip(reviews, account_values):
+        stats = trade_stats(
+            review["direction"], review["buy_price"], review["sell_price"], review["quantity"],
+            review["profit_loss"], review["entry_date"], review["exit_date"], account_value=balance)
+        if stats["pct_of_account"] is not None:
+            positions.append(stats["pct_of_account"])
+        (days_win if review["profit_loss"] >= 0 else days_loss).append(stats["days_held"])
+        if review["profit_loss"] < 0 and (worst is None or review["profit_loss"] < worst[0]):
+            worst = (review["profit_loss"], stats["equity_contribution"])
+
+    def avg(values):
+        return sum(values) / len(values) if values else None
+
+    total_win, total_loss = summary["total_win_dollar"], summary["total_loss_dollar"]
+    return {
+        "trades": summary["total"],
+        "batting_avg": summary["batting_avg"],
+        "total_pl": summary["total_pl"],
+        "avg_win_dollar": summary["avg_win_dollar"], "avg_loss_dollar": summary["avg_loss_dollar"],
+        "avg_win_pct": summary["avg_win_pct"], "avg_loss_pct": summary["avg_loss_pct"],
+        "avg_position_pct": avg(positions),
+        "equity_change_pct": summary["total_pl"] / portfolio_value * 100 if portfolio_value else None,
+        "profit_factor": (total_win / abs(total_loss)) if total_win is not None and total_loss else None,
+        "largest_loss_dollar": worst[0] if worst else None,
+        "largest_loss_pct": worst[1] if worst else None,
+        "expectancy": summary["total_pl"] / summary["total"],
+        "avg_days_win": avg(days_win), "avg_days_loss": avg(days_loss),
+    }
+
+
 def build_report(closed_trades, open_long_lots, open_short_lots):
     """
     Takes the list of closed (matched) trades and prints a summary

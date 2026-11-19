@@ -47,7 +47,7 @@ import review_browser
 import session_keys as sk
 import twitter_post
 import ui
-from analyze_trades import is_trade_journaled, review_session_summary, trade_label, trade_stats
+from analyze_trades import is_trade_journaled, review_session_stats, review_session_summary, trade_label, trade_stats
 
 st.set_page_config(page_title="Trade Analyzer", page_icon="📈", layout="wide", initial_sidebar_state="collapsed")
 
@@ -533,6 +533,118 @@ def _render_review_summary(reviews, caption=None):
     st.divider()
 
 
+# The rows of the rolling stats table: (label, review_session_stats() key,
+# how to format a value, whether to color it green/red by sign).
+_ROLLING_STAT_ROWS = [
+    ("Trades Reviewed", "trades", "{:,.0f}", False),
+    ("Batting Average", "batting_avg", "{:.1f}%", False),
+    ("Total P/L", "total_pl", "{:+,.2f}", True),
+    ("Equity Gain/Loss (% of account)", "equity_change_pct", "{:+,.2f}%", True),
+    ("Avg Starting Position (% of account)", "avg_position_pct", "{:,.2f}%", False),
+    ("Avg Win $", "avg_win_dollar", "{:+,.2f}", True),
+    ("Avg Loss $", "avg_loss_dollar", "{:+,.2f}", True),
+    ("Avg Win %", "avg_win_pct", "{:+,.2f}%", True),
+    ("Avg Loss %", "avg_loss_pct", "{:+,.2f}%", True),
+    ("Largest Single Loss $", "largest_loss_dollar", "{:+,.2f}", True),
+    ("Largest Single Loss (% of its account)", "largest_loss_pct", "{:+,.2f}%", True),
+    ("Profit Factor (won / lost)", "profit_factor", "{:,.2f}", False),
+    ("Expectancy (avg P/L per trade)", "expectancy", "{:+,.2f}", True),
+    ("Avg Days Held - Winners", "avg_days_win", "{:,.1f}", False),
+    ("Avg Days Held - Losers", "avg_days_loss", "{:,.1f}", False),
+]
+
+
+def _render_rolling_stats(conn, current_report_id, sessions=6):
+    """
+    The last `sessions` Review Sessions side by side (this one included),
+    oldest on the left: each column is a session's trade date range,
+    each row a stat from analyze_trades.review_session_stats() - so you
+    can see whether win rate, position size, holding time and so on are
+    drifting from one session to the next.
+
+    A review doesn't record which brokerage account its trade was in, so
+    each one is matched back to its trade (by the same natural key
+    everything else uses) to find the account, and "% of account" divides
+    by THAT account's Jan 1 balance (a trade in an account with no balance
+    saved yet is left out of the position-size average). The equity
+    gain/loss row divides each session's total P/L by the combined Jan 1
+    balance of all your accounts. Until any account has its own balance,
+    everything falls back to the single all-accounts figure.
+    """
+    reports = [r for r in database.get_review_reports(conn) if r["trade_count"] > 0][:sessions]
+    if not reports:
+        return
+    reports = list(reversed(reports))  # oldest first, so reading left to right goes forward in time
+    reviews_by_report = database.get_reviews_for_reports(conn, [r["id"] for r in reports])
+
+    account_by_trade = {
+        (t["symbol"], t["entry_date"].date(), t["date"].date(), t["direction"],
+         round(float(t["quantity"]), 6), round(float(t["buy_price"]), 6), round(float(t["sell_price"]), 6)): t["account"]
+        for t in database.get_trades(conn)
+    }
+    balances = {}
+    account_balances = {a["number"]: database.get_account_value(conn, a["number"]) for a in database.get_accounts(conn)}
+    account_balances = {number: value for number, value in account_balances.items() if value}
+    # Per-account balances exist -> use only those (the old single
+    # "Unassigned" balance would double count them); none yet -> the
+    # all-accounts figure is all there is.
+    portfolio_value = sum(account_balances.values()) if account_balances else database.get_account_value(conn)
+
+    def balance_for(review):
+        key = (review["symbol"], review["entry_date"], review["exit_date"], review["direction"],
+               round(float(review["quantity"]), 6), round(float(review["buy_price"]), 6),
+               round(float(review["sell_price"]), 6))
+        account = account_by_trade.get(key) or database.UNASSIGNED
+        if account not in balances:
+            own = database.get_account_value(conn, account)
+            balances[account] = own if own else (None if account_balances else portfolio_value)
+        return balances[account]
+
+    columns, stats_by_column = [], {}
+    for report in reports:
+        reviews = reviews_by_report.get(report["id"], [])
+        stats = review_session_stats(reviews, [balance_for(r) for r in reviews], portfolio_value)
+        if stats is None:
+            continue
+        if report["range_start"] and report["range_end"]:
+            label = f"{report['range_start']:%m/%d/%y} - {report['range_end']:%m/%d/%y}"
+        else:
+            label = f"All trades ({report['created_at']:%m/%d/%y})"
+        if report["id"] == current_report_id:
+            label += " (this session)"
+        while label in stats_by_column:  # two sessions over the same range
+            label += f" #{report['id']}"
+        columns.append(label)
+        stats_by_column[label] = stats
+
+    if not columns:
+        return
+    st.subheader(f"Last {len(columns)} Review Session(s)")
+    st.caption(
+        "Each column is a session's trade date range. Equity Gain/Loss is the session's total P/L over "
+        "the combined Jan 1 balance of your accounts; Avg Starting Position uses each trade's own "
+        "account balance (set on the Dashboard's Account Settings).")
+    table = pd.DataFrame(
+        {col: [stats_by_column[col][key] for _label, key, _fmt, _color in _ROLLING_STAT_ROWS] for col in columns},
+        index=[label for label, _key, _fmt, _color in _ROLLING_STAT_ROWS], dtype=object)
+
+    win_color, loss_color = charting.win_loss_color(True), charting.win_loss_color(False)
+
+    def color_by_sign(value):
+        if value is None or pd.isna(value):
+            return ""
+        return f"color: {win_color if value >= 0 else loss_color}; font-weight: 600"
+
+    styled = table.style
+    for label, _key, fmt, colored in _ROLLING_STAT_ROWS:
+        row = pd.IndexSlice[[label], :]
+        styled = styled.format(fmt, subset=row, na_rep="—")
+        if colored:
+            styled = styled.map(color_by_sign, subset=row)
+    st.dataframe(styled, width="stretch")
+    st.divider()
+
+
 def _render_review_outro(conn, session, trade_count, reviews):
     """The Review Session's closing journal entry, shown once after the
     last trade (only when at least one trade was actually saved - see
@@ -540,6 +652,7 @@ def _render_review_outro(conn, session, trade_count, reviews):
     above. `reviews` (report["reviews"]) drives the Session Summary
     shown just above the Reflections box - see _render_review_summary()."""
     _render_review_summary(reviews)
+    _render_rolling_stats(conn, session["report_id"])
     st.subheader("Reflections")
     with st.form(key="review_outro_form", clear_on_submit=True, border=False):
         notes = st.text_area("Reflections", height=100, key="review_outro_notes")

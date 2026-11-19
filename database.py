@@ -1975,6 +1975,38 @@ def get_review_reports(conn):
     ]
 
 
+def get_reviews_for_reports(conn, report_ids):
+    """
+    The reviewed trades (NO chart images - those make get_review_report()
+    heavy) of several Trade Review Reports at once, as
+    {report_id: [{"symbol", "entry_date", "exit_date", "direction",
+    "buy_price", "sell_price", "quantity", "profit_loss"}, ...]} - for
+    the rolling stats table. Reviews saved before the price/quantity
+    columns existed (those are NULL) are left out, since nothing about
+    them can be computed.
+    """
+    if not report_ids:
+        return {}
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT report_id, symbol, entry_date, exit_date, direction, buy_price, sell_price, quantity, profit_loss
+        FROM trade_reviews
+        WHERE report_id = ANY(%s) AND buy_price IS NOT NULL AND sell_price IS NOT NULL
+              AND quantity IS NOT NULL AND profit_loss IS NOT NULL
+        ORDER BY reviewed_at
+        """,
+        (list(report_ids),),
+    )
+    grouped = {report_id: [] for report_id in report_ids}
+    for r in cur.fetchall():
+        grouped[r[0]].append({
+            "symbol": r[1], "entry_date": r[2], "exit_date": r[3], "direction": r[4],
+            "buy_price": r[5], "sell_price": r[6], "quantity": r[7], "profit_loss": r[8],
+        })
+    return grouped
+
+
 def get_review_report(conn, report_id):
     """
     Returns one Trade Review Report's full detail:
